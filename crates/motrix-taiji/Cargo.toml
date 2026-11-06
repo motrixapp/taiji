@@ -1,0 +1,73 @@
+[package]
+name = "motrix-taiji"
+description = "Binary entry point (bin name: taiji)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "taiji"
+path = "src/main.rs"
+
+[dependencies]
+taiji-bt = { path = "../taiji-bt" }
+taiji-core = { path = "../taiji-core" }
+# Windows long-path verbatim conversion before the cli-side fs choke point
+# (metalink reads from disk / db lock-store opens / import reports written
+# to disk) hands paths to the OS — taiji-io is an existing layered crate in
+# the workspace (core already depends on it); the path dependency makes
+# zero lock changes.
+taiji-io = { path = "../taiji-io" }
+# Media face: `taiji media doctor` + the exec-shim hook at
+# the top of main (taiji-media is a pure orchestration layer — no
+# taiji-http/core edges, frozen-seam note in its lib docs).
+taiji-media = { path = "../taiji-media" }
+taiji-rpc = { path = "../taiji-rpc" }
+clap = { workspace = true }
+rand = { workspace = true }
+# : the JSON-RPC request-body surface of `taiji import --purge-via-aria2`.
+# serde_json is already in the dependency registry (M0-M3 rows), not a new
+# third-party dependency.
+serde_json = { workspace = true }
+# : the `taiji http` single-session guard lock store (rusqlite surface, see
+# the db_lock module docs). rusqlite is already in the dependency registry
+# (the store main surface), promoted from dev-deps to a runtime surface
+# reuse — no new third-party, no Cargo.lock change (the same dependency
+# edge is already in the graph).
+rusqlite = { workspace = true }
+# : the stdin surface of --purge-via-aria2 interactive confirmation
+# (feature increment, no new third-party).
+tokio = { workspace = true, features = ["io-std"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+default = ["metalink"]
+# metalink surface: the `taiji http --metalink-file` option and expansion
+# consume taiji-rpc's metalink consumption seam (the same-named feature
+# transitively enables the taiji-core/metalink method-registration surface).
+# When off (`--no-default-features`) the option does not exist (clap
+# unknown-option error, same shape as aria2 with ENABLE_METALINK off), and
+# taiji-metalink stays out of the dependency graph.
+metalink = ["taiji-rpc/metalink"]
+
+# Integration tests: import-results-persisted assertions (rusqlite is
+# already in the dependency registry; the runtime surface also serves the
+# `taiji http` lock store — see above); sha1 in the same table (the
+# BT/Merkle hash rows) for the identity computation of synthetic v1
+# torrents in tests; sha2 in the same table (the expected-content hash
+# surface of the http e2e).
+[dev-dependencies]
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+# Media CLI e2e: the mock HLS source (the taiji-http mock-lab
+# pattern) + the base-client liveness probe; workspace registry,
+# dev-only.
+axum = { workspace = true }
+taiji-http = { path = "../taiji-http" }
+
+[lints]
+workspace = true

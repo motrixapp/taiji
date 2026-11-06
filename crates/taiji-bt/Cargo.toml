@@ -1,0 +1,65 @@
+[package]
+name = "taiji-bt"
+description = "BitTorrent protocol layer: peer wire (v1+v2), tracker, DHT, PEX, ut_metadata, hash exchange (SPEC §6)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+futures = { workspace = true }
+# (B.4b): DhtEngine consumes UdpDemux's dht inbound channel and the
+# OutboundPacket outbound channel; dependency direction compliant (bt ->
+# io).
+taiji-io = { path = "../taiji-io" }
+taiji-store = { path = "../taiji-store" }
+bytes = { workspace = true }
+# IpGuard snapshot hot-reload (lock-free load on the read side / whole-
+# snapshot store on the orchestration side). Already in the dependency
+# registry (arc-swap, the M0-M3 "config/hot-reload" row).
+arc-swap = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+# : SO_REUSEADDR on the lsd.rs receive socket (reference SocketCore.cc
+# cross-validation; registration note in the workspace Cargo.toml socket2
+# row and the lsd.rs module docs).
+socket2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures = { workspace = true }
+proptest = "1"
+# (SPEC §14.4 performance gate): criterion micro-benchmarks, dev-dependency
+# only, not in the runtime ( hard constraint; license MIT OR Apache-2.0
+# compatible). Default features (plotters/rayon) stay off to shrink the
+# build surface, keeping only the cargo bench wiring. The registry row
+# is submitted uniformly by the scheduler; this comment lands the
+# registration duty on the code side.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "bench_bencode"
+harness = false
+
+#  synthetic benchmark of the picker data structures (>=100k-piece A/B
+# methodology, including a mirror of the old implementation).
+[[bench]]
+name = "bench_picker"
+harness = false
+
+[[bench]]
+name = "bench_peer_frame"
+harness = false
+
+[[bench]]
+name = "bench_dht_table"
+harness = false
+
+[lints]
+workspace = true

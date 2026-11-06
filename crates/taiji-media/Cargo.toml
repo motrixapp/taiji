@@ -1,0 +1,101 @@
+[package]
+name = "taiji-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Media layer (HLS/DASH VOD + ffmpeg sidecar orchestration), 0.3.0"
+
+# Exec-shim host (see src/bin/shim.rs): production hosts use their own
+# `main`'s `maybe_run_shim` hook (MediaCommand defaults to
+# `current_exe()`); test drivers and constrained embedders point
+# `MediaCommand::shim_program` at this binary.
+[[bin]]
+name = "taiji-media-shim"
+path = "src/bin/shim.rs"
+
+[dependencies]
+# BoxFuture on the injected ledger/sink faces (the base's object-safe
+# async trait desugaring; workspace registry).
+futures = { workspace = true }
+# Byte buffers on the base's write faces (SegmentSink::write_at takes
+# Bytes; workspace registry, already in the lock graph via taiji-http).
+bytes = { workspace = true }
+# Error skeleton (same thiserror face as the sibling engine crates; the
+# error-code vocabulary is the taiji.media.* family).
+thiserror = { workspace = true }
+# the MPD (DASH) streaming parser (ISO/IEC 23009-1 static-VOD
+# subset) — quick-xml via the workspace registry row
+# (root Cargo.toml, the metalink B4/M2 registration): DTD/entities
+# disabled at the parse surface, check_end_names on, namespace-
+# tolerant local-name matching. License MIT OR Apache-2.0
+# (GPL-2.0-or-later compatible); the crate-level reference adds no
+# new external code to the lock graph (quick-xml is already there
+# through taiji-metalink; only the taiji-media dependency edge moves
+# in Cargo.lock, cargo-generated — the aes/cbc precedent).
+quick-xml = { workspace = true }
+# AES-128 segment decryption: the RustCrypto aes
+# block cipher + the cbc mode wrapper (workspace-registered rows — the
+# pure-function decrypt core: segment-whole CBC + PKCS7 unpad, the chain
+# never crosses a segment boundary).
+aes = { workspace = true }
+cbc = { workspace = true }
+# base-consumption discipline: the track transport/staging line
+# consumes the 0.2 foundation crate — SegmentPlan/HttpClient/
+# HttpRangeTransport/partfile/sequence engine. This is the planned
+# topology edge ("taiji-media → taiji-http", first actual
+# wiring; zero shim/fork — a base mismatch stops the card and goes to
+# the 0.2.x repair channel instead).
+taiji-http = { path = "../taiji-http" }
+# the segment vocabulary faces the track line implements and
+# consumes (SegmentTransport/SegmentSink/RequestCtx/Extent/SegId) live
+# in taiji-segment since the verbatim lift — imported directly (the
+# named redirection); the taiji-http re-export remains
+# only as the transition face.
+taiji-segment = { path = "../taiji-segment" }
+# Layering-consistent naming edge for the shared io faces the base's
+# public API exposes by type (winpath long-path conversion before OS
+# calls, MetricsRegistry for transport construction) — the packages
+# already arrive transitively via taiji-http; the direct edge is for
+# nameability only (topology note).
+taiji-io = { path = "../taiji-io" }
+# ffmpeg/ffprobe child orchestration (tokio::process; the `process`
+# feature is additive on top of the workspace tokio features — no lock
+# change, features are not recorded in Cargo.lock). The media line adds `fs`
+# for the §11 gate-② harness's file-backed Range origin (test-only
+# use; additive, same no-lock rationale).
+tokio = { workspace = true, features = ["process", "fs"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+# ffprobe JSON structuring + doctor --json (both already in the lock
+# graph; the serde rows are the workspace registry's).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Safe wrappers for the §8.6 child resource limits: setrlimit /
+# kill_process_group / setpriority_process are safe rustix functions
+# (no unsafe code in this crate — workspace unsafe_code=forbid; std's
+# CommandExt::pre_exec is unsafe and stays out, see process.rs). The
+# the `fs` feature adds safe statfs for the synthesis disk
+# precheck (precheck::volume_free_bytes). Already in the lock graph
+# (pwritev row); features are additive and do not touch Cargo.lock.
+rustix = { workspace = true, features = ["process", "fs"] }
+
+[dev-dependencies]
+# Mock HTTP source for the track-driver e2e (the taiji-http mock-lab
+# pattern; workspace registry).
+axum = { workspace = true }
+tempfile = "3"
+# media e2e: SHA-256 digests over the decrypted archives (the
+# "plaintext archive sha256 comparison" acceptance face; workspace
+# registry, already in the lock graph).
+sha2 = { workspace = true }
+# Real-sqlite persistence wiring for the e2e ledger (the store side of
+# the media_track/media_segment write faces; dev-only — the production
+# assembly belongs to the P94 orchestration).
+taiji-store = { path = "../taiji-store" }
+
+[lints]
+workspace = true

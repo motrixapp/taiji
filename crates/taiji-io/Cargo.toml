@@ -1,0 +1,60 @@
+[package]
+name = "taiji-io"
+description = "Transport layer: TCP/µTP/MSE stacking, dialing, DNS, connection pool, throttled streams (SPEC §3.3, §6.1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+# : SSDP discovery stream iteration (rupnp::discover returns impl Stream;
+# futures is already in the registry's "M0 runtime/codec" row, not a new
+# third-party dependency).
+futures = { workspace = true }
+# Bounded HTTP/XML surface of the IGD control point — hyper 1 client
+# (same feature set as rupnp) + http-body-util Limited stream cap +
+# roxmltree isolated parsing. All four (hyper-util included) are existing
+# transitive dependencies of rupnp 3.0 (same version locks, zero new
+# third-party code); see the block after the rupnp row in the workspace
+# Cargo.toml for the registration note.
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+roxmltree = { workspace = true }
+num-bigint-dig = { workspace = true }
+rand = { workspace = true }
+# : UPnP IGD control point (SPEC §6.8; registration duty in the workspace
+# Cargo.toml comment).
+rupnp = { workspace = true }
+# Process-wide TLS provider installer (tls module; the shared precondition
+# of the multiple build sites over reqwest's rustls-no-provider surface —
+# see the root Cargo.toml for the workspace `rustls` row registration
+# comment; default-features off, aws_lc_rs stays out of the graph).
+rustls = { workspace = true }
+sha1 = { workspace = true }
+# (SPEC §3.2 UdpDemuxTask): the v6 UDP socket creation site sets
+# IPV6_V6ONLY=1 before bind — std has no such sockopt surface; wrapped
+# safely via socket2, no unsafe (registration note in the workspace
+# Cargo.toml socket2 row; bt-side lsd.rs is an existing in-use precedent).
+socket2 = { workspace = true }
+# (block_arena pooled storage): safe anon-mmap blocks — drop = munmap =
+# pages returned (the idle-release face; registration comment
+# in the workspace Cargo.toml memmap2 row).
+memmap2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+serde_json = { workspace = true }
+# : start_paused virtual clock (deterministic advancement of the
+# lease-renewal/backoff timers in tests). tokio is already in the
+# registry; dev-only feature increment.
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

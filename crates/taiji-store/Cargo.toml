@@ -1,0 +1,48 @@
+[package]
+name = "taiji-store"
+description = "Storage layer: disk writes, piece storage, write cache, bt.sqlite3 persistence (SPEC §5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# `Bytes` (reference-counted zero-copy slices) on the block placement
+# face: the wire decode slice is adopted into cache cells as-is. Already
+# in the lock graph via taiji-io/taiji-bt — direct dependency here adds
+# no new external code.
+bytes = { workspace = true }
+rusqlite = { workspace = true }
+# Windows long-path verbatim conversion before the fs choke point hands
+# paths to the OS (disk.rs open surface + the persist session-store sqlite
+# open site) — taiji-io is a whitelisted edge of the §3.2 topology table
+# (in-card note; SPEC to follow with the card), not a new third-party
+# dependency.
+taiji-io = { path = "../taiji-io" }
+sha1 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# : pwritev on the completed-piece write surface (positioned vectored
+# writes) — unix-scoped. See the workspace table rustix row for the
+# registration note and the dependency-exemption argument.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1"
+# : criterion micro-benchmarks (dev-only surface; same note as the
+# taiji-bt entry).
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "bench_block_hash"
+harness = false

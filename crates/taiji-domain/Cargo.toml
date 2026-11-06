@@ -1,0 +1,56 @@
+[package]
+name = "taiji-domain"
+description = "Shared vocabulary layer: domain models (metainfo/seed/progress/hook/nat/hashFetch/hashSource/peerGuard/redial/silent), recovery event vocabulary, frozen RPC method-surface contract tables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Dependency discipline (same text as src/lib.rs): must not depend on
+# core/rpc/cli; inside the workspace only the three sibling crates
+# bt/store/io are depended on — the domain modules (metainfo/seed/…) sink
+# down as "pure functions + types + policies", and their declared type
+# surfaces reference existing public types of the sibling crates (bt's
+# bencode/filetree/peer surfaces, store's layout/merkle/persist surfaces,
+# io's nat surface), carrying no session/engine execution semantics.
+# Third parties are only at the literal/process-vocabulary level:
+# bytes/sha1/sha2 (dual infohash and byte surfaces), thiserror (domain
+# errors), tokio (the hook subprocess process feature), tracing (in-domain
+# warnings), rand (the jitter factor of peer_guard dial shuffling and
+# redial backoff).
+[dependencies]
+taiji-bt = { path = "../taiji-bt" }
+taiji-store = { path = "../taiji-store" }
+taiji-io = { path = "../taiji-io" }
+bytes = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+# The async form of the hook subprocess discipline (tokio::process
+# spawn/wait/reaper); the tokio::fs read-file surface of peer_guard
+# blocklist import; sync/time/rt are covered by the workspace base
+# features.
+tokio = { workspace = true, features = ["fs", "process"] }
+tracing = { workspace = true }
+# peer_guard dial-hash jitter (existing in-domain semantics, landing in
+# this crate with the module sink).
+rand = { workspace = true }
+
+[dev-dependencies]
+# Moving with the sink for the hash_fetch/progress inline property tests
+# (taiji-core declares the same version directly, not a new third-party).
+proptest = "1"
+
+[features]
+# metalink method-registration gate (addMetalink is conditionally
+# registered with this feature; off = the method does not exist — the "No
+# such method" surface). The registry single point is in this crate, and
+# the gate state is forwarded by taiji-core
+# (`taiji-core/metalink = ["taiji-domain/metalink"]`) to keep both states
+# on the same gate — enabling the core gate via the taiji-rpc/metalink
+# transitive chain enables this gate in lockstep.
+metalink = []
+
+[lints]
+workspace = true

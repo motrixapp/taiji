@@ -1,0 +1,25 @@
+[package]
+name = "taiji-metalink"
+description = "Metalink v4 (RFC 5854) parser and mirror manifest model (data plane only;)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# taiji-metalink only does "format -> model" (parsing / mirror list / hash /
+# metaurl extraction); task orchestration and downloading all go through the
+# existing paths, and this crate has zero reverse dependencies.
+quick-xml = { workspace = true }
+md-5 = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+# Shared trait surface of md-5/sha1/sha2 (digest 0.11, same RustCrypto
+# family and version; registration duty as in the md-5 comment inside
+# workspace.dependencies).
+digest = "0.11"
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

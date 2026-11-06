@@ -1,0 +1,37 @@
+[package]
+name = "taiji-segment"
+description = "Segment download vocabulary: the three segmentation traits + supporting types (the frozen core abstraction) and their signature closure (cookie face, engine error face)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The segment byte body of SegmentSink::write_at (workspace registry;
+# already in the lock graph via taiji-http).
+bytes = { workspace = true }
+# BoxFuture — the explicit async-fn desugaring of the frozen trait
+# signatures (see traits.rs module doc; workspace registry).
+futures = { workspace = true }
+# The engine error enum's derive (error.rs; workspace registry).
+thiserror = { workspace = true }
+# cookies.rs parses the --load-cookies file off the async path
+# (spawn_blocking; workspace registry).
+tokio = { workspace = true }
+# The signature closure's base-crate edges, lifted verbatim with the
+# modules (the closure ruling): error.rs carries the typed FTP DNS
+# payload (taiji_io::dns::ResolveError) and the engine-side error
+# classification feed (taiji_io::metrics), cookies.rs the Windows
+# path face (taiji_io::winpath). Same-direction edge as every engine
+# crate (base layer, no cycle).
+taiji-io = { path = "../taiji-io" }
+# cookies.rs URL face. reqwest 0.13's `Url` IS this crate's type
+# re-exported; the vocabulary crate takes the small direct dependency
+# (2.5.8, already in the lock via reqwest) instead of the whole HTTP
+# client stack — the path-reference revision documented at the
+# import site. License MIT OR Apache-2.0.
+url = "2"
+
+[lints]
+workspace = true

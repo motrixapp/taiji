@@ -1,0 +1,104 @@
+[package]
+name = "taiji-http"
+description = "HTTP download base: URI probing, block-grid + dynamic-extent two-layer scheduler, multi-source allocation, transport adapters "
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+# Marks fetch/write_at/complete_block as async fn, but `&dyn SegmentSink`
+# in the same signature requires the trait to stay object-safe — native
+# RPITIT is not dyn-compatible, and async-trait is not on this crate's
+# dependency whitelist. Using BoxFuture as explicit desugaring: a Send
+# future, semantically equivalent to async fn; the implementer side just
+# does `Box::pin(async move { .. })`.
+futures = { workspace = true }
+# Entropy source for the Digest cnonce (auth::fresh_cnonce; existing
+# workspace dependency).
+rand = { workspace = true }
+# Transport base (existing workspace dependency: rustls-no-provider + gzip,
+# default features off; provider = ring installed process-wide, see
+# build_transport; roots = platform trust store — the 0.13
+# platform-verifier default surface; the per-task CA override = accepted
+# via `--ca-certificate`, see the options.rs declaration block).
+# Redirection is handled manually at the client layer (Policy::none);
+# reqwest only carries single-hop transport / connection pooling /
+# automatic decompression (a gzip response that violates the identity
+# negotiation is still decompressed; the checksum applies to the
+# decompressed bytes).
+reqwest = { workspace = true }
+# the segment vocabulary
+# (three traits + signature closure: cookies/error) lives in
+# taiji-segment since the verbatim lift; this crate depends on it
+# one-way and re-exports its faces as the path-stable transition
+# surface (`taiji_http::traits/cookies/error` paths unchanged for
+# existing consumers). Direction frozen: taiji-http ->
+# taiji-segment, never the reverse.
+taiji-segment = { path = "../taiji-segment" }
+# HTTP download traffic flows into the existing global + per-task dual
+# token buckets (rate_limit surface; the per-task bucket = the task-level
+# half of LimiterSet). The crate dependency direction taiji-http ->
+# taiji-io is a whitelisted edge of the topology table, not a new
+# third-party dependency.
+taiji-io = { path = "../taiji-io" }
+# SHA-256 digest for Digest authentication (the RFC 7616 recommended
+# algorithm; existing workspace dependency, not a new third-party). The MD5
+# digest is implemented in-repo (auth.rs, pinned to the RFC 1321 vectors).
+sha2 = { workspace = true }
+# FTP/FTPS transport adapter (adopted after passing the dependency-review
+# triple check: suppaftp).
+# tokio-rustls-ring is the same version as the workspace TLS stack (rustls
+# 0.23 + tokio-rustls 0.26 already in the lock, zero drift, no native-tls);
+# rustls-ring exists only to obtain suppaftp's `suppaftp::rustls` re-export
+# for building the rustls config and installing the process-wide ring
+# provider (build_transport); deprecated only provides the implicit-FTPS
+# entry point (implicit port configurable; upstream marks it deprecated =>
+# pinned to 12.x, the risk goes into the divergence statement). During the
+# merge this gets workspaced by review (add the same-named row to
+# [workspace.dependencies], then switch to workspace = true).
+suppaftp = { workspace = true }
+# Connection-establishment timing middleware layer (conn_timing module):
+# mounted into the connector stack via reqwest's public API
+# `ClientBuilder::connector_layer`, feeding the
+# `taiji_http_conn_establish_*` connection-profile metrics (pool reuse
+# bypasses the connector — the counter naturally counts only new
+# connections). Both crates are already in the lock graph (tower 0.5.3
+# transitive surface, layer/service 0.3.3); direct-dependency declaration
+# adds zero new external code; dependency-exemption decision 2026-09-30.
+tower-layer = { workspace = true }
+tower-service = { workspace = true }
+# Platform trust-store verification surface (an official rustls-ecosystem
+# crate; the same transitive 0.7.1 as reqwest rustls-no-provider is already
+# in the lock — this is the direct-dependency declaration, since ftp.rs
+# hand-builds a ClientConfig and needs to reference the Verifier type
+# directly. Semantics = follow the OS trust store, aligning with the aria2
+# fork's OpenSSL system-library semantics; the default root when
+# `--ca-certificate` is absent (per-task override accepted, see the
+# options.rs ca-certificate row); the webpki frozen roots leave the
+# dependency tree with this change). License MIT OR Apache-2.0.
+rustls-platform-verifier = "0.7"
+tokio = { workspace = true }
+# Cancellation token for the worker execution loop
+# (tokio_util::sync::CancellationToken; existing workspace dependency, the
+# sync module has no feature gate — the worker loop relocates to taiji-http
+# as part of the move; the separation semantics of the pool token vs the
+# per-task token is unchanged with the host assembly).
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Mock lab (axum, existing workspace dependency): wire-level
+# cross-validation of redirect loops / cross-host credential stripping /
+# identity negotiation etc.
+axum = { workspace = true }
+serde_json = { workspace = true }
+# The FTP mock-server test surface takes suppaftp's rustls/tokio-rustls
+# re-exports via the same feature set (built together with the main
+# dependency).
+suppaftp = { workspace = true }
+
+[lints]
+workspace = true

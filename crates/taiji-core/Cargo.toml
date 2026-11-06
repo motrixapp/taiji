@@ -1,0 +1,138 @@
+[package]
+name = "taiji-core"
+description = "Orchestration: SessionActor, TorrentTask state machine, config, events, throttling, migration import (SPEC §7)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+taiji-bt = { path = "../taiji-bt" }
+# The carrying crate of the method-surface vocabulary single point
+# (RPC_METHODS/RPC_METHOD_INFO/descriptor types) (the shared vocabulary
+# layer, a tower position): session/command keep their public paths via
+# re-export.
+taiji-domain = { path = "../taiji-domain" }
+# The engine execution layer (DownloadEngine / the single-torrent BT
+# executor moved out of this crate's engine/ subtree): src re-exports the
+# whole thing under the alias `pub use taiji_engine as engine`, so the
+# `taiji_core::engine::*` public paths have zero drift. Direction core ->
+# engine is one-way (engine must not reference back into core, enforced by
+# the Cargo compiler; the in-engine boundary sweep source scan is the
+# second line of defense).
+taiji-engine = { path = "../taiji-engine" }
+taiji-store = { path = "../taiji-store" }
+# The base-surface consumption of the HttpTask actor (core row: "HttpTask/
+# MediaTask actors, SessionActor dispatch, the store implementation of
+# SegmentSink"): the probe decision table / block-grid scheduling / `.part`
+# persistence / rename finalize (the RenameJournal injection surface) all
+# live in taiji-http, with core assembling and driving. Direction is acyclic
+# with the topology (http depends on neither core nor store — disk writes/
+# journal are still injected by core); 0.2 has no taiji-media yet, so
+# core→http is the 0.2 instantiation edge of the topology graph's media
+# branch. No new third-party dependency.
+taiji-http = { path = "../taiji-http" }
+# the segment vocabulary faces (three traits + RequestCtx &
+# friends) live in taiji-segment since the verbatim lift — core's
+# session faces (http_task driver, media pipeline, option echo) import
+# them directly (the named redirection); taiji-http
+# re-exports remain only as the transition face.
+taiji-segment = { path = "../taiji-segment" }
+# The media orchestration layer (wires the
+# MediaTask as the session's third task family): the manifest/format/
+# selector/template pure faces + the P91-P93 pipeline (mediadl/synth)
+# live in taiji-media; core assembles and drives. Direction follows
+# the topology (taiji-core → taiji-media →
+# taiji-http/taiji-io) — media depends on neither core nor store.
+# No new third-party dependency (media's own deps are already in the
+# graph via taiji-http).
+taiji-media = { path = "../taiji-media" }
+# : the MediaLedger adapter's BoxFuture return shape (already in the
+# workspace registry via taiji-http/taiji-media; declared explicitly
+# for the session media module's trait impl).
+futures = { workspace = true }
+# : UdpDemux shared-socket wiring (core → io is a member of the settled
+# dependency direction, the crate dependency direction table).
+taiji-io = { path = "../taiji-io" }
+bytes = { workspace = true }
+# : serialization surface of the torrent row config_json payload
+# (PersistedTaskConfig). serde/serde_json are already in the dependency
+# registry's "M0-M3 config/hot-reload" rows, declared explicitly here only
+# for this crate (no new third-party).
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# : the tokio::fs read-file surface of blocklist import (feature increment).
+# : hook subprocess tokio::process (spawn/wait/reaper; the async form of
+# the  hook subprocess discipline, C.4g — feature increment, no new
+# third-party dependency).
+tokio = { workspace = true, features = ["fs", "process"] }
+# : hot-reload snapshot publication of the speed-limit options (the
+# arc-swap store of SpeedLimits::set_overall; existing registry row
+# "arc-swap | config/hot-reload | M0-M3"; this comment lands the
+# registration duty on the code side).
+arc-swap = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+# : the md5 face of the six `--checksum` algorithm-domain hashes (RFC
+# 1321; same RustCrypto digest 0.11 family as the workspace's existing
+# sha1/sha2, already in use by taiji-metalink — registration duty as in
+# the md-5 comment inside workspace.dependencies).
+md-5 = { workspace = true }
+# The v6 TCP listening socket creation site sets IPV6_V6ONLY=1 before bind
+# — std has no such sockopt surface; wrapped safely via socket2, no unsafe
+# (registration note in the workspace Cargo.toml socket2 row; existing
+# in-use precedents: bt-side lsd.rs, io-side udp_demux).
+socket2 = { workspace = true }
+# Local interface address enumeration (the address-set snapshot of the
+# self-connection-detection extension; local getifaddrs syscall, no network
+# IO, once per process). Registration
+# note in the workspace Cargo.toml if-addrs row.
+if-addrs = { workspace = true }
+
+[features]
+# metalink method-registration gate (addMetalink registers with the
+# `metalink` feature; off = method not found). core does not depend on
+# taiji-metalink (parsing runs in the taiji-rpc consumption seam,
+# dependency direction in §2.5) — this feature only carries the compile-time
+# switching of the method registry, transitively enabled by taiji-rpc's
+# same-named feature
+# (`taiji-rpc/metalink = ["dep:taiji-metalink", "taiji-core/metalink"]`).
+# The registry single point is in taiji-domain: forwarding
+# `taiji-domain/metalink` keeps both states on the same gate (the cfg gate
+# sits on the domain-side table).
+metalink = ["taiji-domain/metalink"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1"
+# : criterion micro-benchmarks (dev-only surface; same note as the
+# taiji-bt entry).
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# In-process DHT (UdpDemux) for the magnet full-chain integration tests
+# (already in the dependency registry; introduced as a direct dependency
+# for the test surface only, not a new third-party).
+taiji-io = { path = "../taiji-io" }
+# Log capture for the corruption-injection tests (the log-text surface
+# asserted by "only this block is refetched"; tracing-subscriber is already
+# in the dependency registry, test-only surface).
+tracing-subscriber = { workspace = true }
+# Integration tests read back the tracker table for assertions (rusqlite
+# already in the dependency registry; test-surface only, not a runtime
+# dependency).
+rusqlite = { workspace = true }
+# Media task e2e: the mock HTTP source (the taiji-http mock-lab
+# pattern, workspace registry) + the shared fMP4 fixture test-kit ride
+# via taiji-media (already a runtime dependency of this crate).
+axum = { workspace = true }
+tempfile = "3"
+
+[[bench]]
+name = "bench_progress"
+harness = false

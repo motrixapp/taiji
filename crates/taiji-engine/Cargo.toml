@@ -1,0 +1,66 @@
+[package]
+name = "taiji-engine"
+description = "Single-torrent BitTorrent execution engine: DownloadEngine run loop, dial/choke/seed/recovery/pipeline, tracker mirror, metrics (SPEC §6)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Dependency discipline (same text as src/lib.rs): must not depend on
+# core/rpc/cli — the ban is enforced by the Cargo compiler (dependency
+# cycle = compile error); the cross-crate part of the old engine/mod.rs
+# boundary_sweep is taken over by this. Inside the workspace only the five
+# sibling crates domain/bt/http/io/store are depended on: domain is the
+# shared vocabulary layer (domain models / recovery event vocabulary /
+# method-surface contract single point), bt is the wire/peer/tracker/dht
+# execution surface, store is the verify-and-persist pipeline, io is UDP
+# demux/µTP/environment knobs, and http is only the client-surface
+# consumption of the webseed fake-peer duplex wire.
+[dependencies]
+taiji-domain = { path = "../taiji-domain" }
+taiji-bt = { path = "../taiji-bt" }
+taiji-store = { path = "../taiji-store" }
+taiji-io = { path = "../taiji-io" }
+# HTTP client consumption of the webseed engine surface (webseed.rs): the
+# duplex wire responder goes through the existing taiji-http::client/traits
+# public surface, no new third-party dependency.
+taiji-http = { path = "../taiji-http" }
+# the segment vocabulary face webseed.rs consumes (RequestCtx)
+# lives in taiji-segment since the verbatim lift — this direct edge
+# replaces the former taiji_http::traits transit path (the
+# §3.1 named redirection).
+taiji-segment = { path = "../taiji-segment" }
+bytes = { workspace = true }
+# Local interface address enumeration for addr_hygiene (the address-set
+# snapshot of the self-connection-detection extension; local getifaddrs
+# syscall, no network IO, once per process). Registration note in the
+# workspace Cargo.toml if-addrs row.
+if-addrs = { workspace = true }
+# The v6 TCP listening socket creation site sets IPV6_V6ONLY=1 before bind
+# — std has no such sockopt surface; wrapped safely via socket2, no unsafe
+# (run::bind_tcp_v6_only; dependency precedents: bt-side lsd.rs, io-side
+# udp_demux).
+socket2 = { workspace = true }
+# serde shape-stable serialization surface of the scheduling-policy config
+# (strategy).
+serde = { workspace = true }
+# v1 piece verification / hybrid swarm identity digests (produced and
+# consumed in run::arms).
+sha1 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# JSON round-trip surface for the strategy serde shape-stability tests
+# (test-only surface).
+serde_json = { workspace = true }
+# Log capture for the corruption-injection tests (the log-text surface
+# asserted by "only this block is refetched"; tracing-subscriber is already
+# in the dependency registry, test-only surface).
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,252 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/motrix-taiji",
+    "crates/taiji-rpc",
+    "crates/taiji-core",
+    "crates/taiji-engine",
+    "crates/taiji-domain",
+    "crates/taiji-bt",
+    "crates/taiji-store",
+    "crates/taiji-io",
+    "crates/taiji-http",
+    "crates/taiji-segment",
+    "crates/taiji-metalink",
+    "crates/taiji-media",]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-2.0-or-later"
+authors = ["Motrix contributors"]
+
+# Logical layering and dependency direction (crate layering finalized;
+# reverse dependency = PR must be rejected):
+#   cli -> rpc -> core{session} -> engine -> domain
+#     -> { bt -> io/store, http, metalink }
+#   engine must not depend on core — enforced by the Cargo compiler
+#     (dependency cycle = compile error); the cross-crate part of the old
+#     engine boundary_sweep is taken over by this, with the in-engine source
+#     scan assertion kept as a registered paper trail + second line of
+#     defense; core re-exports via `pub use taiji_engine as engine`, so the
+#     `taiji_core::engine::*` public paths have zero drift.
+#   domain = the shared vocabulary layer (domain models / method-surface
+#     contracts / event vocabulary; a tower position — consumed jointly by
+#     core{session}, engine and future protocol crates; depends on no
+#     workspace crate).
+#   io and store do not depend on each other; bt must not depend on core/rpc.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+# New clippy 1.98 lints (activated after the MSRV bump to 1.88): the 80
+# occurrences in existing code are the reviewed, merged surface — exempted
+# pointwise; adoption in new code is handled uniformly with the B2
+# wrap-up/style card before these allows are removed.
+collapsible_if = "allow"
+manual_is_multiple_of = "allow"
+chunks_exact_to_as_chunks = "allow"
+
+[workspace.dependencies]
+# spec §4.8: FTP/FTPS transport adapter (adopted after passing the B2
+# kickoff-gate triple check; injected on review's behalf). tokio-rustls-ring
+# is the same version as the workspace TLS stack, zero drift; deprecated is
+# only for the implicit-FTPS entry point (upstream marks it deprecated =>
+# pinned to 12.x); rustls-ring is only for the `suppaftp::rustls` re-export.
+# MSRV 1.88 (required by suppaftp 12; workspace bumped in lockstep).
+suppaftp = { version = "12", default-features = false, features = [
+  "tokio-rustls-ring",
+  "rustls-ring",
+  "deprecated",
+] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+    "signal",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+futures = "0.3"
+thiserror = "2"
+tracing = "0.1"
+# json feature: the `--log-format json` structured-output surface;
+# version still pinned at 0.3 (Cargo.lock 0.3.23), no drift.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arc-swap = "1"
+rand = "0.10"
+num-bigint-dig = "0.9"
+sha1 = "0.11"
+sha2 = "0.11"
+rusqlite = { version = "0.40", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+# (SPEC §6.6): tracker HTTPS (rustls) + gzip; default features off to avoid
+# native-tls. 0.13 redesign (roots feature removed): rustls-no-provider =
+# the provider is ring, installed process-wide by this repo
+# (build_transport; the `rustls` feature hard-binds aws-lc — violates the
+# ring-unification note, not admitted), roots = platform trust store
+# (platform-verifier default surface; aligns with the aria2 fork's
+# "continuously maintained stack + OS trust store" semantics — the fork's
+# motive for moving to OpenSSL was the native stack's missing TLS 1.3, and
+# this repo's protocol stack = rustls already satisfies it, borrowing only
+# root freshness), divergence statement in the options ca-certificate row.
+# License MIT/Apache-2.0.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "http2"] }
+# Direct-dependency declaration of the workspace TLS stack (0.23.45 already
+# in the lock transitively via reqwest/suppaftp; ring already present via
+# suppaftp rustls-ring; default-features off = aws_lc_rs stays out, zero
+# drift against the lock graph). Consumer = the taiji-io::tls process-wide
+# ring provider installer (the shared precondition of the multiple build
+# sites over reqwest's rustls-no-provider surface).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+# RPC over TLS (`--rpc-secure` surface): tokio-rustls 0.26 is already in
+# the lock graph via suppaftp (same tokio-rustls-ring build), so the
+# direct dependency adds no new external code; rustls-pki-types' `pem`
+# feature covers server-side PEM loading (already in the lock via
+# reqwest — same declared path; rustls-pemfile is not in the lock graph
+# and stays out).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-pki-types = "1"
+# (SPEC §8.1): RPC transport base — HTTP (POST /jsonrpc) + WebSocket
+# upgrade. License MIT OR Apache-2.0 ( compatible); maintenance status =
+# first-line crate of the official tokio ecosystem.
+axum = { version = "0.8", features = ["ws"] }
+# (SPEC §6.8): UPnP IGD control point — SSDP discovery (M-SEARCH
+# 239.255.255.250:1900, via ssdp-client 2) + device/service XML
+# (roxmltree) + SOAP actions (hyper 1 client, pure async, no blocking
+# calls). License MIT OR Apache-2.0 ( compatible); maintenance status =
+# jakobhellermann/rupnp, v3.0.0 (2025), ssdp-client in the same repo with
+# the same maintainer. The settled SPEC §6.8 plan ( Appendix B.4f:
+# "do not swap out rupnp without an ADR"). The registry row is owned by the
+# dependency registry (shared file, edits forbidden); this comment lands
+# the registration duty on the code side.
+rupnp = "3.0"
+# Timeout + Limited body + parse-isolation direct-use surface for #. All
+# four of hyper / hyper-util / http-body-util / roxmltree are existing
+# transitive dependencies of rupnp 3.0 (feature set verbatim identical to
+# rupnp's declaration, versions locked identically, zero drift, no new
+# third-party code introduced); the explicit declaration exists only for
+# taiji-io::nat's direct use. License MIT OR Apache-2.0 (
+# compatible).
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1"] }
+http-body-util = "0.1"
+roxmltree = "0.20"
+# (SPEC §2 matrix BEP14 / §11 bt-lsd): the LSD receive socket sets
+# SO_REUSEADDR — cross-validation reference SocketCore.cc (set uniformly on
+# all sockets; precondition for multiple engine processes on one host to
+# share the 239.192.152.143:6771 multicast port). License MIT OR Apache-2.0
+# ( compatible); maintenance status = the official Rust ecosystem (same
+# source as tokio/net).
+#
+socket2 = "0.6"
+# Enumeration for # (the address-set snapshot surface of the self-
+# connection-detection extension, consumed by taiji-core::addr_hygiene).
+# if-addrs 0.13 is an existing transitive dependency of rupnp 3.0 (versions
+# locked identically, zero drift, no new third-party code); license MIT OR
+# BSD-3-Clause ( compatible).
+# The registry row is owned by the dependency registry (dependency
+# registry); this comment lands the registration duty on the code side.
+if-addrs = "0.13"
+# (spec §4.7/§8.1, registry quick-xml row B4/M2): metalink v4 streaming
+# parsing — DTD/entities disabled (quick-xml never resolves external
+# entities, DOCTYPE is explicitly rejected at the parse surface; undefined
+# entity references are treated as errors), the encoding feature carries
+# the XML-declaration charset (encoding_rs, an existing transitive
+# dependency of quick-xml). License MIT OR Apache-2.0
+# ( compatible with GPL-2.0-or-later); maintenance status = first-line of
+# the Rust XML ecosystem (tafia/quick-xml).
+quick-xml = { version = "0.42", features = ["encoding"] }
+# : the metalink v4 `<hash type="md5">` checksum consumption surface
+# (RustCrypto digest 0.11 family, same source and version as the
+# workspace's existing sha1/sha2, zero MSRV drift). License MIT OR
+# Apache-2.0 ( compatible with GPL-2.0-or-later);
+# maintenance status = first-line of the RustCrypto hash repos.
+# Registration duty: the md-5 row of the dependency registry is to be
+# back-filled by the governance repo; this comment lands the registration
+# duty on the code side.
+md-5 = "0.11"
+# The two trait surfaces of the connection-establishment timing middleware
+# (tower_layer::Layer / tower_service::Service): mounted into the connector
+# stack via reqwest's public API `ClientBuilder::connector_layer`, feeding
+# the `taiji_http_conn_establish_*` connection-profile metrics. Both crates
+# are already in the lock graph (tower 0.5.3 transitive surface, layer/
+# service 0.3.3) — direct-dependency declaration adds zero new external
+# code; dependency-exemption decision 2026-09-30. License MIT (compatible
+# with GPL-2.0-or-later).
+tower-layer = "0.3"
+tower-service = "0.3"
+# AES-128 segment decryption for the media line —
+# the RustCrypto `aes` block cipher + the `cbc` mode wrapper (the card's
+# stated orientation: pure Rust, no bindings). Both are MIT OR
+# Apache-2.0; maintenance status = first-line RustCrypto (the same
+# family/source as the workspace's existing sha1/sha2/md-5 rows, digest
+# line). Version pairing: aes 0.8 + cbc 0.1 share the cipher 0.4 trait
+# line — chosen over the newer aes 0.9 + cbc 0.2 (cipher 0.5) stack
+# because aes 0.9.3 declares rust-version 1.89 while the workspace MSRV
+# is 1.88 (scheduler-gate finding, 2026-10-28). Registration duty: the
+# aes/cbc rows of the dependency registry are to be back-filled by the
+# governance repo; this comment lands the registration duty on the
+# code side (the md-5 precedent).
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+# ( write-path batching): safe wrapper for pwritev on the completed-piece
+# write surface (positioned vectored writes) — hand-rolled iovec/libc
+# calls are unsafe (vetoed outright by workspace unsafe_code=forbid); std
+# `FileExt::write_vectored_at` is not yet stable
+# (`unix_file_vectored_at`, verified on 1.98). rustix is already in the
+# lock at 1.1.5 as an existing transitive dependency of the dependency tree
+# (default-features off + std only; the `rustix::io::pwritev` module has no
+# feature gate) — direct-dependency declaration adds zero new external
+# code, versions locked identically, zero drift.
+# License Apache-2.0 WITH LLVM-exception ( compatible); maintenance status =
+# first-line bytecodealliance (same source as the mio/Greenwich ecosystem).
+rustix = { version = "1.1", default-features = false, features = ["std"] }
+# block-arena storage: safe anonymous-mapping wrapper — the
+# pooled 16KiB blocks become per-block mmap/munmap so the idle release
+# face is a plain drop (munmap returns pages on every unix; musl
+# mallocng retains freed size-class groups, measured on ext-server — free()
+# cannot shrink RSS). memmap2 is first-line RustCrypto-adjacent
+# (tokio/foundations ecosystem), zero transitive deps beyond libc
+# (already in the graph). Registration duty: this comment lands it on
+# the code side (the rustix pwritev precedent).
+memmap2 = "0.9"
+
+# Static-baseline slimming (shared-file change, registered in
+# the card's --allow-shared ledger; revised 2026-11-02 per the adversarial
+# review HIGH finding): the musl release build's fixed RSS baseline is
+# dominated by the mapped .text (measured 14.3MB .text + 1.3MB r--
+# on ext-server). codegen-units=1 removes per-CGU duplication under thin LTO;
+# strip codifies what bench builds passed as CARGO_PROFILE_RELEASE_STRIP=
+# symbols (file size only — PT_LOAD pages are unaffected).
+#
+# panic="abort" was tried and reverted: it compiled away the
+# unwinder, which structurally killed the media driver's catch_unwind
+# isolation gate (media_task.rs — the only catch_unwind in the workspace,
+# protecting against panics from attacker-controlled BMFF/media bytes):
+# a media-pipeline panic would abort the entire process instead of
+# unwinding into a task-level Error + Ended notification. The measured
+# size delta between abort and unwind at cgu=1+strip is ~1pp of .text
+# (the landing-pad tables are a small fraction); keeping unwind preserves
+# the isolation gate and the tokio JoinError observation face at a
+# negligible size cost.
+#
+# opt-level stays 3 deliberately: the SHA-1 soft implementation and wire
+# paths are throughput faces (the SHA-NI floor is not this card's target),
+# and the size lever above reaches the -2MB class without trading codegen.
+[profile.release]
+lto = "thin"
+panic = "unwind"
+codegen-units = 1
+strip = true

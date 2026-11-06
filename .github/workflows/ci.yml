@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
+      # caused two-way fmt/dead-code drift; upgrades need an explicit commit and
+      # a full pass of the local gate
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets
+
+  store-bt-subset:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
+      # caused two-way fmt/dead-code drift; upgrades need an explicit commit and
+      # a full pass of the local gate
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p taiji-store --lib
+      - run: cargo test -p taiji-bt --test filetree_fixture
+      # Windows-semantics regression for the on-disk surface (sync_dir/seek_write/rename)
+      - run: cargo test -p taiji-http --lib
+
+  # metalink feature-off two-legged job (--no-default-features: one leg each
+  # for taiji-rpc/motrix-taiji, off-state compile + test — without a CI guard
+  # the off-state compile surface rots freely).
+  feature-off-metalink:
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [taiji-rpc, motrix-taiji]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
+      # caused two-way fmt/dead-code drift; upgrades need an explicit commit and
+      # a full pass of the local gate
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p ${{ matrix.crate }} --no-default-features --all-targets -- -D warnings
+      - run: cargo test -p ${{ matrix.crate }} --no-default-features --all-targets

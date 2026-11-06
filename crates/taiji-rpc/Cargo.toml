@@ -1,0 +1,78 @@
+[package]
+name = "taiji-rpc"
+description = "JSON-RPC + WebSocket server over axum, aria2-compatible surface (SPEC §8)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+taiji-core = { path = "../taiji-core" }
+# (SPEC §8.1): HTTP/WS transport base. License MIT OR Apache-2.0
+# (compatible with GPL-2.0-or-later); registration duty in the axum
+# comment inside the workspace Cargo.toml.
+axum = { workspace = true }
+# RPC over TLS (the `--rpc-secure` face): the pivot of the TLS listener's
+# manual accept loop, making the whole workspace TLS stack direct (already
+# in the lock graph, zero new external code) — tokio-rustls TlsAcceptor
+# wraps the TCP listener; rustls ServerConfig (the ring provider, same
+# stack as the taiji-io::tls installer); rustls-pki-types `pem` face loads
+# the server PEM (certificate chain iter + a single private-key node;
+# rustls-pemfile is not in the lock graph, not pulled in). hyper-util
+# (already in the lock at 0.1.21 via axum) serves HTTP/WS over the TLS
+# stream: the auto Builder picks h1/h2 per handshake +
+# `serve_connection_with_upgrades` keeps the WS upgrade face (graceful
+# mode identical to axum::serve's own implementation — its
+# serve/mod.rs:396-409); tower-service 0.3.3 already transitively present
+# (an axum dependency edge), and MakeService `.call(peer)` injects
+# ConnectInfo (the conn_gate middleware's consumption face unchanged).
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+hyper-util = { workspace = true, features = ["server-auto", "tokio", "service"] }
+tower-service = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# (SPEC §8.1 Basic authentication): HMAC-SHA1 (sha1, registered at M0) +
+# a process-random key (rand, registered M0-M3) — no new registration duty
+# for either; direct translation of aria2 util_security.cc.
+sha1 = { workspace = true }
+# Security hardening: token verification first folds into a fixed-length
+# SHA-256 digest, then does a constant-time comparison (sha2 registered at
+# M0, already in use by bt/core/store — no new registration duty).
+sha2 = { workspace = true }
+rand = { workspace = true }
+# metalink data plane — workspace optional-dependency form + the `metalink`
+# feature (on by default; compiled in for official Motrix builds). When
+# off, no taiji-metalink code compiles anywhere in the tree (a
+# `--no-default-features` build is the gate) and RPC does not register
+# addMetalink (method does not exist). The addMetalink execution surface =
+# this crate's consumption seam src/metalink.rs: parse (taiji-metalink) ->
+# expand into per-task AddUri calls on the existing session path ("task
+# orchestration all goes through existing paths"); method registration is
+# transitively gated via `taiji-core/metalink` (the registry single point
+# is in core; the dispatch canonical_method concentration point keeps its
+# shape).
+taiji-metalink = { path = "../taiji-metalink", optional = true }
+
+[features]
+default = ["metalink"]
+# metalink data-plane gate: on = the [`crate::metalink`] consumption seam +
+# addMetalink registration (transitively enabled via taiji-core/metalink);
+# off = taiji-metalink out of the dependency graph and no addMetalink in
+# the registry (tests/feature_gate.rs asserts both states).
+metalink = ["dep:taiji-metalink", "taiji-core/metalink"]
+
+[dev-dependencies]
+# Alignment assertions (test-only, not in the production dependency graph —
+# the crate topology direction table has no rpc→http edge; this edge exists
+# only for the tests target): the error mapping table and taiji-http's
+# `HttpError` variant enum cross-validated variant by variant (the
+# taiji-rpc error mapping table = the single source for numeric codes).
+taiji-http = { path = "../taiji-http" }
+
+[lints]
+workspace = true

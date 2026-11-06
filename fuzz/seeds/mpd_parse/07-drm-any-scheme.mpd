@@ -1,0 +1,3 @@
+<MPD type="static"><Period><AdaptationSet mimeType="video/mp4">
+  <ContentProtection schemeIdUri="urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95"/>
+  <Representation id="v" bandwidth="1"/></AdaptationSet></Period></MPD>

@@ -1,0 +1,6 @@
+<MPD type="static"><Period>
+  <AdaptationSet mimeType="video/mp4"><SegmentTemplate timescale="1" duration="1" media="v$Number$.m4s"/>
+    <Representation id="hi" bandwidth="900" height="1080"/><Representation id="lo" bandwidth="100" height="360"/></AdaptationSet>
+  <AdaptationSet mimeType="audio/mp4" lang="de"><SegmentTemplate timescale="1" duration="1" media="de$Number$.m4s"/><Representation id="a-de" bandwidth="64"/></AdaptationSet>
+  <AdaptationSet mimeType="audio/mp4" lang="en"><SegmentTemplate timescale="1" duration="1" media="en$Number$.m4s"/><Representation id="a-en" bandwidth="96"/></AdaptationSet>
+</Period></MPD>

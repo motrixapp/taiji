@@ -1,0 +1,9 @@
+WEBVTT
+
+1
+00:00:00.500 --> 00:00:02.500
+first <c.yellow>cue</c>
+line two
+
+00:01:00.000 --> 00:01:05.250,comma-sep
+second cue

@@ -1,0 +1,1 @@
+Digest realm="test", qop="auth,auth-int", nonce="abc", opaque="xyz", algorithm=MD5, stale=FALSE

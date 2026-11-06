@@ -1,0 +1,8 @@
+<MPD type="static" profiles="urn:x" availabilityStartTime="2020-01-01T00:00:00Z">
+  <UTCTiming schemeIdUri="urn:mpeg:dash:utc:http-iso:2014" value="https://time.test/t"/>
+  <Period><AdaptationSet mimeType="video/mp4">
+    <Role value="main"/><EssentialProperty schemeIdUri="urn:x"><SegmentURL media="never.m4s"/></EssentialProperty>
+    <SegmentTemplate timescale="1" duration="1" media="s$Number$.m4s"><SegmentTimeline><S t="0" d="1"/></SegmentTimeline></SegmentTemplate>
+    <Representation id="v" bandwidth="1"><AudioChannelConfiguration value="2"/></Representation>
+  </AdaptationSet></Period>
+</MPD>

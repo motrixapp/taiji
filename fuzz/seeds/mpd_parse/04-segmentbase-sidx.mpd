@@ -1,0 +1,8 @@
+<MPD type="static"><Period>
+  <AdaptationSet mimeType="video/mp4">
+    <Representation id="v" bandwidth="1">
+      <BaseURL>media.mp4</BaseURL>
+      <SegmentBase timescale="1000" indexRange="700-937"><Initialization range="0-699"/></SegmentBase>
+    </Representation>
+  </AdaptationSet>
+</Period></MPD>

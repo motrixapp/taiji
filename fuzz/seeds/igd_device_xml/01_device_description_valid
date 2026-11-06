@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:2</deviceType>
+    <friendlyName>seed-gateway</friendlyName>
+    <manufacturer>blackhole-fuzz</manufacturer>
+    <UDN>uuid:00000000-0000-0000-0000-000000000001</UDN>
+    <deviceList>
+      <device>
+        <deviceType>urn:schemas-upnp-org:device:WANDevice:2</deviceType>
+        <friendlyName>wan</friendlyName>
+        <serviceList>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:WANIPConnection:2</serviceType>
+            <serviceId>urn:upnp-org:serviceId:WANIPConn</serviceId>
+            <SCPDURL>/scpd.xml</SCPDURL>
+            <controlURL>/control</controlURL>
+            <eventSubURL>/event</eventSubURL>
+          </service>
+        </serviceList>
+      </device>
+    </deviceList>
+  </device>
+</root>

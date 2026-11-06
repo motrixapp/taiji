@@ -1,0 +1,369 @@
+[package]
+name = "taiji-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace: not part of the main workspace's gate ( the gate
+# runs crates/*); the fuzz gate is triggered by the nightly cluster on
+# schedule.
+[workspace]
+
+[dependencies]
+taiji-bt = { path = "../crates/taiji-bt" }
+taiji-http = { path = "../crates/taiji-http" }
+# the cookies target follows the module into the segment
+# vocabulary crate (the verbatim lift from taiji-http).
+taiji-segment = { path = "../crates/taiji-segment" }
+taiji-io = { path = "../crates/taiji-io" }
+taiji-store = { path = "../crates/taiji-store" }
+taiji-rpc = { path = "../crates/taiji-rpc" }
+# security-audit work: wiring up the core/domain parsers
+# (option strings / sizes / select-file and the Metainfo top level).
+taiji-core = { path = "../crates/taiji-core" }
+taiji-domain = { path = "../crates/taiji-domain" }
+# the metalink v4 whole-document byte-stream parse
+# surface (the parser = a fuzz-roster duty).
+taiji-metalink = { path = "../crates/taiji-metalink" }
+# the ffmpeg -progress line-protocol parser and
+# the ffprobe JSON structuring surface (both fuzz-roster duty rows).
+taiji-media = { path = "../crates/taiji-media" }
+# Round-trip assertion of the ffprobe-json fuzz target (same version as
+# the workspace registry row).
+serde_json = "1"
+bytes = "1"
+# Probe URL construction for the cookie fuzz target (same version lock as
+# reqwest's url dependency).
+url = "2"
+tokio-util = { version = "0.7", features = ["codec"] }
+libfuzzer-sys = "0.4"
+# Align with the main repo's rand 0.10 (udp_tracker_reply's tracker client
+# API takes the 0.10 Rng trait — the earlier 0.9 declaration was left
+# broken and failing to compile in this standalone workspace; fixed along
+#).
+rand = "0.10"
+
+[[bin]]
+name = "peer_frame"
+path = "fuzz_targets/peer_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filetree"
+path = "fuzz_targets/filetree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bencode"
+path = "fuzz_targets/bencode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "magnet"
+path = "fuzz_targets/magnet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trackerslist"
+path = "fuzz_targets/trackerslist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udp_demux_classify"
+path = "fuzz_targets/udp_demux_classify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dht_packet"
+path = "fuzz_targets/dht_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mse_handshake"
+path = "fuzz_targets/mse_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "utp_header"
+path = "fuzz_targets/utp_header.rs"
+test = false
+doc = false
+bench = false
+
+# : the `.aria2` control-file parser (DefaultBtProgressInfoFile.cc layout).
+[[bin]]
+name = "aria2_ctrl"
+path = "fuzz_targets/aria2_ctrl.rs"
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+[[bin]]
+name = "udp_tracker_reply"
+path = "fuzz_targets/udp_tracker_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nat_pmp_reply"
+path = "fuzz_targets/nat_pmp_reply.rs"
+test = false
+doc = false
+bench = false
+
+# (NAT-9): the IGD device-description/SOAP-response XML parse surface
+# (fully attacker-controlled; deep pre-check + roxmltree + explicit stack
+# traversal share one implementation).
+[[bin]]
+name = "igd_device_xml"
+path = "fuzz_targets/igd_device_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lsd_packet"
+path = "fuzz_targets/lsd_packet.rs"
+test = false
+doc = false
+bench = false
+
+# ---- registration backfill: the following 6 target files have been
+# missing their [[bin]] registration since delivery (cargo fuzz list showed
+# 12 of 18 files registered; exposed by the  nightly rotation sweep).
+
+# : the DHT persistence parse surface (routing_table BLOB + aria2 dht.dat).
+[[bin]]
+name = "dht_persist"
+path = "fuzz_targets/dht_persist.rs"
+test = false
+doc = false
+bench = false
+
+# : the eMule .dat blocklist parser.
+[[bin]]
+name = "emule_dat"
+path = "fuzz_targets/emule_dat.rs"
+test = false
+doc = false
+bench = false
+
+# : RPC addTorrent base64 decoding.
+[[bin]]
+name = "rpc_base64"
+path = "fuzz_targets/rpc_base64.rs"
+test = false
+doc = false
+bench = false
+
+# : HTTP Basic authentication header parsing.
+[[bin]]
+name = "rpc_basic_auth"
+path = "fuzz_targets/rpc_basic_auth.rs"
+test = false
+doc = false
+bench = false
+
+# : ut_metadata payload decode/encode round-trip.
+[[bin]]
+name = "ut_metadata"
+path = "fuzz_targets/ut_metadata.rs"
+test = false
+doc = false
+bench = false
+
+# : ut_pex payload decode/encode round-trip.
+[[bin]]
+name = "ut_pex"
+path = "fuzz_targets/ut_pex.rs"
+test = false
+doc = false
+bench = false
+
+# HTTP download base (spec §4.1): the `--load-cookies` Netscape cookie-file
+# parse surface (fully attacker-controlled; the parser = a fuzz-roster
+# duty, <=1MiB cap + lenient line skipping + closed-surface assertions on
+# the Cookie-header injection face).
+[[bin]]
+name = "cookies"
+path = "fuzz_targets/cookies.rs"
+test = false
+doc = false
+bench = false
+
+# the metalink v4 whole-document byte-stream parse
+# surface (fully attacker-controlled; <=16MiB / <file>≤10k / url≤64 caps +
+# DTD/entities disabled + explicit v3 fallback all verified panic-free
+# through the fuzz surface).
+[[bin]]
+name = "metalink_v4"
+path = "fuzz_targets/metalink_v4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metainfo_parse"
+path = "fuzz_targets/metainfo_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "options_parse"
+path = "fuzz_targets/options_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_http_date"
+path = "fuzz_targets/parse_http_date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_www_authenticate"
+path = "fuzz_targets/parse_www_authenticate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "naming_sanitize"
+path = "fuzz_targets/naming_sanitize.rs"
+test = false
+doc = false
+bench = false
+
+# the `-progress pipe:1` line-protocol parser
+# (lossy-UTF-8 tolerance + chunk-size invariance + end-marker
+# provenance verified panic-free through the fuzz surface).
+[[bin]]
+name = "ffmpeg_progress"
+path = "fuzz_targets/ffmpeg_progress.rs"
+test = false
+doc = false
+bench = false
+
+# the ffprobe JSON structuring surface (explicit
+# parse errors on non-JSON; accessor consistency on success).
+[[bin]]
+name = "ffprobe_json"
+path = "fuzz_targets/ffprobe_json.rs"
+test = false
+doc = false
+bench = false
+
+# the m3u8 manifest parse surface (sniff +
+# line-oriented state machine; v0.3.1 semantics — BYTERANGE per-URI
+# omitted-offset accumulation, METHOD=NONE explicit reset, positional
+# MAP/KEY boundary — verified panic-free with caps/identity/ENDLIST/
+# run invariants asserted through the fuzz surface).
+[[bin]]
+name = "m3u8_parse"
+path = "fuzz_targets/m3u8_parse.rs"
+test = false
+doc = false
+bench = false
+
+# the `data:` URI parser of the media key
+# face (64KiB decoded cap + exactly-16-byte key bodies + deterministic
+# verdicts verified panic-free through the fuzz surface).
+[[bin]]
+name = "data_uri"
+path = "fuzz_targets/data_uri.rs"
+test = false
+doc = false
+bench = false
+
+# the WebVTT
+# cue parser + timeline splice of the subtitle-sidecar line —
+# cue-level parsing with timestamp rebasing is a §10 parse-surface
+# red line, so the fuzz target is mandatory (panic-free caps/order/
+# determinism invariants asserted through the fuzz surface).
+[[bin]]
+name = "vtt_splice"
+path = "fuzz_targets/vtt_splice.rs"
+test = false
+doc = false
+bench = false
+
+# the ISO-BMFF read surface (iter_boxes /
+# read_moof / parse_init / fold_track) — hostile bytes are explicit
+# errors, never panics; the box-end integer-wraparound shape
+# (largesize = 2^64 - k, the /tmp/shiftpoc crash) is the seed of
+# record.
+[[bin]]
+name = "bmff"
+path = "fuzz_targets/bmff.rs"
+test = false
+doc = false
+bench = false
+
+# the output-template expansion +
+# forced-sanitization face (the §11 injection-vector family is the
+# committed seed corpus; the untrusted-remote-string guarantees —
+# no separator/control/leading-dash, length clamp, non-empty — are
+# asserted through the fuzz surface).
+[[bin]]
+name = "template"
+path = "fuzz_targets/template.rs"
+test = false
+doc = false
+bench = false
+
+# the three-layer selector expression
+# face (a raw RPC string; parse determinism + resolution-named-URIs-
+# exist invariants asserted through the fuzz surface; the expression
+# matrix is the committed seed corpus).
+[[bin]]
+name = "selector"
+path = "fuzz_targets/selector.rs"
+test = false
+doc = false
+bench = false
+
+# the
+# MPD (DASH) parse + expansion surface — quick-xml streaming with
+# DTD/entities disabled, the judgment-table refusals (dynamic →
+# live_unsupported, ContentProtection → drm_unsupported, nested sidx
+# → sidx_unsupported), the caps (16MiB body / 100k segments), the
+# cross-period ordinal identity and the template grammar verified
+# panic-free through the fuzz surface; the sidx materialization arm
+# rides this target plus the bmff extension.
+[[bin]]
+name = "mpd_parse"
+path = "fuzz_targets/mpd_parse.rs"
+test = false
+doc = false
+bench = false

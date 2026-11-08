@@ -34,7 +34,7 @@ fn read(rel: &str) -> String {
 }
 
 fn spec() -> String {
-    read("docs/SPEC.md")
+    read("docs/spec.md")
 }
 
 /// Return the matrix row starting `| BEP <n> ` (first match).

@@ -5205,7 +5205,13 @@ mod tests {
         let plan = crate::scheduler::GuidedPlan::build(bs, &guided_cfg(1), &|_| false)
             .unwrap_or_else(|e| panic!("plan: {e}"));
         let sink = Arc::new(RecordingSink::new(false));
-        let window = Duration::from_millis(30);
+        // 250ms (not the historical 30ms): Windows scheduler overshoot
+        // on the inter-sample sleeps once straddled two eval windows,
+        // landing a sample "late" and earning an extra optimistic
+        // doubling (2→4→8 instead of 2→4). With the window at 250ms a
+        // realistic overshoot cannot skip a window; the growth math is
+        // unchanged.
+        let window = Duration::from_millis(250);
         let (handle, actor) = spawn_dynamic(
             "8000000000001901",
             grid,

@@ -581,9 +581,8 @@ mod tests {
         }));
         // Supply the runtime the contract requires (see fire's doc):
         // bare-call panics on Linux via the pidfd reaper.
-        let _ = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(async { runner.fire(HookEvent::Stop) });
+        let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| panic!("test runtime: {e}"));
+        let _ = rt.block_on(async { runner.fire(HookEvent::Stop) });
         let order = ORDER.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(
             order.as_slice(),

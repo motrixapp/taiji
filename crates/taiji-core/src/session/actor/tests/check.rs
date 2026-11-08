@@ -1172,11 +1172,11 @@ async fn unpause_all_clears_parked_check_pending_intent() {
     // member stays paused in the waiting queue (the pre-fix face
     // leaves the member that was still parked at unpauseAll stuck
     // paused — the stalled assert trips on the residue).
-    // 1500×20ms = 30s: the resume wave (recheck + reactivation of five
-    // members) exceeded the historical 12s budget on loaded shared CI
-    // runners where the whole suite runs concurrently.
+    // 4500×20ms = 90s: the resume wave (recheck + reactivation of five
+    // members) exceeded both the historical 12s and a 30s budget on
+    // loaded shared CI runners where the whole suite runs concurrently.
     let mut resumed = false;
-    for _ in 0..1500 {
+    for _ in 0..4500 {
         let waiting = tell_waiting(&handle).await;
         let stalled = waiting
             .iter()
@@ -1198,6 +1198,20 @@ async fn unpause_all_clears_parked_check_pending_intent() {
             "zero results on the verification path"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if !resumed {
+        // Timeout diagnostics: distinguish "slow" from "stuck" — dump
+        // the final queue/meter state so a recurrence on CI shows
+        // WHICH member stayed parked and in what status.
+        let waiting = tell_waiting(&handle).await;
+        eprintln!(
+            "unpause_all timeout diagnostics: num_active={} waiting={:?}",
+            num_active(&handle).await,
+            waiting
+                .iter()
+                .map(|v| (v.gid.to_string(), v.status))
+                .collect::<Vec<_>>()
+        );
     }
     assert!(
         resumed,

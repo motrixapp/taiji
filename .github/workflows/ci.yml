@@ -40,13 +40,13 @@ jobs:
       - run: cargo test -p taiji-http --lib
 
   # metalink feature-off two-legged job (--no-default-features: one leg each
-  # for taiji-rpc/motrix-taiji, off-state compile + test — without a CI guard
+  # for taiji-rpc/taiji, off-state compile + test — without a CI guard
   # the off-state compile surface rots freely).
   feature-off-metalink:
     strategy:
       fail-fast: false
       matrix:
-        crate: [taiji-rpc, motrix-taiji]
+        crate: [taiji-rpc, taiji]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

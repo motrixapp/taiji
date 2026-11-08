@@ -1,11 +1,12 @@
 [package]
-name = "motrix-taiji"
-description = "Binary entry point (bin name: taiji)"
+name = "taiji"
+description = "Binary entry point (package name = bin name: taiji)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "taiji"

@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 # Dependency discipline (same text as src/lib.rs): must not depend on
 # core/rpc/cli — the ban is enforced by the Cargo compiler (dependency

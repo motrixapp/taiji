@@ -77,7 +77,7 @@ pub mod media;
 pub use crate::engine::metrics;
 mod options;
 /// pub: the migration importer assembly face (`persist::import`, SPEC
-/// §10 `taiji import`) is called by the motrix-taiji orchestration; the
+/// §10 `taiji import`) is called by the taiji CLI orchestration; the
 /// row assembly face stays pub(crate).
 pub mod persist;
 mod queue;
@@ -117,13 +117,13 @@ pub use options::{
     parse_size, peer_connection_type_str, split_bt_tracker, windows_unsafe_basename,
 };
 /// Targeted recheck export (the standalone `--check-integrity`
-/// consumption face — motrix-taiji rescans the disk before spawn and
+/// consumption face — the taiji CLI rescans the disk before spawn and
 /// maps the outcome bitmap; `RecheckOutcome` is exported alongside for
 /// mapping/test construction. The module body stays pub(crate)).
 pub use recheck::{RecheckOutcome, recheck_on_disk_recovering_with_progress};
 /// The per-host cap default, forwarded from a single source (a
 /// taiji-http constant; the session-init backfill value when the CLI
-/// face `--http-max-per-host` is unset — motrix-taiji reads the same
+/// face `--http-max-per-host` is unset — the taiji CLI reads the same
 /// source without depending on taiji-http directly).
 pub use taiji_http::perhost::DEFAULT_MAX_PER_HOST;
 pub use view::{

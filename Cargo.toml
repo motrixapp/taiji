@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/motrix-taiji",
+    "crates/taiji",
     "crates/taiji-rpc",
     "crates/taiji-core",
     "crates/taiji-engine",
@@ -20,6 +20,10 @@ edition = "2024"
 rust-version = "1.88"
 license = "GPL-2.0-or-later"
 authors = ["Motrix contributors"]
+# Distribution = the packaging matrix + GitHub Releases (binaries); no
+# consumption scenario needs crates.io (sidecar bundling / standalone CLI
+# all ship as artifacts), so publishing is forbidden outright.
+publish = false
 
 # Logical layering and dependency direction (crate layering finalized;
 # reverse dependency = PR must be rejected):

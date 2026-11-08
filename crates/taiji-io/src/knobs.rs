@@ -796,7 +796,7 @@ pub fn read_buf_shrink_enabled() -> bool {
 /// only carries the reactor loop and `spawn_blocking` closures); effective
 /// value clamped to [256, 8192] (=2048 restores the tokio default
 /// bit-for-bit; 256 guards against starvation-prone tiny stacks). Consumer
-/// = the motrix-taiji runtime builder (`thread_stack_size`; stack mapping
+/// = the taiji CLI runtime builder (`thread_stack_size`; stack mapping
 /// preallocation only — scheduling semantics untouched).
 ///
 /// Read timing: **construction** — read once at process start before the

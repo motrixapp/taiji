@@ -1389,29 +1389,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "motrix-taiji"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "rand 0.10.3",
- "rusqlite",
- "serde_json",
- "sha1 0.11.0",
- "sha2",
- "taiji-bt",
- "taiji-core",
- "taiji-http",
- "taiji-io",
- "taiji-media",
- "taiji-rpc",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2250,6 +2227,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "taiji"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "rand 0.10.3",
+ "rusqlite",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2",
+ "taiji-bt",
+ "taiji-core",
+ "taiji-http",
+ "taiji-io",
+ "taiji-media",
+ "taiji-rpc",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

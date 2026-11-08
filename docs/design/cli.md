@@ -1,7 +1,7 @@
 # CLI design notes
 
-Distilled design notes behind the `motrix-taiji` CLI crate (the `taiji`
-binary): the `import` migration subcommand, the session database
+Distilled design notes behind the `taiji` CLI crate (bin of the same
+name): the `import` migration subcommand, the session database
 cross-process lock, the `--print-completions` generator, and the
 `create-torrent` subcommand. The behavioral reference is upstream aria2,
 read-only.

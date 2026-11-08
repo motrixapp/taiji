@@ -1,4 +1,4 @@
-//! `taiji` — the binary entry point (crates/motrix-taiji).
+//! `taiji` — the binary entry point (crates/taiji).
 //!
 //! Modes (mirrors the upstream three-state assembly, ):
 //! - **Download mode** (a .torrent positional arg is given): parse the

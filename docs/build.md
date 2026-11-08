@@ -9,7 +9,7 @@ crates/
   taiji-store   storage layer: layout / Merkle / write cache / sqlite persistence
   taiji-core    orchestration layer: session actor / engine main loop / recovery
   taiji-rpc     JSON-RPC + WebSocket service
-  motrix-taiji  bin (command name taiji)
+  taiji        bin (package name = command name)
 ```
 
 Dependency direction: cli → rpc → core → {bt → {io, store}, store}; `unsafe` is
@@ -30,7 +30,7 @@ NAT-PMP / IGD XML).
 
 ## Release
 
-- crates.io publish order: taiji-io → taiji-bt → taiji-store → taiji-core →
-  taiji-rpc → motrix-taiji (`cargo publish --dry-run` first).
+- crates.io: never published — the workspace is `publish = false`; the engine
+  ships as binaries only (the packaging matrix below + GitHub Releases).
 - Packaging matrix (`packaging/`): macos-universal / linux-x64 / windows-x64;
   linux targets glibc 2.35 as the compatibility floor.

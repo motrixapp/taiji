@@ -777,7 +777,7 @@ fn apply_entry(
         // `min-tls-version`: value domain `tls1.2|tls1.3` (the same
         // domain as the clap value_parser — the two literals frozen;
         // taiji-http `MinTlsVersion::from_value` is the domain's
-        // semantic source, motrix-taiji has no such dependency edge so
+        // semantic source, the taiji crate has no such dependency edge so
         // the literals are mirrored here. The aria2 domain has one more
         // member TLSv1.1 — rustls 0.23 supports only 1.2/1.3, the
         // narrowing declaration is in the Cli field doc).

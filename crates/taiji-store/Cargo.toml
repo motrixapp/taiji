@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+publish.workspace = true
 
 [dependencies]
 # `Bytes` (reference-counted zero-copy slices) on the block placement

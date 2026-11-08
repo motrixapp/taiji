@@ -933,7 +933,7 @@ pub fn crypto_level_str(l: taiji_bt::mse::CryptoLevel) -> &'static str {
 /// declaration).
 ///
 /// Public export (single declaration source): diff tests and new-option
-/// acceptance outside core (the taiji-rpc seam, the motrix-taiji CLI
+/// acceptance outside core (the taiji-rpc seam, the taiji CLI
 /// face) consume this table directly for subset checks.
 pub const ARIA2_OPTION_NAMES: &[&str] = &[
     // Global/task-common (getGlobalOption echo + parse_task_options).
@@ -1319,7 +1319,7 @@ pub const DECLARED_OPTION_DIFFS: &[(&str, &str)] = &[
          fork in the differential audit",
     ),
     // ---- Domain 5: metalink selector CLI face + behavior misc (the
-    // motrix-taiji CLI seam; acceptance = the CLI top-level face / the
+    // taiji CLI seam; acceptance = the CLI top-level face / the
     // `taiji http` metalink shape — the RPC/session faces do not accept
     // them, so the addMetalink/changeGlobalOption seam semantics are
     // unchanged).
@@ -2175,7 +2175,7 @@ static GLOBAL_PATCH_TABLE: &[OptionDecl<GlobalPatchApply>] = &[
     // budget never preempts in-flight members, it only gates subsequent
     // admissions; a widened seed budget reactivates seed_wait members
     // FIFO without ever touching a download slot. CLI/conf faces live in
-    // motrix-taiji (conf.rs arms + the Cli flags; hard domain validation
+    // the taiji crate (conf.rs arms + the Cli flags; hard domain validation
     // there — the fail-fast conf shape — same domains). ----
     OptionDecl::table_row(
         "max-concurrent-seeds",
@@ -2737,7 +2737,7 @@ pub(crate) const ADD_URI_DIRECT_OPTION_NAMES: &[&str] =
 /// Mirror of the metalink seam's accepted names (the single facts live
 /// in taiji-rpc
 /// `metalink::{UNSUPPORTED_METALINK_OPTIONS, AUTO_DISCOVER_OPTION}` +
-/// the motrix-taiji CLI `--metalink-file`). The core table is the
+/// the taiji CLI `--metalink-file`). The core table is the
 /// declaration single source; the subset check (seam face ⊆ declaration
 /// table) lives in the taiji-rpc seam tests (mirror/seam drift turns
 /// red).
@@ -4339,7 +4339,7 @@ mod tests {
             );
         }
         // CLI-only accepted names (domain 5 onward): the acceptance face
-        // = the motrix-taiji CLI top-level face / the `taiji http`
+        // = the taiji CLI top-level face / the `taiji http`
         // metalink shape (declaration entries in DECLARED_OPTION_DIFFS —
         // the unit/effect-face diffs are registered per name), while the
         // core session/RPC faces do not accept them (no parse arm, no

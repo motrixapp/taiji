@@ -98,7 +98,7 @@ struct SpillEntry {
 /// sqlite database at `<task_dir>/face<N>.lock`, held for the life of
 /// the connection and released on drop (connection close).
 ///
-/// Mechanism and trade-offs mirror motrix-taiji `db_lock.rs` (the
+/// Mechanism and trade-offs mirror the taiji crate's `db_lock.rs` (the
 /// existing session-db cross-process lock discipline): a
 /// kernel-arbitrated lockfile — process death (including kill -9)
 /// releases through the kernel, so there is no stale-lock deadlock (an

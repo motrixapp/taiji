@@ -1,0 +1,6 @@
+# Normalize every text file to LF in the working tree on all platforms.
+# Governance tests parse source/docs text with embedded newline literals
+# (e.g. schema.rs media_task_state_comment_matches_the_spec_full_set via
+# include_str!), and a CRLF Windows checkout breaks them. Binary detection
+# stays automatic.
+* text=auto eol=lf

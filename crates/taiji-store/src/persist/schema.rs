@@ -382,7 +382,12 @@ mod tests {
             "error",
             "done",
         ];
-        let source = include_str!("schema.rs");
+        // CRLF-tolerant: a Windows checkout without eol=lf delivers \r\n
+        // through include_str!, which would break the embedded-newline
+        // literal below (the .gitattributes eol=lf rule is the systemic
+        // fix; this normalization keeps the test immune even in
+        // pre-existing clones).
+        let source = include_str!("schema.rs").replace("\r\n", "\n");
         // Scan the declarations region only (this test's own wording
         // would otherwise self-match).
         let declarations = &source[..source.find("mod tests").unwrap_or(source.len())];

@@ -2592,12 +2592,25 @@ mod tests {
             "# TYPE taiji_rpc_auth_backoff_active gauge",
             "taiji_rpc_auth_backoff_active 0",
         ];
+        // The metalink-off build legitimately drops the feature-gated
+        // addMetalink slot from the method table (the baseline is pinned
+        // against the feature-on face); filter it out of the expectation
+        // under --no-default-features so the off-state leg compares the
+        // same face it renders.
+        #[cfg(not(feature = "metalink"))]
+        let baseline: Vec<&str> = GOLDEN_BASELINE
+            .iter()
+            .copied()
+            .filter(|l| !l.contains("addMetalink"))
+            .collect();
+        #[cfg(feature = "metalink")]
+        let baseline: Vec<&str> = GOLDEN_BASELINE.to_vec();
         assert_eq!(
             non_dns.len(),
-            GOLDEN_BASELINE.len(),
+            baseline.len(),
             "non-DNS line-count drift (reshaping the render face requires an explicit baseline review)"
         );
-        for (got, want) in non_dns.iter().zip(GOLDEN_BASELINE) {
+        for (got, want) in non_dns.iter().zip(baseline.iter()) {
             assert_eq!(
                 got, want,
                 "existing metric projection drift (the add-only guarantee is broken)"

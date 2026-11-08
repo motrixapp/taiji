@@ -210,6 +210,7 @@ fn fork_db_watch_paths(db: &Path) -> Vec<PathBuf> {
 /// space-led annotation (the Linux lsof/readlink ` (deleted)` form).
 /// A prefix followed by anything but a space does not match —
 /// `fork.sqlite3-journal` must not masquerade as `fork.sqlite3`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn fd_target_matches(name: &str, candidates: &[PathBuf]) -> bool {
     candidates.iter().any(|c| {
         let c = c.to_string_lossy();
@@ -223,6 +224,7 @@ fn fd_target_matches(name: &str, candidates: &[PathBuf]) -> bool {
 /// Parse `lsof -Fn` output (pure function): a process set starts at
 /// `p<pid>`; `n<name>` is that process's open file name; other field
 /// lines (`f`/`c`/...) are ignored.
+#[cfg(target_os = "macos")]
 fn parse_lsof_fn_output(output: &str, candidates: &[PathBuf]) -> Vec<ForkFdHolder> {
     let mut holders = Vec::new();
     let mut pid: Option<u32> = None;
@@ -338,6 +340,22 @@ fn scan_fork_fds_platform(candidates: &[PathBuf]) -> ForkLiveness {
     } else {
         ForkLiveness::Alive(holders)
     }
+}
+
+/// Other-platform face (Windows and the remaining unix ports): no fd
+/// enumeration mechanism is wired (only the lsof/procfs faces above
+/// exist), so liveness cannot be proven — always
+/// [`ForkLiveness::Uncertain`] (default refuse, never silently clean;
+/// the caller decides on the layer-3 override flag). The
+/// scan_reports_external_process_holding_the_fork_db test pins this
+/// contract.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn scan_fork_fds_platform(_candidates: &[PathBuf]) -> ForkLiveness {
+    ForkLiveness::Uncertain(
+        "no fork fd enumeration mechanism on this platform: cannot enumerate \
+         processes holding fork database handles"
+            .to_string(),
+    )
 }
 
 /// Fork liveness fd scan entry point (precheck layer 2): enumerate
@@ -1518,6 +1536,7 @@ mod tests {
     /// sets plus `f<fd>`/`n<name>` field lines): candidate hits,
     /// canonical spelling, the `-journal` neighbor not masquerading,
     /// `(deleted)` marker tolerance, unrelated processes not collected.
+    #[cfg(target_os = "macos")]
     #[test]
     fn lsof_fn_output_parse_matches_candidates_only() {
         // Candidate face = the shape [`fork_db_watch_paths`] produces:
@@ -1571,6 +1590,7 @@ mod tests {
     /// Matcher edges: delete-marker tolerance; a non-space after the
     /// prefix is rejected (`-wal`/`-journal` do not masquerade as the
     /// main DB); empty candidates never match.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn fd_target_match_tolerates_markers_and_rejects_adjacent_names() {
         let candidates = vec![PathBuf::from("/dl/fork.sqlite3")];

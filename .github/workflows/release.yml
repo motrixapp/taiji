@@ -1,0 +1,119 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            target: aarch64-apple-darwin
+            runs-on: macos-latest
+            artifact: taiji-sidecar-macos-arm64.tar.gz
+          - platform: macos-x64
+            target: x86_64-apple-darwin
+            runs-on: macos-13
+            artifact: taiji-sidecar-macos-x64.tar.gz
+          - platform: linux-x64
+            target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-22.04
+            artifact: taiji-sidecar-linux-x64.tar.gz
+          - platform: windows-x64
+            target: x86_64-pc-windows-msvc
+            runs-on: windows-latest
+            artifact: taiji-sidecar-windows-x64.zip
+
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
+      # caused two-way fmt/dead-code drift; upgrades need an explicit commit and
+      # a full pass of the local gate
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-rust-${{ matrix.platform }}"
+          shared-key: "build-release-${{ matrix.target }}"
+
+      # Build determinism policy (packaging/README.md §5): RUSTFLAGS
+      # pinned to remap-path-prefix, and --locked build to freeze deps.
+      # via Cargo.lock. linux-x64 runs on ubuntu-22.04 to promise glibc ≥2.35.
+      - name: Build taiji release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/taiji
+
+      - name: Assemble VERSION.json and SHA256SUMS (layout per packaging/README.md)
+        shell: bash
+        run: |
+          mkdir -p taiji-sidecar-${{ matrix.platform }}
+          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+            cp target/${{ matrix.target }}/release/taiji.exe taiji-sidecar-${{ matrix.platform }}/
+          else
+            cp target/${{ matrix.target }}/release/taiji taiji-sidecar-${{ matrix.platform }}/
+          fi
+          rustc -vV > /tmp/rustc-vv.txt
+          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+            exe_name=taiji.exe
+          else
+            exe_name=taiji
+          fi
+          echo '{' >> VERSION.json
+          echo '  "version": "0.1.0",' >> VERSION.json
+          echo '  "version_string": "taiji/0.1.0",' >> VERSION.json
+          echo '  "git_sha": "'"${{ github.sha }}"'",' >> VERSION.json
+          echo '  "git_dirty": false,' >> VERSION.json
+          echo '  "build_time_utc": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",' >> VERSION.json
+          echo '  "target": "'"${{ matrix.target }}"'",' >> VERSION.json
+          echo '  "platform_layout": "taiji-sidecar-${{ matrix.platform }}",' >> VERSION.json
+          echo '  "rustc": "'"$(rustc --version | head -1)"'",' >> VERSION.json
+          echo '  "profile": "release",' >> VERSION.json
+          echo '  "rustflags": "--remap-path-prefix=/workspace=/taiji",' >> VERSION.json
+          echo '  "cargo_locked": true,' >> VERSION.json
+          echo '  "platform_matrix": ["macos-arm64","macos-x64","linux-x64","windows-x64"]' >> VERSION.json
+          echo '}' >> VERSION.json
+          cp VERSION.json taiji-sidecar-${{ matrix.platform }}/
+          cd taiji-sidecar-${{ matrix.platform }}
+          sha256sum ${exe_name} VERSION.json THIRD-PARTY-NOTICES.md > SHA256SUMS
+          cd ..
+          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+            7z a ${{ matrix.artifact }} ./taiji-sidecar-${{ matrix.platform }}/*
+          else
+            tar -czf ${{ matrix.artifact }} ./taiji-sidecar-${{ matrix.platform }}/*
+          fi
+          sha256sum ${{ matrix.artifact }} >> SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-${{ github.sha }}
+          path: ${{ matrix.artifact }}
+          retention-days: 90
+      - name: Create release with artifact
+        shell: bash
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --draft \
+            --prerelease \
+            --title "taiji ${{ github.ref_name }}" \
+            --target main \
+            --repo motrixapp/taiji \
+            --notes "taiji ${{ github.ref_name }} release build, aligned with Motrix platform matrix (macos-arm64, macos-x64, linux-x64, windows-x64). Build determinism policy (packaging/README.md §5): build with `--locked` (Cargo.lock) and `RUSTFLAGS=--remap-path-prefix=/workspace=/taiji`. linux-x64 is built on ubuntu-22.04 to promise glibc ≥2.35. windows-x64 artifact is a zip file; macOS/Linux tar.gz." \
+            "${{ matrix.artifact }}#taiji-sidecar-${{ matrix.platform }}" \
+            || true
+          gh release upload "${{ github.ref_name }}" \
+            --repo motrixapp/taiji \
+            "${{ matrix.artifact }}#taiji-sidecar-${{ matrix.platform }}" \
+            || true

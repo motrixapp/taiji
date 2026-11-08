@@ -68,3 +68,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p ${{ matrix.crate }} --no-default-features --all-targets -- -D warnings
       - run: cargo test -p ${{ matrix.crate }} --no-default-features --all-targets
+        env:
+          # Same documented downgrade as the gates job: no fork reference
+          # binary on CI (see the comment there).
+          TAIJI_DIFF_ALLOW_SKIP: "1"

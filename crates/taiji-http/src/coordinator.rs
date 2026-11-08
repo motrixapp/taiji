@@ -3079,7 +3079,12 @@ mod tests {
                  must not judge stalled (rate-independent)"
             );
         }
-        ticker.abort();
+        // Determinism: await the full 15-heartbeat ticker instead of
+        // aborting mid-flight — on loaded CI runners abort() once cut
+        // the final in-flight heartbeat and the written watermark came
+        // up exactly one heartbeat short of the asserted total (105 vs
+        // 120 bytes).
+        let _ = ticker.await;
 
         // Positive control: a real full window of silence -> the same decision
         // face grants (start = written-byte watermark = growth heartbeat total

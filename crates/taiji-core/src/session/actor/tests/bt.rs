@@ -651,7 +651,16 @@ async fn tell_status_snapshot_on_local_seeder_closed_loop() {
         .await
         {
             Ok(CommandReply::Peers(peers)) => {
-                if let Some(p) = peers.first() {
+                // Wait for THE seeder entry (matched by peer id): on
+                // Linux hosts a transient extra peer can occupy
+                // peers.first() (its registration lands before the
+                // seeder's handshake), which made the fixed-index pick
+                // a coin flip. Tolerate neighbors; assert on the entry.
+                const SEEDER_PEER_ID: [u8; 20] = *b"SEEDERSEEDERSEEDER00";
+                if let Some(p) = peers
+                    .iter()
+                    .find(|p| p.peer_id.as_ref() == Some(&SEEDER_PEER_ID))
+                {
                     // All fields present.
                     let PeerEntryView {
                         peer_id,
@@ -666,7 +675,6 @@ async fn tell_status_snapshot_on_local_seeder_closed_loop() {
                         transport,
                         crypto,
                     } = p;
-                    const SEEDER_PEER_ID: [u8; 20] = *b"SEEDERSEEDERSEEDER00";
                     assert_eq!(
                         peer_id.as_ref(),
                         Some(&SEEDER_PEER_ID),

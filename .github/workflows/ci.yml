@@ -17,6 +17,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # download_rpc_e2e spawns rqbit as the swarm counterpart (a harness
+      # dependency; dev machines have it via cargo install). Pinned to an
+      # exact release for reproducibility; bump deliberately.
+      - name: Install rqbit (e2e harness dependency)
+        run: |
+          curl -sSL -o /usr/local/bin/rqbit \
+            https://github.com/ikatson/rqbit/releases/download/v9.1.0/rqbit-linux-amd64
+          chmod +x /usr/local/bin/rqbit
+          rqbit --version
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The live two-process differential defaults red without the fork
@@ -66,6 +75,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Same e2e harness dependency as the gates job (the taiji crate leg
+      # runs download_rpc_e2e here too).
+      - name: Install rqbit (e2e harness dependency)
+        run: |
+          curl -sSL -o /usr/local/bin/rqbit \
+            https://github.com/ikatson/rqbit/releases/download/v9.1.0/rqbit-linux-amd64
+          chmod +x /usr/local/bin/rqbit
+          rqbit --version
       - run: cargo clippy -p ${{ matrix.crate }} --no-default-features --all-targets -- -D warnings
       - run: cargo test -p ${{ matrix.crate }} --no-default-features --all-targets
         env:

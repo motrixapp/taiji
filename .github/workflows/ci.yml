@@ -9,6 +9,11 @@ jobs:
   gates:
     runs-on: ubuntu-24.04
     steps:
+      # The full debug build of this workspace + the GiB-scale e2e
+      # fixtures exceed the runner's stock free space (two consecutive
+      # no-space failures); drop the preinstalled SDK bloat (~25GB).
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup || true
       - uses: actions/checkout@v4
       # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
       # caused two-way fmt/dead-code drift; upgrades need an explicit commit and

@@ -1140,7 +1140,6 @@ mod tests {
             assert_eq!(verdict(5), DirFsyncVerdict::ServerAckDegraded);
             assert_eq!(verdict(50), DirFsyncVerdict::ServerAckDegraded);
             assert_eq!(verdict(22), DirFsyncVerdict::Fatal);
-            assert_eq!(verdict(5), DirFsyncVerdict::Fatal, "ERROR_ACCESS_DENIED");
         }
         #[cfg(unix)]
         {

@@ -1159,7 +1159,9 @@ fn dedup_kv_read_failure_fails_tasks_instead_of_silent_reimport() {
 
 /// Run `taiji import <args>` with injected environment (PATH
 /// redirection simulates lsof absence); returns (exit code, stdout,
-/// stderr).
+/// stderr). macOS-only face: every caller is an lsof-simulation test
+/// (ungated it dead-codes on Linux under -D warnings).
+#[cfg(target_os = "macos")]
 fn run_import_with_envs(args: &[String], envs: &[(&str, &Path)]) -> (i32, String, String) {
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_taiji"));

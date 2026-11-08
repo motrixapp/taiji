@@ -19,7 +19,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The live two-process differential defaults red without the fork
+      # reference binary (fail-closed by design, rpc-api-diff §governance);
+      # CI has no reference checkout, so downgrade to the documented
+      # SKIP-green — the output keeps the machine-readable
+      # `SKIP(taiji.rpc.live-diff): …` marker for consumers to check.
+      # Restore a real reference (build the fork + TAIJI_DIFF_ARIA2C)
+      # before removing this.
       - run: cargo test --workspace --all-targets
+        env:
+          TAIJI_DIFF_ALLOW_SKIP: "1"
 
   store-bt-subset:
     strategy:

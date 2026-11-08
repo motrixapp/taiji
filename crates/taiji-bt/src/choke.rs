@@ -73,14 +73,14 @@ pub const ARIA2_SEEDER_OPTIMISTIC_SLOTS: usize = 4;
 /// slots to concentrate reciprocity.
 ///
 /// - `budget_bps = 0` (upload unlimited) or `floor_bps = 0` (division
-/// guard) -> `static_n`: a missing budget face is never guessed — fall
-/// back to the existing static slots (`BH_UNCHOKE_SLOTS`, default 8 =
-/// [`UNCHOKE_SLOTS`]);
+///   guard) -> `static_n`: a missing budget face is never guessed — fall
+///   back to the existing static slots (`BH_UNCHOKE_SLOTS`, default 8 =
+///   [`UNCHOKE_SLOTS`]);
 /// - N = `budget_bps / floor_bps` clamped to [4, 32] (lower bound 4 = the
-/// generosity floor of budget-derived mode, still wider than the aria2
-/// fallback 3; upper bound 32 = runaway defense). Optimistic ratio
-/// max(1, N/5) scales with N (same formula as
-/// [`LeecherChoke::select_libtorrent`]).
+///   generosity floor of budget-derived mode, still wider than the aria2
+///   fallback 3; upper bound 32 = runaway defense). Optimistic ratio
+///   max(1, N/5) scales with N (same formula as
+///   [`LeecherChoke::select_libtorrent`]).
 ///
 /// Consumed by the engine's choke assembly: the limiter lives on the
 /// engine-side `DialCtx`, out of this crate's reach, so the engine
@@ -406,19 +406,19 @@ impl LeecherChoke {
     /// libtorrent mode:
     ///
     /// - Regular slots = `total_slots` minus this round's optimistic count
-    /// (optimistic counts against the total budget); candidates =
-    /// interested, not snubbed, not the optimistic holder (optimistic and
-    /// regular slots never overlap — overlap would crowd the budget;
-    /// libtorrent accounts the optimistic set independently,
-    /// `session_impl.cpp`). Sort keys follow the aria2 port (keep-position
-    /// partition + download speed descending), via [`partial_top_k`]
-    /// partial sort (nth_element port);
+    ///   (optimistic counts against the total budget); candidates =
+    ///   interested, not snubbed, not the optimistic holder (optimistic and
+    ///   regular slots never overlap — overlap would crowd the budget;
+    ///   libtorrent accounts the optimistic set independently,
+    ///   `session_impl.cpp`). Sort keys follow the aria2 port (keep-position
+    ///   partition + download speed descending), via [`partial_top_k`]
+    ///   partial sort (nth_element port);
     /// - Optimistic: reselected every [`OPTIMISTIC_ROUND_EVERY`] rounds
-    /// (phase aligned). Candidates sort by `last_optimistically_unchoked`
-    /// ascending (None = never = waited longest first); the holder
-    /// participates with its own timestamp and is kept if still in the top
-    /// N. On non-reselection rounds the holder is kept but loses the slot
-    /// when interested/snub changes.
+    ///   (phase aligned). Candidates sort by `last_optimistically_unchoked`
+    ///   ascending (None = never = waited longest first); the holder
+    ///   participates with its own timestamp and is kept if still in the top
+    ///   N. On non-reselection rounds the holder is kept but loses the slot
+    ///   when interested/snub changes.
     ///
     /// `total_slots`: leecher total slots (optimistic included). Production
     /// path = `BH_UNCHOKE_SLOTS` (default 8 = [`UNCHOKE_SLOTS`], see
@@ -609,15 +609,15 @@ impl SeederChoke {
     /// # Deliberate divergences
     ///
     /// - Sort key input is the engine's `peer_rates.up` 10s sliding-window
-    /// rate (fed at 1s ticks); libtorrent uses per-round (~15s) delta
-    /// bytes / measured unchoke interval — same direction (the faster a
-    /// peer receives from us, the more it keeps its slot);
+    ///   rate (fed at 1s ticks); libtorrent uses per-round (~15s) delta
+    ///   bytes / measured unchoke interval — same direction (the faster a
+    ///   peer receives from us, the more it keeps its slot);
     /// - Session-level optimistic-slot allocation across faces is not
-    /// modeled (`session_impl.cpp` candidate eligibility spans download and
-    /// seeding torrents) — the seeding face uses 8 all-regular slots;
+    ///   modeled (`session_impl.cpp` candidate eligibility spans download and
+    ///   seeding torrents) — the seeding face uses 8 all-regular slots;
     /// - libtorrent's `compare_peers` common prefix comparator (peer class
-    /// priority -> the peer's last-round download to us, `choker.cpp`) has
-    /// no peer-class equivalent here and is not modeled.
+    ///   priority -> the peer's last-round download to us, `choker.cpp`) has
+    ///   no peer-class equivalent here and is not modeled.
     fn select_libtorrent(&mut self, peers: &mut [PeerStat]) -> ChokeDecision {
         match self.policy {
             SeedingPolicy::FastestUpload => {}

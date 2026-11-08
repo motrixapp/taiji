@@ -62,7 +62,7 @@ impl Transport {
 ///
 /// - `Tcp` -> `[Tcp]`; `Utp` -> `[Utp]` (no downgrade);
 /// - `PreferTcp` -> `[Tcp, Utp]`; `PreferUtp` -> `[Utp, Tcp]` (after the
-/// preferred transport fails or times out, retry once with the other).
+///   preferred transport fails or times out, retry once with the other).
 ///
 /// Engine wiring: try in order, use the first success; if all fail, log
 /// only (reconnection is driven by the announce/DHT discovery cycles).

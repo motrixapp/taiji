@@ -40,13 +40,13 @@ pub const EXTENSION_NAME: &str = "ut_pex";
 /// # added.f flag bits (BEP11 text, authoritative)
 ///
 /// - bit0 `0x01`: **prefers encryption** ("as indicated by `e` field in
-/// extension handshake" — the encryption-preference bit of
-/// BEP10/MESSAGESRC);
+///   extension handshake" — the encryption-preference bit of
+///   BEP10/MESSAGESRC);
 /// - bit1 `0x02`: **seed / upload_only** (BEP11 wording; BEP21 names the
-/// same semantics upload_only — seeding/partial-seeding state, not
-/// interested in downloading);
+///   same semantics upload_only — seeding/partial-seeding state, not
+///   interested in downloading);
 /// - remaining bits reserved (BEP11: "Other bits are reserved for future
-/// use"; not produced or read here).
+///   use"; not produced or read here).
 ///
 /// Divergence from the reference (noted; the BEP text wins): aria2
 /// `UTPexExtensionMessage.cc` produces only bit1 (seeder view) and its
@@ -331,16 +331,16 @@ impl PexSwarmSender {
     /// - throttle: interval not yet full -> None;
     /// - fresh candidates: `isActive() && ip != peer ip &&
     /// !freshPeersAreFull()`, then addFreshPeer's incoming/freshness
-    /// filter;
+    ///   filter;
     /// - dropped candidates: `ip != peer ip && !droppedPeersAreFull()`;
     /// - empty-frame skip (explicit divergence from the reference): if
-    /// added/added6/dropped/dropped6 all come out empty, no frame is
-    /// built (returns None) — BEP11: "Messages must contain at least one
-    /// of the following fields: added, added6, dropped, dropped6.", and
-    /// an empty dict frame violates that MUST; aria2 enqueues an empty
-    /// message unconditionally, the BEP text wins here. The timer still
-    /// resets (the 60s cadence grid must not drift because of empty
-    /// frames);
+    ///   added/added6/dropped/dropped6 all come out empty, no frame is
+    ///   built (returns None) — BEP11: "Messages must contain at least one
+    ///   of the following fields: added, added6, dropped, dropped6.", and
+    ///   an empty dict frame violates that MUST; aria2 enqueues an empty
+    ///   message unconditionally, the BEP text wins here. The timer still
+    ///   resets (the 60s cadence grid must not drift because of empty
+    ///   frames);
     /// - reset the timer.
     pub fn maybe_build(
         &mut self,
@@ -402,9 +402,9 @@ impl PexSwarmSender {
 /// symmetric to the [`PexSwarmSender`] outbound half).
 ///
 /// - first frame -> [`PexMessage::decode_first`] (accepted, truncated to
-/// [`FIRST_PEX_MAX`]);
+///   [`FIRST_PEX_MAX`]);
 /// - later frames -> [`PexMessage::decode`] (50 whole-frame rejection,
-/// hardening kept).
+///   hardening kept).
 ///
 /// The exemption is consumed once: the first ut_pex **reaching the
 /// decoder** on a connection burns it regardless of decode success — a

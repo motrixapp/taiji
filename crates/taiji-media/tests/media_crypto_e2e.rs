@@ -4,28 +4,28 @@
 //!
 //! Acceptance faces:
 //! * ② rotation e2e — ≥2 KEY rotation exactly at segment boundaries,
-//! non-zero media sequence, default/explicit IV dual forms,
-//! METHOD=NONE reset, `data:` inline key with a **zero-outbound**
-//! assertion; archive plaintext compared by bytes **and** SHA-256;
+//!   non-zero media sequence, default/explicit IV dual forms,
+//!   METHOD=NONE reset, `data:` inline key with a **zero-outbound**
+//!   assertion; archive plaintext compared by bytes **and** SHA-256;
 //! * media_key persistence — rows written, `media_segment.key_id`
-//! references them, staging never holds key material (outside the
-//! verbatim source manifest), restart re-fetches nothing;
+//!   references them, staging never holds key material (outside the
+//!   verbatim source manifest), restart re-fetches nothing;
 //! * ④ merged transport decrypt split — wire-side ONE Range GET over
-//! 16 encrypted sub-segments, decrypt-side per-sub-segment IVs, the
-//! archive holds the split-decrypted concatenation;
+//!   16 encrypted sub-segments, decrypt-side per-sub-segment IVs, the
+//!   archive holds the split-decrypted concatenation;
 //! * ④ init dual forms — MAP-after-KEY encrypted / MAP-before-KEY
-//! plaintext — plus the IV chain's three forms (MAP@IV via the v8
-//! `KEY=` attribute, applicable KEY@IV, sequence fallback);
+//!   plaintext — plus the IV chain's three forms (MAP@IV via the v8
+//!   `KEY=` attribute, applicable KEY@IV, sequence fallback);
 //! * ③ SSRF matrix on the wire — loopback segments refused by default
-//! with zero outbound requests, `ftp://` key refused even under the
-//! allow flag, allow-flag positives throughout (the literal/resolver
-//! matrix lives in `ssrf` unit tests);
+//!   with zero outbound requests, `ftp://` key refused even under the
+//!   allow flag, allow-flag positives throughout (the literal/resolver
+//!   matrix lives in `ssrf` unit tests);
 //! * negative faces — wrong-length key bodies, decrypt failures on
-//! non-block-length ciphertexts (`segment_decrypt_failed` after the
-//! retry budget);
+//!   non-block-length ciphertexts (`segment_decrypt_failed` after the
+//!   retry budget);
 //! * ⑥ encrypted resume — mid-run failure leaves a plaintext prefix;
-//! the retry fetches only the tail, Σseg_len (plaintext) == archive
-//! length, the reconcile never truncates a completed archive.
+//!   the retry fetches only the tail, Σseg_len (plaintext) == archive
+//!   length, the reconcile never truncates a completed archive.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

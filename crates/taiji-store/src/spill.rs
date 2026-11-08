@@ -14,27 +14,27 @@
 //!
 //! Hard invariants:
 //! - The sidecar is a pure optimization: any IO failure degrades to
-//! "this data was never received" (store failure = today's
-//! destroy-refetch; read-back failure = piece reset-refetch); never
-//! fatal, and unverified bytes never enter the main data files. Spill
-//! files carry no fsync — losing pages to a crash means the same as
-//! "never received" (disposability is a design premise, not a defect).
+//!   "this data was never received" (store failure = today's
+//!   destroy-refetch; read-back failure = piece reset-refetch); never
+//!   fatal, and unverified bytes never enter the main data files. Spill
+//!   files carry no fsync — losing pages to a crash means the same as
+//!   "never received" (disposability is a design premise, not a defect).
 //! - Same-dest exclusion: opening takes the face lock ([`FaceLock`]);
-//! busy = a definite `None` refusal (the caller degrades to no spill
-//! face), and another task's directory is never cleaned. Crash residue
-//! cleanup runs only after the lock is held.
+//!   busy = a definite `None` refusal (the caller degrades to no spill
+//!   face), and another task's directory is never cleaned. Crash residue
+//!   cleanup runs only after the lock is held.
 //! - Disk budget: the cap is caller-given (pipeline default = the write
-//! cache capacity, `BH_SPILL_BYTES` overrides). An oversized single
-//! entry is not absorbed (falls back to destroy-refetch); an
-//! over-budget total displaces already-spilled entries FIFO, and
-//! displaced entries are destroyed by the caller's existing per-source
-//! teardown (pool reset + upstream bookkeeping invalidation).
+//!   cache capacity, `BH_SPILL_BYTES` overrides). An oversized single
+//!   entry is not absorbed (falls back to destroy-refetch); an
+//!   over-budget total displaces already-spilled entries FIFO, and
+//!   displaced entries are destroyed by the caller's existing per-source
+//!   teardown (pool reset + upstream bookkeeping invalidation).
 //! - Spill writes stay per-cell `write_at` and do not join
-//! `BH_WRITE_COALESCE`: spill is piece-file-granular and a small share
-//! of the main-file write face, so the coalescing gain is ~0 while it
-//! would couple sidecar layout to the append cursor (`file_len`). The
-//! main-file write face (completed-piece batch writes) is the
-//! coalescing lever; see [`crate::verified`].
+//!   `BH_WRITE_COALESCE`: spill is piece-file-granular and a small share
+//!   of the main-file write face, so the coalescing gain is ~0 while it
+//!   would couple sidecar layout to the append cursor (`file_len`). The
+//!   main-file write face (completed-piece batch writes) is the
+//!   coalescing lever; see [`crate::verified`].
 
 use std::collections::HashMap;
 use std::io;

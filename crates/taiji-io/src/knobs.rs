@@ -83,16 +83,16 @@
 //! # Read-timing classes (zero-behavior-change invariant)
 //!
 //! - **Process-level OnceLock**: the read point is a process-lazy cache
-//! filled once; the accessor keeps its [`std::sync::OnceLock`] as-is —
-//! bit-for-bit equivalent while env is process-constant.
+//!   filled once; the accessor keeps its [`std::sync::OnceLock`] as-is —
+//!   bit-for-bit equivalent while env is process-constant.
 //! - **Construction**: the read point evaluates at the construction /
-//! assembly site and the caller holds the value (struct field or
-//! local). Accessors do **not** cache — every construction re-reads
-//! env; switching to OnceLock would silently turn per-construction
-//! evaluation into first-construction evaluation. Behavior change,
-//! forbidden.
+//!   assembly site and the caller holds the value (struct field or
+//!   local). Accessors do **not** cache — every construction re-reads
+//!   env; switching to OnceLock would silently turn per-construction
+//!   evaluation into first-construction evaluation. Behavior change,
+//!   forbidden.
 //! - **Per-round / per-event**: the read point reads env at every tick /
-//! dispatch round / event arm. Accessors do **not** cache.
+//!   dispatch round / event arm. Accessors do **not** cache.
 //!
 //! # CLI override seam (not env knobs)
 //!

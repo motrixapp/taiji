@@ -3100,15 +3100,15 @@ const P86_OVER_EXCESS: u64 = 16 * 1024 * 1024;
 /// (`bytes=0-0`) gets a normal 206; data-plane 206 echoes have an exact
 /// start and a deviating end:
 /// - over-delivery (`over = true`): the echo range equals the request
-/// exactly, `Content-Length` inflated (needed + [`P86_OVER_EXCESS`]);
-/// after writing the in-bounds body it keeps writing filler — a client
-/// that closes after reading what it needs stops the filler (the
-/// disconnect is observed via the real write count);
+///   exactly, `Content-Length` inflated (needed + [`P86_OVER_EXCESS`]);
+///   after writing the in-bounds body it keeps writing filler — a client
+///   that closes after reading what it needs stops the filler (the
+///   disconnect is observed via the real write count);
 /// - under-delivery (`over = false`): the first request per range is echoed
-/// shortened to the halfway end (`Content-Range: bytes s-(halfway)/T`,
-/// CL matching the real send, a clean finish = EOF before the request
-/// end); retries of the same range get the full answer (the
-/// retry-completion face).
+///   shortened to the halfway end (`Content-Range: bytes s-(halfway)/T`,
+///   CL matching the real send, a clean finish = EOF before the request
+///   end); retries of the same range get the full answer (the
+///   retry-completion face).
 struct LenDeviationOrigin {
     addr: std::net::SocketAddr,
     /// Arrival-time sequence of data-plane (non 0-0) requests.

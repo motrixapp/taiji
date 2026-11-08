@@ -107,21 +107,21 @@ pub struct SanitizedName {
 /// line — every product name passes here, template or not):
 ///
 /// * Unicode spoofing neutralization (the normalization
-/// vector): bidi-override/zero-width characters
-/// ([`taiji_io::text::is_spoofing_char`], the shared spoofing set)
-/// and combining marks (the composed/decomposed spoof family,
-/// `A\u{030A}` vs `Å`) are stripped — a product name can never carry
-/// a hidden normalization lookalike. Full NFC *composition* would
-/// add the `unicode-normalization` crate — a workspace-dependency
-/// decision owned by the coordination face (recorded in the design
-/// report); neutralization closes the attack family without it;
+///   vector): bidi-override/zero-width characters
+///   ([`taiji_io::text::is_spoofing_char`], the shared spoofing set)
+///   and combining marks (the composed/decomposed spoof family,
+///   `A\u{030A}` vs `Å`) are stripped — a product name can never carry
+///   a hidden normalization lookalike. Full NFC *composition* would
+///   add the `unicode-normalization` crate — a workspace-dependency
+///   decision owned by the coordination face (recorded in the design
+///   report); neutralization closes the attack family without it;
 /// * basename-ization: every path separator (`/`, `\`) and any
-/// `..`/`.` **path component** collapses — the result can never
-/// escape the output directory;
+///   `..`/`.` **path component** collapses — the result can never
+///   escape the output directory;
 /// * NUL and C0/C1 control characters stripped;
 /// * a leading `-` (the argv-injection face) is prefixed off;
 /// * length clamp to [`MAX_OUTPUT_NAME_BYTES`] on UTF-8 sequence
-/// boundaries (no interior code-point splits);
+///   boundaries (no interior code-point splits);
 /// * the empty result falls back to `media`.
 pub fn sanitize_output_name(input: &str) -> SanitizedName {
     let mut reasons = Vec::new();

@@ -3,12 +3,12 @@
 //! # Design facts
 //!
 //! - BEP3: bencode is the BitTorrent metadata encoding; dict keys must be in
-//! strict ascending byte order.
+//!   strict ascending byte order.
 //! - The v1/v2 infohash must be computed over the **raw byte slice** of the
-//! `info` section in the metadata (required by BEP52); decode->re-encode
-//! round-trips are forbidden. [`decode_with_info_span`] returns the value
-//! tree and the `info` span `[start, end)` in a single parse, so callers
-//! can hash `&input[span]` directly — zero copy, no round-trip.
+//!   `info` section in the metadata (required by BEP52); decode->re-encode
+//!   round-trips are forbidden. [`decode_with_info_span`] returns the value
+//!   tree and the `info` span `[start, end)` in a single parse, so callers
+//!   can hash `&input[span]` directly — zero copy, no round-trip.
 //!
 //! # Strictness divergence from aria2
 //!
@@ -187,11 +187,11 @@ pub fn decode(input: &[u8]) -> Result<Value, BencodeError> {
 /// over the raw slice).
 ///
 /// - The top level must be a dict containing an `info` key, otherwise
-/// [`BencodeError::MissingInfoKey`];
+///   [`BencodeError::MissingInfoKey`];
 /// - the `info` value itself need not be a dict (corrupt input is rejected by
-/// higher-level validation; this returns its span as-is);
+///   higher-level validation; this returns its span as-is);
 /// - a BEP9 ut_metadata payload is the info dict itself, so it does not go
-/// through this API — hash the whole payload directly.
+///   through this API — hash the whole payload directly.
 pub fn decode_with_info_span(input: &[u8]) -> Result<(Value, Range<usize>), BencodeError> {
     let (parsed, end) = parse_once(input)?;
     if end != input.len() {

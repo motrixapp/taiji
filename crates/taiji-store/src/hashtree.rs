@@ -3,19 +3,19 @@
 //! # Model (SPEC §4.3)
 //!
 //! - Metadata-supplied (trusted): the per-file **piece layer**
-//! (piece_length granularity), already recompute-verified at load time by
-//! `bt::filetree`;
+//!   (piece_length granularity), already recompute-verified at load time by
+//!   `bt::filetree`;
 //! - Lazily fetched cache: the **base layer** (16 KiB block granularity)
-//! and others, keyed by `(root, layer_depth)`, fetched from peers via
-//! hash request (21);
+//!   and others, keyed by `(root, layer_depth)`, fetched from peers via
+//!   hash request (21);
 //! - Admission discipline: a lazily fetched layer must recompute bottom-up
-//! to the known piece roots before it is stored (BEP-52 / SPEC §4.3) —
-//! the current shape accepts piece-aligned whole segments only (partial
-//! segment verification needs proof chains and expands with interop
-//! testing);
+//!   to the known piece roots before it is stored (BEP-52 / SPEC §4.3) —
+//!   the current shape accepts piece-aligned whole segments only (partial
+//!   segment verification needs proof chains and expands with interop
+//!   testing);
 //! - Core v2 benefit: block-granularity verification — `H(block)` is
-//! compared directly against the cached leaf layer; a failure re-fetches
-//! only that 16 KiB (v1 re-fetches the whole piece).
+//!   compared directly against the cached leaf layer; a failure re-fetches
+//!   only that 16 KiB (v1 re-fetches the whole piece).
 //!
 //! # Relation to the write pipeline
 //!

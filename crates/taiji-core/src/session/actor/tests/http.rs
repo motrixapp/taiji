@@ -216,11 +216,11 @@ impl MockOrigin {
 /// and then a **disconnect** (no connection reuse — the real
 /// disconnect shape). Two failure modes:
 /// - `drop_after > 0`: a **failure with progress** — each fetch writes
-/// `drop_after` bytes then breaks (the "drops after every segment"
-/// long-transfer shape);
+///   `drop_after` bytes then breaks (the "drops after every segment"
+///   long-transfer shape);
 /// - `drop_after = 0`: disconnects without even sending the response
-/// head — a **zero-byte failure** (a connect-phase break with no
-/// transfer evidence).
+///   head — a **zero-byte failure** (a connect-phase break with no
+///   transfer evidence).
 ///
 /// Data-plane (non 0-0) requests are timestamped one by one for the
 /// failure-cadence and retry-gap assertions.

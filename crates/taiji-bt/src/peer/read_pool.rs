@@ -26,32 +26,32 @@
 //! # Structure
 //!
 //! - [`ReadPool`]: face-level shared (`Arc` distributed via
-//! `PeerConfig::read_pool`). Dispatcher count = the capacity cap
-//! (min(4, workers)); the job queue is bounded — full makes
-//! [`ReadPool::try_serve`] fail and the caller falls back to inline
-//! (semantics = the existing synchronous serving path, correctness
-//! unchanged, requests are never dropped).
+//!   `PeerConfig::read_pool`). Dispatcher count = the capacity cap
+//!   (min(4, workers)); the job queue is bounded — full makes
+//!   [`ReadPool::try_serve`] fail and the caller falls back to inline
+//!   (semantics = the existing synchronous serving path, correctness
+//!   unchanged, requests are never dropped).
 //! - 16KiB aligned block buffer pool: `#[repr(align)]` safe alignment
-//! (the workspace sets `unsafe_code = forbid`, so no hand-written
-//! alloc), free-list recycling; zero-copy outbound via
-//! `Bytes::from_owner` (bytes >= 1.9, safe trait bound
-//! `AsRef<[u8]> + Send`), the buffer returns to the pool as soon as
-//! the frame is written — removes the per-request `vec![0u8; length]`
-//! zero-page allocation (a VM churn contributor).
+//!   (the workspace sets `unsafe_code = forbid`, so no hand-written
+//!   alloc), free-list recycling; zero-copy outbound via
+//!   `Bytes::from_owner` (bytes >= 1.9, safe trait bound
+//!   `AsRef<[u8]> + Send`), the buffer returns to the pool as soon as
+//!   the frame is written — removes the per-request `vec![0u8; length]`
+//!   zero-page allocation (a VM churn contributor).
 //! - [`ServeQueue`]: per-connection in-order re-injection bookkeeping
-//! (held by peer_loop; the inbound arm pushes, the completion arm
-//! sends in ascending seq order).
+//!   (held by peer_loop; the inbound arm pushes, the completion arm
+//!   sends in ascending seq order).
 //!
 //! # Discipline
 //!
 //! - bounded channels: the job queue / completion channel are both
-//! bounded (unbounded forbidden);
+//!   bounded (unbounded forbidden);
 //! - no lock across await: the `tokio::sync::Mutex` only serializes the
-//! dispatcher taking jobs (holding the async lock across recv is its
-//! intended use); the buffer free-list is a std Mutex critical section
-//! (no await);
+//!   dispatcher taking jobs (holding the async lock across recv is its
+//!   intended use); the buffer free-list is a std Mutex critical section
+//!   (no await);
 //! - blocking syscalls run only inside `spawn_blocking` (same
-//! concurrency discipline as disk.rs).
+//!   concurrency discipline as disk.rs).
 //!
 //! Upstream anchor mapping: docs/design/peer-protocol.md
 

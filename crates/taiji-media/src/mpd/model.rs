@@ -7,21 +7,21 @@
 //! [`super::expand`]. Facts pinned here (module of record):
 //!
 //! * **type="dynamic" → `live_unsupported`** at parse (verdict-table
-//! row; 0.4 owns the sliding window). `@type` absent =
-//! static (ISO 23009-1 default).
+//!   row; 0.4 owns the sliding window). `@type` absent =
+//!   static (ISO 23009-1 default).
 //! * **ContentProtection — any scheme, any level (MPD/Period/
-//! AdaptationSet/Representation) → `drm_unsupported`** at parse
-//! (never supported; the 0.3 DASH key/decrypt consumption face is
-//! exactly this refusal — ClearKey is a 0.4+ question).
+//!   AdaptationSet/Representation) → `drm_unsupported`** at parse
+//!   (never supported; the 0.3 DASH key/decrypt consumption face is
+//!   exactly this refusal — ClearKey is a 0.4+ question).
 //! * **single-level sidx only**: SegmentBase@indexRange addressing is
-//! carried as a descriptor; a sidx whose references set
-//! `reference_type=1` (a referenced sidx — the hierarchical index)
-//! materializes as `sidx_unsupported` at expansion.
+//!   carried as a descriptor; a sidx whose references set
+//!   `reference_type=1` (a referenced sidx — the hierarchical index)
+//!   materializes as `sidx_unsupported` at expansion.
 //! * byte-range values are `(begin, end)` **inclusive** pairs, the
-//! MPD's own `@range`/"indexRange" spelling, converted to the
-//! `(offset, length)` form only at expansion.
+//!   MPD's own `@range`/"indexRange" spelling, converted to the
+//!   `(offset, length)` form only at expansion.
 //! * URIs (BaseURL/media/initialization/SegmentURL@media) are kept
-//! verbatim; resolution is [`super::expand`]'s job.
+//!   verbatim; resolution is [`super::expand`]'s job.
 
 /// Whole parsed MPD (static only — dynamic is refused at parse).
 #[derive(Debug, Clone, PartialEq, Default)]

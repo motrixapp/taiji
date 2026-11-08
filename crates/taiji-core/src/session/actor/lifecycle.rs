@@ -649,20 +649,20 @@ impl SessionActor {
 
     /// saveSession (per the SessionSerializer.cc save semantics):
     /// 1) full task-row flush (the mirror is rewritten from the current
-    /// state; row-level comparison absorbs no-op writes); HTTP task-row
-    /// mirrors flush in sync (the compatibility method promises a full
-    /// persist — progress deltas inside the driver's 2s debounce window
-    /// are closed out here; state columns follow the mirror's current
-    /// value, while Completed/failed terminal rows are written by the
-    /// finalize path and not duplicated);
+    ///    state; row-level comparison absorbs no-op writes); HTTP task-row
+    ///    mirrors flush in sync (the compatibility method promises a full
+    ///    persist — progress deltas inside the driver's 2s debounce window
+    ///    are closed out here; state columns follow the mirror's current
+    ///    value, while Completed/failed terminal rows are written by the
+    ///    finalize path and not duplicated);
     /// 2) `--save-session` text export (input-file compatible, atomic
-    /// write via `__temp` + rename; metainfo tasks have no URI to write
-    /// -> skipped, same rule as SessionSerializer.cc);
+    ///    write via `__temp` + rename; metainfo tasks have no URI to write
+    ///    -> skipped, same rule as SessionSerializer.cc);
     /// 3) disk barrier + `wal_checkpoint(TRUNCATE)` — the single write
-    /// connection's serialization guarantees all earlier write jobs
-    /// have committed; WAL semantics: a commit is durable (replay
-    /// recovery after kill), checkpoint is file shrinking, not a
-    /// durability condition (synchronous=NORMAL).
+    ///    connection's serialization guarantees all earlier write jobs
+    ///    have committed; WAL semantics: a commit is durable (replay
+    ///    recovery after kill), checkpoint is file shrinking, not a
+    ///    durability condition (synchronous=NORMAL).
     ///
     /// Declared deviation: no aria2 session-file format is produced
     /// (sqlite is the single source of truth; the `--save-session` text
@@ -1105,13 +1105,13 @@ pub(super) fn stop_family_kind(status: StatusKind) -> Option<EventKind> {
 /// engine/recheck wrote; the dual of the engine's
 /// `restore_progress_bits` + `check_resume_complete` faces):
 /// - `v2_file_bits` present (v2-only): every non-padding file's piece
-/// range must be fully set in its stored segment (a missing segment
-/// for a file with pieces, or a stored count below the expected
-/// piece count, = stale geometry = incomplete);
+///   range must be fully set in its stored segment (a missing segment
+///   for a file with pieces, or a stored count below the expected
+///   piece count, = stale geometry = incomplete);
 /// - else `v1_bitfield` (v1/hybrid): every global piece index set;
 /// - neither present, or a piece-length mismatch (a stale row written
-/// under another metainfo geometry) = **not** complete — the
-/// conservative branch (the download side re-measures).
+///   under another metainfo geometry) = **not** complete — the
+///   conservative branch (the download side re-measures).
 pub(super) fn progress_row_complete(
     meta: &crate::metainfo::TorrentMeta,
     row: &taiji_store::persist::TorrentProgressRow,

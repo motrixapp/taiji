@@ -15,27 +15,27 @@
 //! the decision and the actual connection share one TTL-cached view).
 //!
 //! * **Scheme whitelist** (always, flag or not): `http`, `https`,
-//! `data:` — everything else (`ftp://`, `file://`, …) is denied.
+//!   `data:` — everything else (`ftp://`, `file://`, …) is denied.
 //! * **Literal layer**: `localhost` and restricted IP literals
-//! (loopback / RFC1918 private / link-local incl. 169.254.169.254 /
-//! ULA / v4-mapped / NAT64 / unspecified / multicast) are denied
-//! under the default posture. The classification list mirrors the
-//! base crate's `redirect_guard` module (its classifier is
-//! `pub(crate)`; the mirror is deliberate and documented — same
-//! list, same semantics, media-owned pure function).
+//!   (loopback / RFC1918 private / link-local incl. 169.254.169.254 /
+//!   ULA / v4-mapped / NAT64 / unspecified / multicast) are denied
+//!   under the default posture. The classification list mirrors the
+//!   base crate's `redirect_guard` module (its classifier is
+//!   `pub(crate)`; the mirror is deliberate and documented — same
+//!   list, same semantics, media-owned pure function).
 //! * **Resolved layer**: any resolved address restricted → denied
-//! (**any** rule, conservative side); resolution failure or an empty
-//! answer list → denied (fail-closed — the guard query and the
-//! connect query are independent, so allowing an unresolvable-now
-//! host would open a two-query bypass; the fetch would fail anyway).
+//!   (**any** rule, conservative side); resolution failure or an empty
+//!   answer list → denied (fail-closed — the guard query and the
+//!   connect query are independent, so allowing an unresolvable-now
+//!   host would open a two-query bypass; the fetch would fail anyway).
 //! * **Flag**: `--media-allow-private-key-url` (per the product spec) relaxes
-//! the private-address layers for **both faces at once** — one
-//! threat model (a forged manifest driving intranet fetches), one
-//! escape hatch. The widened scope (the flag name says "key", the
-//! line also covers segment URLs) is recorded for the
-//! unified-surface registration / difference declaration. With
-//! the flag on, resolution is skipped entirely (localhost mock labs
-//! need no DNS).
+//!   the private-address layers for **both faces at once** — one
+//!   threat model (a forged manifest driving intranet fetches), one
+//!   escape hatch. The widened scope (the flag name says "key", the
+//!   line also covers segment URLs) is recorded for the
+//!   unified-surface registration / difference declaration. With
+//!   the flag on, resolution is skipped entirely (localhost mock labs
+//!   need no DNS).
 //!
 //! # Redirect endpoints
 //!

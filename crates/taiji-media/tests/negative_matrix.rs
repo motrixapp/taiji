@@ -8,18 +8,18 @@
 //! other suites — the same gate runs them; this file maps, not
 //! duplicates):
 //! * track-necessity driver rows — `media_e2e` (required
-//! fails the set / sidecar degrades with the warning recorded);
-//! the **session-level** rows (task Error / degraded-complete +
-//! warning event) live in taiji-core's `media_negative`.
+//!   fails the set / sidecar degrades with the warning recorded);
+//!   the **session-level** rows (task Error / degraded-complete +
+//!   warning event) live in taiji-core's `media_negative`.
 //! * three-precheck negatives + both-channels-failed →
-//! `media_synth_e2e` (disk precheck, ffmpeg-missing
-//! zero-traffic, both-fail Error + staging retained + idempotent
-//! re-run).
+//!   `media_synth_e2e` (disk precheck, ffmpeg-missing
+//!   zero-traffic, both-fail Error + staging retained + idempotent
+//!   re-run).
 //! * SSRF/key negatives (key-URI and media-segment-URL faces) →
-//! `media_crypto_e2e::ssrf_wire_matrix_and_negative_faces`.
+//!   `media_crypto_e2e::ssrf_wire_matrix_and_negative_faces`.
 //! * Template disinfection / probe anti-forgery →
-//! `media_task_e2e` (probe governance + fabricated-token rows) and
-//! the template suite.
+//!   `media_task_e2e` (probe governance + fabricated-token rows) and
+//!   the template suite.
 //!
 //! DASH rows (a red-then-green flip): the MPD entry drives the
 //! DASH line — the driver rows assert the per-row judgment-table

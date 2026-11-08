@@ -3,14 +3,14 @@
 //! # State machine (DHTNode.cc)
 //!
 //! - `condition` score: new nodes start at 1 (the constructor sets
-//! `condition_` to 1 — a node never verified by contact is not good);
+//!   `condition_` to 1 — a node never verified by contact is not good);
 //! - Bad threshold `BAD_CONDITION = 5` (`DHTNode.cc`): `condition >= 5`
-//! is bad;
+//!   is bad;
 //! - `timeout()`: condition + 1 (the transaction timeout path,
-//! `DHTMessageTracker.cc`);
+//!   `DHTMessageTracker.cc`);
 //! - `mark_good()`: condition reset to zero (`DHTNode.cc`);
 //! - questionable: not bad and last contact >= 15min ago (`DHTNode.cc`,
-//! interval constant `DHTConstants.h` `DHT_NODE_CONTACT_INTERVAL`);
+//!   interval constant `DHTConstants.h` `DHT_NODE_CONTACT_INTERVAL`);
 //! - good: not bad and not questionable (`DHTNode.cc`).
 
 use std::net::SocketAddr;

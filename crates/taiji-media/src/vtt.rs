@@ -5,30 +5,30 @@
 //! segment bodies) is spliced into one `.vtt` product:
 //!
 //! * **cue-level parse** ([`parse_vtt`]): header line, cue ids,
-//! `hh:mm:ss.mmm --> hh:mm:ss.mmm` timestamps (both `.` and `,`
-//! millisecond separators, the SRT-compatible tolerance), payload
-//! lines; NOTE/STYLE blocks skipped. Pure and total — arbitrary
-//! bytes are a `vtt_parse` text error or a bounded best-effort
-//! skip, never a panic (the fuzz target pins this).
+//!   `hh:mm:ss.mmm --> hh:mm:ss.mmm` timestamps (both `.` and `,`
+//!   millisecond separators, the SRT-compatible tolerance), payload
+//!   lines; NOTE/STYLE blocks skipped. Pure and total — arbitrary
+//!   bytes are a `vtt_parse` text error or a bounded best-effort
+//!   skip, never a panic (the fuzz target pins this).
 //! * **timeline continuity rule** (documented, deterministic): within
-//! one segment, cues whose minimum start sits at or below the
-//! accumulated timeline position + 1 s are treated as
-//! **relative to the segment start** and shift by the accumulated
-//! position; cues already beyond that are treated as **absolute**
-//! and pass through unshifted (the yt-dlp detection form). The
-//! accumulated position = Σ previous segments' EXTINF durations.
+//!   one segment, cues whose minimum start sits at or below the
+//!   accumulated timeline position + 1 s are treated as
+//!   **relative to the segment start** and shift by the accumulated
+//!   position; cues already beyond that are treated as **absolute**
+//!   and pass through unshifted (the yt-dlp detection form). The
+//!   accumulated position = Σ previous segments' EXTINF durations.
 //! * **DISCONTINUITY**: does not reset the sidecar timeline — the gap
-//! is bridged by the following segment's EXTINF accumulation (the
-//! one-product-face ruling; a discontinuity gap that drops subtitle
-//! continuity is a degraded-sidecar matter, not a splice error).
+//!   is bridged by the following segment's EXTINF accumulation (the
+//!   one-product-face ruling; a discontinuity gap that drops subtitle
+//!   continuity is a degraded-sidecar matter, not a splice error).
 //! * **splice failure** = a segment whose body is not parseable
-//! WebVTT: the sidecar degrades ([`SpliceOutcome::Degraded`]) with
-//! the offending segment named — per the sidecar grading an explicitly
-//! attached side track never fails the task and never triggers the
-//! both-channels terminal state.
+//!   WebVTT: the sidecar degrades ([`SpliceOutcome::Degraded`]) with
+//!   the offending segment named — per the sidecar grading an explicitly
+//!   attached side track never fails the task and never triggers the
+//!   both-channels terminal state.
 //! * **tx3g conversion** ([`cues_to_tx3g`]): plain-text cue windows
-//! for [`crate::mp4write::tx3g_track_spec`] — VTT markup stripped
-//! (tags/`<c>` classes/inline timestamps), the kickoff-gate matrix item.
+//!   for [`crate::mp4write::tx3g_track_spec`] — VTT markup stripped
+//!   (tags/`<c>` classes/inline timestamps), the kickoff-gate matrix item.
 
 use crate::error::MediaError;
 

@@ -253,7 +253,7 @@ pub fn source_manifest_path(gid_dir: &Path, kind: &str) -> PathBuf {
 /// - `archive_len` = the on-disk archive length;
 /// - `bitmap_count` = the persisted done-prefix segment count;
 /// - `seg_lens` = per-segment lengths (known upfront for known-length
-/// tracks; for appended tracks the persisted ledger's lengths).
+///   tracks; for appended tracks the persisted ledger's lengths).
 ///
 /// The verdict keeps the largest prefix whose cumulative length fits
 /// **both** the archive and the bitmap (`m = max { m : cum(m) ≤

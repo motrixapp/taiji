@@ -4,14 +4,14 @@
 //!
 //! 1. **discovery** — resolution tier + absolute pair;
 //! 2. **version + license assertion** — both `-version` payloads
-//! parsed through the real orchestrator (limits included), pairing
-//! verified twice (same directory at discovery, version-token
-//! agreement here), LGPL gate applied at the given strictness;
+//!    parsed through the real orchestrator (limits included), pairing
+//!    verified twice (same directory at discovery, version-token
+//!    agreement here), LGPL gate applied at the given strictness;
 //! 3. **capability table** — `-demuxers`/`-muxers` parsed, required
-//! set checked (deliverable 3);
+//!    set checked (deliverable 3);
 //! 4. **self-check** — the ffmpeg `-version` spawn IS the self-check
-//! (the card's "-version self-check" reading: no built-in stream probe in
-//! M0).
+//!    (the card's "-version self-check" reading: no built-in stream probe in
+//!    M0).
 //!
 //! Output: [`DoctorReport`] (serde JSON for `--json`;
 //! [`DoctorReport::render_human`] for the terminal). `red` counts the

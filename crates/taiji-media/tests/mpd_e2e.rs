@@ -3,17 +3,17 @@
 //! synthesis lines):
 //!
 //! * **(b) row** — a multi-Period SegmentTemplate MPD ($Number$
-//! addressing, no byte information): ordered segment fetches, the
-//! `seg_bitmap` checkpoint face, one archive appending across the
-//! period boundary with per-period init sections, then native
-//! synthesis over the multi-period track + the resume invariant
-//! (a second driver run over the same ledger re-fetches nothing);
+//!   addressing, no byte information): ordered segment fetches, the
+//!   `seg_bitmap` checkpoint face, one archive appending across the
+//!   period boundary with per-period init sections, then native
+//!   synthesis over the multi-period track + the resume invariant
+//!   (a second driver run over the same ledger re-fetches nothing);
 //! * **(a) row** — a SegmentList + `@mediaRange` MPD over a single
-//! blob resource: the extent-grid reuse (byte ranges → known
-//! length), and the product through the same synthesis;
+//!   blob resource: the extent-grid reuse (byte ranges → known
+//!   length), and the product through the same synthesis;
 //! * the ffprobe dual-run rides the synthesis when a local pair is
-//! present (the runtime-guard posture — the e2e_real suite's
-//! recorded dev-machine fact, license-gate lenient).
+//!   present (the runtime-guard posture — the e2e_real suite's
+//!   recorded dev-machine fact, license-gate lenient).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

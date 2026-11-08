@@ -369,17 +369,17 @@ pub(super) struct PeerRegistration {
 ///
 /// Two field tiers:
 /// - Written at registration: `cuid`/`registered_at` (the anchor of
-/// the slow-peer-eviction observation age; the former EngineLoop
-/// table merged in) + `ip`/`meta`/`rates`/`down_window` (filled in
-/// one shot by the registration arm — production is always Some;
-/// the `Option` shape serves test fixtures with partial assembly,
-/// and the consumers' `unwrap_or` fallback = the same verdict as
-/// the old tables' absence);
+///   the slow-peer-eviction observation age; the former EngineLoop
+///   table merged in) + `ip`/`meta`/`rates`/`down_window` (filled in
+///   one shot by the registration arm — production is always Some;
+///   the `Option` shape serves test fixtures with partial assembly,
+///   and the consumers' `unwrap_or` fallback = the same verdict as
+///   the old tables' absence);
 /// - Lazily written: `last_unchoke`/`am_unchoked`/`last_opt_unchoke`/
-/// `utp_mute_since`/`piece`/`extra_pieces` — zero values at
-/// registration (`am_unchoked = false` = BEP3's connect default
-/// choke; an empty `Vec` = no secondary pieces), with write points
-/// one-to-one with the old tables.
+///   `utp_mute_since`/`piece`/`extra_pieces` — zero values at
+///   registration (`am_unchoked = false` = BEP3's connect default
+///   choke; an empty `Vec` = no secondary pieces), with write points
+///   one-to-one with the old tables.
 ///
 /// The keyspace is unified on cuid (the old last_unchoke/am_unchoked
 /// dual keyspace written/read by peers index on the seeder path is

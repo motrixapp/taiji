@@ -4,22 +4,22 @@
 //! Scenario (full engine_loop shape, all in-process): the fake tracker's
 //! announce response carries —
 //! 1. **positive control**: a real loopback peer (allowed class) -> the
-//! engine must dial and connect (proof that the announce ->
-//! handle_tracker_event -> spawn_peer_dial chain is alive; zero
-//! regression for allowed addresses);
+//!    engine must dial and connect (proof that the announce ->
+//!    handle_tracker_event -> spawn_peer_dial chain is alive; zero
+//!    regression for allowed addresses);
 //! 2. **negative 1 (v4 unspecified `0.0.0.0:<port>`)**: the kernel lands
-//! 0.0.0.0 connections back on the local loopback — without the
-//! hygiene check the engine would dial into the sentinel listener;
-//! after the fix the hygiene check rejects and the sentinel sees zero
-//! connections (established connections linger in the accept backlog,
-//! so delayed observation still works -> the assertion is independent
-//! of injection timing);
+//!    0.0.0.0 connections back on the local loopback — without the
+//!    hygiene check the engine would dial into the sentinel listener;
+//!    after the fix the hygiene check rejects and the sentinel sees zero
+//!    connections (established connections linger in the accept backlog,
+//!    so delayed observation still works -> the assertion is independent
+//!    of injection timing);
 //! 3. **negative 2 (v6 loopback `[::1]:<port>`)**: rejected via the
-//! `security::is_global_v6` classification (RFC 4291 §2.5.3);
+//!    `security::is_global_v6` classification (RFC 4291 §2.5.3);
 //! 4. **negative 3 (v6 link-local `[fe80::1]:<port>`)**: rejected class
-//! (RFC 4291 §2.5.6; same rule as libtorrent peer_list.cpp) — in a
-//! no-route shape the connection is unreachable anyway; asserted as a
-//! classification-path check (weak observation, regression guard).
+//!    (RFC 4291 §2.5.6; same rule as libtorrent peer_list.cpp) — in a
+//!    no-route shape the connection is unreachable anyway; asserted as a
+//!    classification-path check (weak observation, regression guard).
 //!
 //! The vehicle is the HTTP response's `peers6` field (the UDP 18-byte
 //! vehicle merges into the same arm at the actor event surface — the

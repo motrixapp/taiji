@@ -1550,14 +1550,14 @@ mod ext_frame_tests {
 
     /// The DOMINANT wire shape: a full-size piece frame (9B id+index+begin
     /// + 16,384B block = 16,393B body) must decode through a budgeted
-    /// pooled block, not the unbudgeted over-bucket heap fallback. Pre-fix
-    /// the whole-body lease (16,393 > the 16,384 main bucket) fell to
-    /// `fallback_lease`'s Heap form, and the cell adoption then held that
-    /// malloc allocation until the piece wrote out (musl mallocng never
-    /// returns the size class — the RSS retention the review flagged).
-    /// Post-fix the block payload leases the main bucket directly (pooled
-    /// mmap, budget-accounted) and the 9-byte header parses from the read
-    /// buffer.
+    ///   pooled block, not the unbudgeted over-bucket heap fallback. Pre-fix
+    ///   the whole-body lease (16,393 > the 16,384 main bucket) fell to
+    ///   `fallback_lease`'s Heap form, and the cell adoption then held that
+    ///   malloc allocation until the piece wrote out (musl mallocng never
+    ///   returns the size class — the RSS retention the review flagged).
+    ///   Post-fix the block payload leases the main bucket directly (pooled
+    ///   mmap, budget-accounted) and the 9-byte header parses from the read
+    ///   buffer.
     #[test]
     fn full_size_piece_frame_decodes_through_pooled_block() {
         let arena = std::sync::Arc::new(taiji_io::block_arena::BlockArena::new(1 << 20));

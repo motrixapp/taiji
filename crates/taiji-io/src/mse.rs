@@ -1351,24 +1351,24 @@ impl<S: AsyncRead + Unpin> AsyncRead for Encrypted<S> {
 impl<S: AsyncWrite + Unpin> AsyncWrite for Encrypted<S> {
     /// Write path (ciphertext-staging semantics):
     /// - `pending` non-empty <=> the previous call returned
-    /// `Pending`/partial write; the staged ciphertext must be retried
-    /// with exactly the caller's outstanding window: the staged
-    /// plaintext minus the bytes already reported as accepted, i.e.
-    /// `buf.len() == pending.len() - reported_pos` (`write_all`
-    /// retries `&buf[n..]` of what was reported; ARC4 is a stream
-    /// cipher so ciphertext:plaintext align 1:1). A different length
-    /// is rejected with `InvalidInput` — accepting it would drain the
-    /// old ciphertext while the new bytes go out unencrypted and
-    /// permanently desync the ARC4 keystream. Flush only, never
-    /// re-encrypt (ARC4 keystream: one plaintext once; re-encrypting
-    /// corrupts); an inner `Ok(0)` reports `WriteZero` instead of
-    /// spinning forever;
+    ///   `Pending`/partial write; the staged ciphertext must be retried
+    ///   with exactly the caller's outstanding window: the staged
+    ///   plaintext minus the bytes already reported as accepted, i.e.
+    ///   `buf.len() == pending.len() - reported_pos` (`write_all`
+    ///   retries `&buf[n..]` of what was reported; ARC4 is a stream
+    ///   cipher so ciphertext:plaintext align 1:1). A different length
+    ///   is rejected with `InvalidInput` — accepting it would drain the
+    ///   old ciphertext while the new bytes go out unencrypted and
+    ///   permanently desync the ARC4 keystream. Flush only, never
+    ///   re-encrypt (ARC4 keystream: one plaintext once; re-encrypting
+    ///   corrupts); an inner `Ok(0)` reports `WriteZero` instead of
+    ///   spinning forever;
     /// - `pending` empty: encrypt the whole `buf` (exactly once) ->
-    /// flush immediately -> fully written = `Ok(buf.len())`; a partial
-    /// write stages the remainder and reports the accepted byte count
-    /// (ciphertext/plaintext align 1:1); `Pending` stages the whole
-    /// thing and returns `Pending` (0 bytes accepted; the retry takes
-    /// the flush branch).
+    ///   flush immediately -> fully written = `Ok(buf.len())`; a partial
+    ///   write stages the remainder and reports the accepted byte count
+    ///   (ciphertext/plaintext align 1:1); `Pending` stages the whole
+    ///   thing and returns `Pending` (0 bytes accepted; the retry takes
+    ///   the flush branch).
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

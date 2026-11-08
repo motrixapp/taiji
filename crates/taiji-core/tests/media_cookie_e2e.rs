@@ -4,25 +4,25 @@
 //! established mock fixture kit, the media_task_e2e semantics), asserting:
 //!
 //! * addMedia's structured direct pass lands in the unified table at
-//! creation (task_kind=media), rides every fetch (the mock records
-//! the Cookie header), and the **full terminal set clears** — done
-//! leaves zero rows (`add_media_cookie_direct_pass_*`);
+//!   creation (task_kind=media), rides every fetch (the mock records
+//!   the Cookie header), and the **full terminal set clears** — done
+//!   leaves zero rows (`add_media_cookie_direct_pass_*`);
 //! * the error terminal clears too **and publishes the
-//! `taiji.task.cookiesClearedOnError` alert** (payload =
-//! gid/taskKind/count; the cookie value never appears in the event —
-//! the redact discipline) (`media_error_terminal_clears_*`);
+//!   `taiji.task.cookiesClearedOnError` alert** (payload =
+//!   gid/taskKind/count; the cookie value never appears in the event —
+//!   the redact discipline) (`media_error_terminal_clears_*`);
 //! * restart replay: a paused-mid-download media task's cookies
-//! survive the restart (the activation seed reads the unified table
-//! back — on the pre-fix tree the in-memory set died with the
-//! session) (`media_cookie_restart_replay_after_pause`);
+//!   survive the restart (the activation seed reads the unified table
+//!   back — on the pre-fix tree the in-memory set died with the
+//!   session) (`media_cookie_restart_replay_after_pause`);
 //! * setTaskCookies accepts waiting/paused **media** tasks (the
-//! flipped gate; active tasks and BT tasks still answer the fork's
-//! verbatim gate text) (`set_task_cookies_media_gates`);
+//!   flipped gate; active tasks and BT tasks still answer the fork's
+//!   verbatim gate text) (`set_task_cookies_media_gates`);
 //! * remove pairs the cookie clear (`media_remove_pairs_*`);
 //! * the startup GC sweeps injected crash-window residue (orphans +
-//! terminal residue) and re-emits the alert for error-form rows,
-//! never touching active rows, idempotently
-//! (`startup_gc_sweeps_injected_residue_and_alerts`).
+//!   terminal residue) and re-emits the alert for error-form rows,
+//!   never touching active rows, idempotently
+//!   (`startup_gc_sweeps_injected_residue_and_alerts`).
 //!
 //! Native-only synthesis path (fMP4 fixture); the SSRF lab runs
 //! allow-private (the loopback mock).

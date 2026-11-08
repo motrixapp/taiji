@@ -9,17 +9,17 @@
 //!
 //! Error-code stability invariants:
 //! - numeric code 1 = the generic method-execution error (aria2
-//! `RpcMethod.cc` `createErrorResponse`; unknown methods and auth
-//! failures land there too, see dispatch.rs);
+//!   `RpcMethod.cc` `createErrorResponse`; unknown methods and auth
+//!   failures land there too, see dispatch.rs);
 //! - JSON-RPC protocol errors -32700/-32600/-32602 (`rpc_helper.cc`,
-//! `HttpServerBodyCommand.cc`);
+//!   `HttpServerBodyCommand.cc`);
 //! - `-32601` is never produced: unknown methods use [`CODE_GENERIC`];
-//! the constant exists only to keep the HTTP mapping aligned with the
-//! reference switch;
+//!   the constant exists only to keep the HTTP mapping aligned with the
+//!   reference switch;
 //! - the HTTP failure -> aria2 numeric-code mapping table is frozen; it
-//! grows only in reviewed increments, and the executable mirror
-//! [`try_http_numeric_code`] plus the `http_failure_*` tests must
-//! change at the same point as any table row.
+//!   grows only in reviewed increments, and the executable mirror
+//!   [`try_http_numeric_code`] plus the `http_failure_*` tests must
+//!   change at the same point as any table row.
 //!
 //! The full engine-failure-to-numeric-code table and the declared
 //! differences vs aria2: docs/design/rpc.md.

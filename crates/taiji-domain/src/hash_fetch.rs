@@ -3,21 +3,21 @@
 //! # Rules (BEP52 text, bittorrent.org/beps/bep_0052.html)
 //!
 //! - `hash request` field constraints (MUST, enforced by the codec):
-//! `index` must be a multiple of `length` (including 0); `length` >= 2
-//! and a power of two; `length` SHOULD NOT exceed 512;
+//!   `index` must be a multiple of `length` (including 0); `length` >= 2
+//!   and a power of two; `length` SHOULD NOT exceed 512;
 //! - Requester policy: lazily fetch the base layer (leaf layer, base = 0)
-//! spanning the file before downloading blocks; a fetched layer enters
-//! the HashTreeCache only after verifying up to the piece root
-//! ([`HashTreeCache::verify_and_put_layer`]: recompute the root per
-//! piece and compare against the metadata anchor; a bad segment rejects
-//! the whole segment from the cache);
+//!   spanning the file before downloading blocks; a fetched layer enters
+//!   the HashTreeCache only after verifying up to the piece root
+//!   ([`HashTreeCache::verify_and_put_layer`]: recompute the root per
+//!   piece and compare against the metadata anchor; a bad segment rejects
+//!   the whole segment from the cache);
 //! - Proof layer: this side already holds the metadata piece layer
-//! (trusted anchor); lazy fetch targets the leaf layer, `proof = 0` (no
-//! proof hashes needed — the reply is the leaf layer itself, and the
-//! per-piece root recomputation is the check);
+//!   (trusted anchor); lazy fetch targets the leaf layer, `proof = 0` (no
+//!   proof hashes needed — the reply is the leaf layer itself, and the
+//!   per-piece root recomputation is the check);
 //! - Choke: the requester's sends are unaffected by choke ("Hash requests
-//! may be sent to a peer regardless of its choke state"); responder-side
-//! semantics are out of scope for this module.
+//!   may be sent to a peer regardless of its choke state"); responder-side
+//!   semantics are out of scope for this module.
 //!
 //! # Degradation (honesty)
 //!
@@ -35,24 +35,24 @@
 //! blocks_per_piece, a power of two). Combined with the BEP52 MUSTs
 //! (`length` a power of two >= 2, `index` a multiple of `length`):
 //! - decompose by **pieces** into powers of two (binary decomposition);
-//! each segment has len = unit x bpp and starts at a piece boundary, so
-//! index = start x bpp is a multiple of len;
+//!   each segment has len = unit x bpp and starts at a piece boundary, so
+//!   index = start x bpp is a multiple of len;
 //! - len <= 512: unit capped at 512/bpp (when bpp > 512, len = bpp,
-//! exceeding only the SHOULD, not the MUST — triggered only by extreme
-//! configs with piece_len > 8 MiB);
+//!   exceeding only the SHOULD, not the MUST — triggered only by extreme
+//!   configs with piece_len > 8 MiB);
 //! - bpp = 1 with an odd piece count P: the last piece cannot be covered
-//! in-bounds by any legal request (even start, len an even power of
-//! two — BEP52 requests always cover [even, even) ranges). Handling: the
-//! final request covers [P-1, P+1) (len = 2, even start), and the
-//! response is trimmed by [`admit_hashes`] to the admission domain
-//! [0, P) — leaf P is the zero-padded slot of the BEP52 tree ("The
-//! remaining leaf hashes beyond the end of file ... are set to zero");
-//! after trimming, the remaining leaves still pass the piece root
-//! anchor check, so a malicious filler value cannot enter the cache;
+//!   in-bounds by any legal request (even start, len an even power of
+//!   two — BEP52 requests always cover [even, even) ranges). Handling: the
+//!   final request covers [P-1, P+1) (len = 2, even start), and the
+//!   response is trimmed by [`admit_hashes`] to the admission domain
+//!   [0, P) — leaf P is the zero-padded slot of the BEP52 tree ("The
+//!   remaining leaf hashes beyond the end of file ... are set to zero");
+//!   after trimming, the remaining leaves still pass the piece root
+//!   anchor check, so a malicious filler value cannot enter the cache;
 //! - P == 1 and bpp == 1 (single-block file <= 16 KiB): the leaf hash
-//! equals the metadata pieces root (the tree is a single leaf); it is
-//! anchored into the cache at load time, no network lazy fetch (empty
-//! plan).
+//!   equals the metadata pieces root (the tree is a single leaf); it is
+//!   anchored into the cache at load time, no network lazy fetch (empty
+//!   plan).
 
 use std::time::Duration;
 

@@ -5675,27 +5675,27 @@ async fn streaming_dispatch_no_duplicate_when_all_inflight() {
     /// cell by cell — synchronous cells re-run here as regressions,
     /// async cells have their own locks):
     /// - Timeout column: the network segment =
-    /// `reissue_window_uses_adaptive_mirror_wiring` (an existing lock,
-    /// async); the store segment's counter-assertions =
-    /// `settling_coordinate_never_reissued` (zero candidates past the
-    /// guard age) + `settling_piece_not_dispatched_wiring` (the wiring
-    /// face) + `store_pending_guard_scan_table` (the guard action =
-    /// warn + count);
+    ///   `reissue_window_uses_adaptive_mirror_wiring` (an existing lock,
+    ///   async); the store segment's counter-assertions =
+    ///   `settling_coordinate_never_reissued` (zero candidates past the
+    ///   guard age) + `settling_piece_not_dispatched_wiring` (the wiring
+    ///   face) + `store_pending_guard_scan_table` (the guard action =
+    ///   warn + count);
     /// - Cancel column: the cross-segment sibling cancel =
-    /// `block_settle_cancels_sibling_after_arrival` (async, wire
-    /// level); the piece lifecycle =
-    /// `piece_lifecycle_clears_two_phase_segments`; the transfer arm is
-    /// unchanged (the candidate filter's Settling-is-always-false arm
-    /// guarantees only network-segment coordinates are touched; see
-    /// the ownership-never-overwritten row in
-    /// `settling_coordinate_never_reissued`);
+    ///   `block_settle_cancels_sibling_after_arrival` (async, wire
+    ///   level); the piece lifecycle =
+    ///   `piece_lifecycle_clears_two_phase_segments`; the transfer arm is
+    ///   unchanged (the candidate filter's Settling-is-always-false arm
+    ///   guarantees only network-segment coordinates are touched; see
+    ///   the ownership-never-overwritten row in
+    ///   `settling_coordinate_never_reissued`);
     /// - Late delivery column: `block_arrival_transition_table` rows 3/4
-    /// (out-of-order / degraded no-ops) + `settle_two_phase_segment_table`
-    /// (duplicate-coordinate drop counting = the pipeline's existing
-    /// two duplicate-drop faces, not part of this table);
+    ///   (out-of-order / degraded no-ops) + `settle_two_phase_segment_table`
+    ///   (duplicate-coordinate drop counting = the pipeline's existing
+    ///   two duplicate-drop faces, not part of this table);
     /// - Evict/reject column: `piece_lifecycle_clears_two_phase_segments` +
-    /// `drain_replies_two_phase_table` (reply draining is segment-
-    /// agnostic).
+    ///   `drain_replies_two_phase_table` (reply draining is segment-
+    ///   agnostic).
     #[test]
     fn two_phase_decision_table() {
         block_arrival_transition_table();

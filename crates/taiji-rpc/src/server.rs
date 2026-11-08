@@ -216,13 +216,13 @@ pub fn normalize_secret(secret: Option<String>) -> Option<String> {
 /// the same stream and code as bind errors,
 /// `io::ErrorKind::InvalidInput`, with fix guidance in the text):
 /// 1. secure with the certificate/private key missing either half ->
-/// refuse (a TLS server identity cannot hold with half of it missing);
+///    refuse (a TLS server identity cannot hold with half of it missing);
 /// 2. certificate/private key given while secure is off -> refuse
-/// (silently ignoring security material violates explicitness — the
-/// aria2 `--rpc-certificate` docs require `--rpc-secure` alongside;
-/// here that is made a hard error, not a warning);
+///    (silently ignoring security material violates explicitness — the
+///    aria2 `--rpc-certificate` docs require `--rpc-secure` alongside;
+///    here that is made a hard error, not a warning);
 /// 3. PEM load/parse failure (missing section / bad base64 / key not
-/// matching the certificate) -> refuse.
+///    matching the certificate) -> refuse.
 ///
 /// Protocol versions = `with_safe_default_protocol_versions` (TLS
 /// 1.2+1.3; the workspace rustls "tls12" feature is enabled). Provider =
@@ -581,10 +581,10 @@ fn conn_rejected(state: &AppState, ip: IpAddr, scope: ConnScope) -> Response {
 /// is a 503. Lifecycle accounting:
 /// - plain HTTP: the middleware releases after the response;
 /// - WS: `ws_upgrade` transfers the handshake lease into a session lease
-/// via [`ConnLeaseSlot`] (one accounting entry held continuously),
-/// released when `ws_loop` exits;
+///   via [`ConnLeaseSlot`] (one accounting entry held continuously),
+///   released when `ws_loop` exits;
 /// - middleware fallback: a lease the handler did not take is dropped from
-/// the slot after the response — RAII keeps the pairing.
+///   the slot after the response — RAII keeps the pairing.
 ///
 /// Zero impact for localhost without credentials: the 256/32 caps are far
 /// above single-client local use, but the gate is always semantically on.
@@ -877,11 +877,11 @@ async fn http_jsonrpc(State(state): State<Arc<AppState>>, req: Request) -> Respo
 /// browser can drive RPC over a cross-site WS straight at the loopback
 /// service). Allowed only when:
 /// - there is no Origin header (curl/aria2 CLI and other non-browser
-/// clients); or
+///   clients); or
 /// - the Origin authority matches the Host header (host:port, ASCII
-/// case-insensitive); or
+///   case-insensitive); or
 /// - `--rpc-allow-origin-all` explicitly allows all (the user's explicit
-/// opt-in, consistent with CORS).
+///   opt-in, consistent with CORS).
 ///
 /// `Origin: null` (sandboxed context) has no matchable Host → reject.
 fn ws_origin_allowed(state: &AppState, headers: &HeaderMap) -> bool {

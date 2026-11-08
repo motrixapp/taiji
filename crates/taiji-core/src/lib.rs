@@ -2,15 +2,15 @@
 //!
 //! Responsibilities:
 //! - SessionActor: queue scheduling (FIFO + max-concurrent), GID
-//! allocation (top bit set), task lifecycle command entry, the
-//! DownloadResult table, global-config ArcSwap hot updates;
+//!   allocation (top bit set), task lifecycle command entry, the
+//!   DownloadResult table, global-config ArcSwap hot updates;
 //! - TorrentTask: the single-torrent orchestration state machine
-//! (Queued -> MetadataPending -> Checking -> Allocating -> Downloading
-//! <=> Seeding);
+//!   (Queued -> MetadataPending -> Checking -> Allocating -> Downloading
+//!   <=> Seeding);
 //! - the event bus (six events aligned with aria2 notifications) and
-//! hook execution;
+//!   hook execution;
 //! - rate limiting and statistics (a direct translation of the SpeedCalc
-//! 10s sliding window);
+//!   10s sliding window);
 //! - the migration importer (read-only aria2 fork sqlite / `.aria2`).
 //!
 //! Status: scaffolding. Implementation tasks live in `docs/`; the actor

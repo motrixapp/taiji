@@ -3,20 +3,20 @@
 //!
 //! Covers the acceptance faces:
 //! * ① three tracks end-to-end — archives + init sections +
-//! source.m3u8 staged, media_track/media_segment accounting
-//! consistent with the bitmaps and archive lengths;
+//!   source.m3u8 staged, media_track/media_segment accounting
+//!   consistent with the bitmaps and archive lengths;
 //! * ② the BYTERANGE ≤8 merge wire assertion — 16 adjacent
-//! sub-segments of one resource fetched with exactly **one** Range
-//! GET (mock-side request count);
+//!   sub-segments of one resource fetched with exactly **one** Range
+//!   GET (mock-side request count);
 //! * ③ unknown-length segments take the no-grid (b) layer and resume
-//! from the segment bitmap (a mid-run failure leaves a partial
-//! prefix; the retry fetches only the tail);
+//!   from the segment bitmap (a mid-run failure leaves a partial
+//!   prefix; the retry fetches only the tail);
 //! * required-track failure fails the set; sidecar failure degrades
-//! to completion with the warning recorded;
+//!   to completion with the warning recorded;
 //! * multi-MAP boundaries + non-zero media sequence land in the
-//! ledger rows;
+//!   ledger rows;
 //! * the out-of-order write-back window anchor constants (media-side
-//! copy of the base's named anchors).
+//!   copy of the base's named anchors).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

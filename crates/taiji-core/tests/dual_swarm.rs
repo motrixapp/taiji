@@ -220,13 +220,13 @@ async fn fake_tracker(
 /// Dual-protocol mini-seeder; routes serving on the handshake info_hash.
 ///
 /// - v1 connections: stream space (index*L + begin; pad bytes are zeros
-/// within the stream);
+///   within the stream);
 /// - v2 connections: file-aligned space (v2_wire_goffs[index] + begin);
 /// - hash request (21) (the supply side of the requester's lazy fetch):
-/// computes the leaf layer on the fly per `hash_files`
-/// (root, stream offset, length) and answers hashes (22); slots past
-/// EOF get zero hashes (the BEP 52 tree zero-fill rule; the requester
-/// trims those slots).
+///   computes the leaf layer on the fly per `hash_files`
+///   (root, stream offset, length) and answers hashes (22); slots past
+///   EOF get zero hashes (the BEP 52 tree zero-fill rule; the requester
+///   trims those slots).
 ///
 /// Both serve the same `stream` bytes (the hybrid's dual representation
 /// of one set of on-disk data). Asserts that our outbound handshake

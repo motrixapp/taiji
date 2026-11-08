@@ -64,8 +64,8 @@ impl RetryPolicy {
 /// (RFC 9110 §10.2.3):
 /// - delta-seconds: `120`;
 /// - HTTP date: `Wed, 21 Oct 2026 07:28:00 GMT` (difference from
-/// `now`; a past moment → 0 — server clock skew / stale caches must
-/// not produce a negative wait).
+///   `now`; a past moment → 0 — server clock skew / stale caches must
+///   not produce a negative wait).
 ///
 /// Parse failure → `None` (the caller falls back to its existing
 /// backoff rhythm — the politeness face is best-effort; a malformed
@@ -98,17 +98,17 @@ pub const RETRY_AFTER_FLOOR_MS: u64 = 200;
 /// against hangs**; the single semantic source):
 /// `wait = clamp(after_secs → Duration, floor, max_wait)` —
 /// - **server value wins**: respect the server's politeness signal —
-/// wait the server-suggested value rather than the default rhythm /
-/// exponential backoff (the user's explicit `--retry-wait`
-/// configures the exponential-backoff base and does **not**
-/// override the server value — the trade-off, written down: a
-/// throttle wait is a protocol signal given by the server; user
-/// config is a client-side backoff parameter; different domains,
-/// and the server value wins within its domain);
+///   wait the server-suggested value rather than the default rhythm /
+///   exponential backoff (the user's explicit `--retry-wait`
+///   configures the exponential-backoff base and does **not**
+///   override the server value — the trade-off, written down: a
+///   throttle wait is a protocol signal given by the server; user
+///   config is a client-side backoff parameter; different domains,
+///   and the server value wins within its domain);
 /// - **ceiling = [`RetryPolicy::max_wait`]** (the 30s backoff
-/// ceiling, same magnitude as `--retry-wait`) — a malicious/faulty
-/// server's huge value must not hang the task (same shape as
-/// aria2's `MAX_RETRY_AFTER` ceiling clamp);
+///   ceiling, same magnitude as `--retry-wait`) — a malicious/faulty
+///   server's huge value must not hang the task (same shape as
+///   aria2's `MAX_RETRY_AFTER` ceiling clamp);
 /// - **floor = 200ms** ([`RETRY_AFTER_FLOOR_MS`]).
 pub fn clamp_retry_after(after_secs: u64, policy: &RetryPolicy) -> Duration {
     Duration::from_secs(after_secs).clamp(
@@ -136,23 +136,23 @@ const FUZZ_MAX_PCT: u64 = 25;
 ///
 /// Design face:
 /// - **0-25% additive magnitude** ([`FUZZ_MAX_PCT`]): an engine-side
-/// constant frozen as written (no CLI knob — the aria2 reference
-/// behaves the same built-in way); the additive direction
-/// guarantees [`clamp_retry_after`]'s 200ms floor and "server value
-/// wins" are not breached (a wait is stretched by at most 25%; the
-/// 30s clamp ceiling magnitude is undisturbed);
+///   constant frozen as written (no CLI knob — the aria2 reference
+///   behaves the same built-in way); the additive direction
+///   guarantees [`clamp_retry_after`]'s 200ms floor and "server value
+///   wins" are not breached (a wait is stretched by at most 25%; the
+///   30s clamp ceiling magnitude is undisturbed);
 /// - **scope = the three task-level backoff computation points**
-/// (grid worker failure arm / per-piece arm / batch-group arm;
-/// single-sourced in this crate's retry helpers); **not the probe
-/// face** (the probe's transient-failure retries have their own
-/// 50ms-floor exponential rhythm and storm-window semantics), and
-/// not the generic [`retry_with`] helper (its consumers include the
-/// probe);
+///   (grid worker failure arm / per-piece arm / batch-group arm;
+///   single-sourced in this crate's retry helpers); **not the probe
+///   face** (the probe's transient-failure retries have their own
+///   50ms-floor exponential rhythm and storm-window semantics), and
+///   not the generic [`retry_with`] helper (its consumers include the
+///   probe);
 /// - **random source**: hand-rolled SplitMix64 (no new dependency);
-/// seed = current nanoseconds mixed with a process-level monotonic
-/// counter — sequences differ across tasks in-process and across
-/// backoff points within a task (the key face against reset storms:
-/// fuzz sampling is independent across tasks).
+///   seed = current nanoseconds mixed with a process-level monotonic
+///   counter — sequences differ across tasks in-process and across
+///   backoff points within a task (the key face against reset storms:
+///   fuzz sampling is independent across tasks).
 pub fn fuzz_delay(wait: Duration) -> Duration {
     let micros = u64::try_from(wait.as_micros()).unwrap_or(u64::MAX);
     // 25% additive ceiling (integer µs domain); a base of 0 (no

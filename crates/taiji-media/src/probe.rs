@@ -12,22 +12,22 @@
 //! non-empty violation set to `taiji.media.remux_verify_failed`):
 //!
 //! * top level: exactly `ftyp, moov, mdat` in that order — moov
-//! before mdat = **faststart**;
+//!   before mdat = **faststart**;
 //! * `moov.mvhd`: timescale > 0; duration within the remux-verification tolerance
-//! (±2 %) of the expected ΣEXTINF;
+//!   (±2 %) of the expected ΣEXTINF;
 //! * per expected track: a `trak` whose `tkhd` track_id is 1..=N and
-//! flags carry enabled|in_movie; `mdia.hdlr` equals the expected
-//! handler; `mdhd.timescale` equals the source; `stsd` entry bytes
-//! **equal the source stsd verbatim** (the passthrough proof);
+//!   flags carry enabled|in_movie; `mdia.hdlr` equals the expected
+//!   handler; `mdhd.timescale` equals the source; `stsd` entry bytes
+//!   **equal the source stsd verbatim** (the passthrough proof);
 //! * `stbl` internal consistency: `stsz` sample count == Σ`stts`
-//! counts == `stsc`-implied count; the single-chunk `stco`/`co64`
-//! offset falls inside the `mdat` payload; Σ sample sizes == the
-//! `mdat` payload length (exact byte accounting across all tracks);
+//!   counts == `stsc`-implied count; the single-chunk `stco`/`co64`
+//!   offset falls inside the `mdat` payload; Σ sample sizes == the
+//!   `mdat` payload length (exact byte accounting across all tracks);
 //! * `stss` (when present): ascending, within 1..=sample_count,
-//! starts at 1 for visual tracks;
+//!   starts at 1 for visual tracks;
 //! * optional metadata faces when expected: `udta.meta.ilst.©nam`
-//! title byte-equality + `udta.meta.ilst.covr` payload
-//! byte-equality; `udta.chpl` round-trip; tx3g `stsd` type
+//!   title byte-equality + `udta.meta.ilst.covr` payload
+//!   byte-equality; `udta.chpl` round-trip; tx3g `stsd` type
 //! + sample-count/timeline equality for embedded subtitle tracks.
 
 use crate::bmff::{self, FourCC, HANDLER_SUBTITLE, iter_boxes};

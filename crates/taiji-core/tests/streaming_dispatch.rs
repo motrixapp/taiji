@@ -8,15 +8,15 @@
 //! Assertions:
 //!
 //! 1. **the first request = piece 480** (the playhead's piece; not
-//! piece 0 — distinct from purely sequential; not a shuffled order —
-//! distinct from rarest-first);
+//!    piece 0 — distinct from purely sequential; not a shuffled order —
+//!    distinct from rarest-first);
 //! 2. the prefix sequence = the EDF outward expansion (dist ties broken
-//! by ascending flat order): 480, 479, 481, 478, 482, 477, 483 (with
-//! the head/tail 2MiB class-0 covering the whole file, the distance
-//! order is the EDF order);
+//!    by ascending flat order): 480, 479, 481, 478, 482, 477, 483 (with
+//!    the head/tail 2MiB class-0 covering the whole file, the distance
+//!    order is the EDF order);
 //! 3. **playhead advancement = repeated calls**: after issuing
-//! playhead(100), new requests land near the new playhead (dist <= 5)
-//! — the scheduler re-routes immediately.
+//!    playhead(100), new requests land near the new playhead (dist <= 5)
+//!    — the scheduler re-routes immediately.
 //!
 //! The scripted serving cadence (serving only the first SERVE_LIMIT
 //! requests, resuming after the advance) clamps the expansion speed,

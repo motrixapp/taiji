@@ -16,15 +16,15 @@ impl SessionActor {
     /// - remove flag -> DeleteTorrent (decision in [`Self::remove`]);
     /// - pause/restart flag -> paused/queued row (task not terminal);
     /// - natural terminal states: Complete -> done terminal row,
-    /// Error -> error terminal row (error_msg rides with the row) —
-    /// persists the DownloadResult (SPEC §5.3 state set);
+    ///   Error -> error terminal row (error_msg rides with the row) —
+    ///   persists the DownloadResult (SPEC §5.3 state set);
     /// - everything else (shutdown-interrupted, classified Removed) ->
-    /// queued row = unfinished task (aria2 saveInProgress semantics:
-    /// resumed after restart, not lost).
+    ///   queued row = unfinished task (aria2 saveInProgress semantics:
+    ///   resumed after restart, not lost).
     /// - flags = None (forceRemove immediate teardown / late event) ->
-    /// the row was already handled by remove; nothing more to do.
-    /// `upgraded` (magnet upgrade product) refreshes the row content
-    /// first.
+    ///   the row was already handled by remove; nothing more to do.
+    ///   `upgraded` (magnet upgrade product) refreshes the row content
+    ///   first.
     pub(super) async fn persist_after_end(
         &mut self,
         gid: Gid,

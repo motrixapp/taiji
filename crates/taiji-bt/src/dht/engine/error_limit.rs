@@ -16,23 +16,23 @@
 //! `node.cpp` — process-wide, not per-source). Local values and rationale:
 //!
 //! - [`ERROR_REPLY_RATE_PER_MIN`] = 10: the design bound ("<=10/min"). In
-//! a healthy run error replies are ~0 (only bad peers / bad-token races
-//! trigger them); 10/min is ~0.17 replies/s at <= ~60B per reply, i.e.
-//! ~8B/s per source — a ~60B malformed query can never draw more reply
-//! bytes than it sent (amplification < 1:1).
+//!   a healthy run error replies are ~0 (only bad peers / bad-token races
+//!   trigger them); 10/min is ~0.17 replies/s at <= ~60B per reply, i.e.
+//!   ~8B/s per source — a ~60B malformed query can never draw more reply
+//!   bytes than it sent (amplification < 1:1).
 //! - [`ERROR_REPLY_BURST`] = 10 (bucket capacity = one full minute of
-//! budget, spendable instantly): headroom for legitimate races — within
-//! the two-generation token window (10min rotation, aria2
-//! `DHTConstants.h`), an announce carrying the old token is a normal
-//! race and the peer recovers by refetching get_peers; a 10-reply burst
-//! covers that, then silence.
+//!   budget, spendable instantly): headroom for legitimate races — within
+//!   the two-generation token window (10min rotation, aria2
+//!   `DHTConstants.h`), an announce carrying the old token is a normal
+//!   race and the peer recovers by refetching get_peers; a 10-reply burst
+//!   covers that, then silence.
 //! - [`ERROR_LIMITER_MAX_SOURCES`] = 4096: hard cap on per-source state
-//! (~200KB, bounded), evicting the least-recently-active entry (same
-//! rationale as `wire::MAX_PEER_RECORD_KEYS`). An evicted source
-//! re-enters with a fresh budget — but the absolute per-source 10/min
-//! bound does not depend on table completeness: an attacker forging
-//! many sources still gets a per-source bound (unbounded state growth
-//! is what this cap prevents).
+//!   (~200KB, bounded), evicting the least-recently-active entry (same
+//!   rationale as `wire::MAX_PEER_RECORD_KEYS`). An evicted source
+//!   re-enters with a fresh budget — but the absolute per-source 10/min
+//!   bound does not depend on table completeness: an attacker forging
+//!   many sources still gets a per-source bound (unbounded state growth
+//!   is what this cap prevents).
 //!
 //! # Implementation notes
 //!

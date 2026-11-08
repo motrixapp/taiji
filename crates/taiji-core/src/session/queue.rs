@@ -4,21 +4,21 @@
 //! Semantics are a direct translation of the (read-only) reference
 //! RequestGroupMan.cc:
 //! - reserved FIFO + fillup up to max-concurrent-downloads:
-//! `fillRequestGroupFromReserver` — pop ready entries from the queue
-//! front and activate up to `maxConcurrentDownloads - numActive`;
-//! paused / dependency-pending entries are skipped and re-inserted at
-//! the front, order preserved (the `pending` insert);
+//!   `fillRequestGroupFromReserver` — pop ready entries from the queue
+//!   front and activate up to `maxConcurrentDownloads - numActive`;
+//!   paused / dependency-pending entries are skipped and re-inserted at
+//!   the front, order preserved (the `pending` insert);
 //! - addUri position: `insertReservedGroup` — pos clamped to the table
-//! length;
+//!   length;
 //! - pause finalization requeues to the front:
-//! `ProcessStoppedRequestGroup` pauseRequested ->
-//! `reservedGroups_.push_front`;
+//!   `ProcessStoppedRequestGroup` pauseRequested ->
+//!   `reservedGroups_.push_front`;
 //! - restart (the changeOption restart path, RpcMethodImpl.cc)
-//! finalizes to the front and clears pause (setRestartRequested ->
-//! setPauseRequested(false));
+//!   finalizes to the front and clears pause (setRestartRequested ->
+//!   setPauseRequested(false));
 //! - DownloadResult table: `addDownloadResult` — numStoppedTotal_ only
-//! grows, table trimmed to `--max-download-result` (default 1000);
-//! `purgeDownloadResult` clears the table but not the count.
+//!   grows, table trimmed to `--max-download-result` (default 1000);
+//!   `purgeDownloadResult` clears the table but not the count.
 //!
 //! Upstream anchor mapping: docs/design/core.md
 

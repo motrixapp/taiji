@@ -12,13 +12,13 @@
 //! recovery invariants:
 //!
 //! * **bitmap vs archive reconciliation**: the killed track's
-//! archive length equals Σ seg_len over the done prefix (and the
-//! final archive equals Σ over ALL segments) — zero false records
-//! by construction (a bit never outruns delivered bytes);
+//!   archive length equals Σ seg_len over the done prefix (and the
+//!   final archive equals Σ over ALL segments) — zero false records
+//!   by construction (a bit never outruns delivered bytes);
 //! * **truncation to the last complete segment boundary**: the same
-//! equality after restart, before any re-download lands;
+//!   equality after restart, before any re-download lands;
 //! * **phase re-entry**: the restarted session re-enters by the
-//! persisted phase and the task completes (product in place).
+//!   persisted phase and the task completes (product in place).
 //!
 //! Verdict discipline: every round asserts to a terminal
 //! outcome — a round that never completes is a failure, never a skip.

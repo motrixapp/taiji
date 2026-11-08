@@ -1015,15 +1015,15 @@ pub(super) fn handle_dispatch_arrival(arrival: LedgerArrival, state: &mut Engine
 /// Settles dispatch debt (the tick-driven dispatch surface; constants and
 /// rationale in the `dispatch::DISPATCH_DEBT_INTERVAL` docs). Mixed gate:
 /// - debt age >= the tick (2ms) -> settle (the real-network shape:
-/// in-flight requests persist for about one RTT, so the age gate
-/// compresses rounds from one-per-event to <= 500 rounds/s — the round
-/// multiplier of the full O(peers x pieces) sweep);
+///   in-flight requests persist for about one RTT, so the age gate
+///   compresses rounds from one-per-event to <= 500 rounds/s — the round
+///   multiplier of the full O(peers x pieces) sweep);
 /// - supply quiet (no unsettled in-flight request on any indebted face) ->
-/// settle immediately (the loopback shape: requests drain in
-/// milliseconds, and waiting for the tick would clamp low-RTT supply — a
-/// pure age gate measurably throttles loopback throughput. Quiet-
-/// settling restores the event-driven cadence; between such rounds there
-/// is no overlapping supply left to coalesce anyway).
+///   settle immediately (the loopback shape: requests drain in
+///   milliseconds, and waiting for the tick would clamp low-RTT supply — a
+///   pure age gate measurably throttles loopback throughput. Quiet-
+///   settling restores the event-driven cadence; between such rounds there
+///   is no overlapping supply left to coalesce anyway).
 ///
 /// In-round decision order is identical to per-event dispatch (the same
 /// function, the same input snapshot); only rounds are coalesced. Debt is
@@ -1622,17 +1622,17 @@ pub(super) struct DhtRuntime<'a> {
 /// per-torrent `torrent_flags::disable_dht` flag flip, src/torrent.cpp).
 ///
 /// - Enable: the BEP27 gate first (a private engine is always refused —
-/// `torrent.cpp` `priv()` is a hard gate no flag can override);
-/// idempotent (already enabled = Ok); per-family cold wiring warms up
-/// (state restored from dht_state) + the handshake DHT bit + the attach
-/// slot + an immediate announce registration (the stalled-task revival
-/// path = a new discovery source starts; the existing 2s tick continues
-/// per announce_interval).
+///   `torrent.cpp` `priv()` is a hard gate no flag can override);
+///   idempotent (already enabled = Ok); per-family cold wiring warms up
+///   (state restored from dht_state) + the handshake DHT bit + the attach
+///   slot + an immediate announce registration (the stalled-task revival
+///   path = a new discovery source starts; the existing 2s tick continues
+///   per announce_interval).
 /// - Disable: idempotent (already disabled = Ok); halt-save (the routing
-/// table persisted, the same as shutdown semantics), then unwire; the
-/// handshake DHT bit is cleared (new outbound handshakes stop declaring
-/// it), the attach slot emptied, the gate slots zeroed; announces end
-/// with the engine Shutdown (the registry dies with the actor).
+///   table persisted, the same as shutdown semantics), then unwire; the
+///   handshake DHT bit is cleared (new outbound handshakes stop declaring
+///   it), the attach slot emptied, the gate slots zeroed; announces end
+///   with the engine Shutdown (the registry dies with the actor).
 async fn handle_set_dht_enabled(
     enabled: bool,
     state: &mut EngineLoop,
@@ -1722,32 +1722,32 @@ async fn handle_set_dht_enabled(
 ///
 /// Upstream anchors:
 /// - libtorrent `torrent.cpp`: a block written to disk with
-/// `picker().num_peers(block) > 1` runs `torrent::cancel_block`, which
-/// calls `cancel_request` on every connection — the first landing copy
-/// withdraws all sibling in-flight requests;
+///   `picker().num_peers(block) > 1` runs `torrent::cancel_block`, which
+///   calls `cancel_request` on every connection — the first landing copy
+///   withdraws all sibling in-flight requests;
 /// - aria2 1.37.0 `BtPieceMessage.cc`: a received already-owned block is
-/// dropped via `piece->hasBlock(...) -> "Already have this block."` — a
-/// receive-side stopgap (redundant bytes still count in updateDownload;
-/// no sibling-withdrawal half).
+///   dropped via `piece->hasBlock(...) -> "Already have this block."` — a
+///   receive-side stopgap (redundant bytes still count in updateDownload;
+///   no sibling-withdrawal half).
 ///
 /// Semantic bounds:
 /// - The x2 gate and the endgame fanout decision are untouched — the hedge
-/// itself stays (both hops in flight until one lands); only the leftover
-/// in-flight of an already-landed coordinate is converged;
+///   itself stays (both hops in flight until one lands); only the leftover
+///   in-flight of an already-landed coordinate is converged;
 /// - The cancel target is the inline owner (the old block_dispatch ledger
-/// folded into the row; owner = a peer_cuids index — under x2 order that
-/// is the second-hop requester = the sibling). If the second hop lands
-/// first, the cancel frame reaches a peer that already delivered — a
-/// harmless no-op (its slot was consumed by delivery; `RequestBook`
-/// without a slot does nothing), and the first hop's request surface
-/// converges via the existing 2s re-dispatch window — an asymmetry of
-/// single-slot coordinate accounting, practically equivalent to
-/// libtorrent's "cancel on all connections; the delivering side's slot
-/// is already consumed";
+///   folded into the row; owner = a peer_cuids index — under x2 order that
+///   is the second-hop requester = the sibling). If the second hop lands
+///   first, the cancel frame reaches a peer that already delivered — a
+///   harmless no-op (its slot was consumed by delivery; `RequestBook`
+///   without a slot does nothing), and the first hop's request surface
+///   converges via the existing 2s re-dispatch window — an asymmetry of
+///   single-slot coordinate accounting, practically equivalent to
+///   libtorrent's "cancel on all connections; the delivering side's slot
+///   is already consumed";
 /// - A cancelled slot's late delivery is accepted by the peer-side grace
-/// (`RequestBook::cancel_with_grace`, so slow peers are not punished);
+///   (`RequestBook::cancel_with_grace`, so slow peers are not punished);
 /// - First-copy supply (non-duplicate coordinates) never reaches this
-/// cancel branch — zero behavior change there.
+///   cancel branch — zero behavior change there.
 ///
 /// A total function over the settle transitions: every phase converges to
 /// `Buffered` — `SettlingDup` keeps the sibling withdrawal (the dup

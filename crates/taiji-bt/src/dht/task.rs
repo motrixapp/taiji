@@ -211,10 +211,10 @@ impl LookupTask {
     ///
     /// - in-flight -1; the entry's node is replaced by address;
     /// - peer lookup: the response token is cached (the engine reads it back
-    /// before calling);
+    ///   before calling);
     /// - nodes carried by the response merge into the candidates (skipping
-    /// the local ID) → stable sort by XOR distance → dedup → truncate to
-    /// the frontier.
+    ///   the local ID) → stable sort by XOR distance → dedup → truncate to
+    ///   the frontier.
     pub fn on_response(
         &mut self,
         from: &DhtNode,

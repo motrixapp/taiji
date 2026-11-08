@@ -88,16 +88,16 @@ pub trait RateSampleReporter: Send + Sync {
 /// rate limiting).
 ///
 /// - `write_at`: take a permit for `bytes.len()` → let the inner write
-/// through (the disk handle is not touched while waiting; accounting
-/// is never double-charged — the permit only gates disk-bound
-/// bytes);
+///   through (the disk handle is not touched while waiting; accounting
+///   is never double-charged — the permit only gates disk-bound
+///   bytes);
 /// - `complete_block`: accounting passes straight through (bitmap
-/// accounting is not rate-limited; its serialization lives in the
-/// coordinator);
+///   accounting is not rate-limited; its serialization lives in the
+///   coordinator);
 /// - optional [`RateSampleReporter`]: once attached, every write
-/// reports a permit-wait observation (instances built with
-/// [`ThrottledSink::new`] do not report — the observation face is
-/// off by default).
+///   reports a permit-wait observation (instances built with
+///   [`ThrottledSink::new`] do not report — the observation face is
+///   off by default).
 pub struct ThrottledSink {
     inner: Arc<dyn SegmentSink>,
     limiter: HttpLimiter,

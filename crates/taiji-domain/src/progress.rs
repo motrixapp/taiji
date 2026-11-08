@@ -2,20 +2,20 @@
 //!
 //! Design facts:
 //! - There is no global piece index space. Bitmaps are allocated per file
-//! ("pieces per file"), keyed by `(file_index, piece_in_file)`; every
-//! global view is synthesized.
+//!   ("pieces per file"), keyed by `(file_index, piece_in_file)`; every
+//!   global view is synthesized.
 //! - `completedLength` = the sum of per-file verified bytes; padding files
-//! count as fully verified (BEP47: pad content is all zeros and piece
-//! hashes are computed over zeros — pads are never transferred, so a
-//! fixed layout already means owned).
+//!   count as fully verified (BEP47: pad content is all zeros and piece
+//!   hashes are computed over zeros — pads are never transferred, so a
+//!   fixed layout already means owned).
 //! - `bitfield` (RPC compatibility field): v1 uses the real bitmap; v2 and
-//! hybrid synthesize a pseudo-bitmap by concatenating per-file bitmaps in
-//! file order (trailing pad bits 0). Frontends render it with v1 bitmap
-//! semantics (matching libtorrent's external reporting).
+//!   hybrid synthesize a pseudo-bitmap by concatenating per-file bitmaps in
+//!   file order (trailing pad bits 0). Frontends render it with v1 bitmap
+//!   semantics (matching libtorrent's external reporting).
 //! - In-flight block bitmaps: 16 KiB granularity, per (file, piece),
-//! maintained by dispatch/complete events; when a piece passes hash
-//! check, its whole bitmap is cleared (in-flight state ends with the
-//! piece).
+//!   maintained by dispatch/complete events; when a piece passes hash
+//!   check, its whole bitmap is cleared (in-flight state ends with the
+//!   piece).
 //!
 //! For v1-only torrents the per-file piece count is derived from the total
 //! length and piece_length; for v2/hybrid it comes from

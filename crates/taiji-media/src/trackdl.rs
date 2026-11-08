@@ -8,20 +8,20 @@
 //! `docs/design/media-base-consumption.md`.
 //!
 //! * **(a) known-length tracks** (every segment carries an explicit
-//! BYTERANGE): the segments map onto one virtual byte space
-//! ([`layout_known_length`]), the base's block grid +
-//! ExtentCoordinator (guided scheduling, stall-window config, AIMD
-//! book) + HttpRangeTransport carry it — full grid/bitmap resume
-//! reuse. Adjacent sub-segment merging is enabled here through the
-//! parser's runs data structure: the layout folds the ≤8 runs into **maximal
-//! same-URI contiguous spans**, and each span∩extent piece is
-//! exactly one Range GET (the wire-level merge, ≤8 sub-segments per
-//! GET by construction of the runs).
+//!   BYTERANGE): the segments map onto one virtual byte space
+//!   ([`layout_known_length`]), the base's block grid +
+//!   ExtentCoordinator (guided scheduling, stall-window config, AIMD
+//!   book) + HttpRangeTransport carry it — full grid/bitmap resume
+//!   reuse. Adjacent sub-segment merging is enabled here through the
+//!   parser's runs data structure: the layout folds the ≤8 runs into **maximal
+//!   same-URI contiguous spans**, and each span∩extent piece is
+//!   exactly one Range GET (the wire-level merge, ≤8 sub-segments per
+//!   GET by construction of the runs).
 //! * **(b) unknown-length tracks**: no grid — the base's
-//! [`SequenceEngine`](taiji_http::sequence) takes the URIs in
-//! order with bounded out-of-order lookahead; the checkpoint unit
-//! is the segment (`seg_bitmap`), no offset resume inside a
-//! segment (the no-range degraded precedent).
+//!   [`SequenceEngine`](taiji_http::sequence) takes the URIs in
+//!   order with bounded out-of-order lookahead; the checkpoint unit
+//!   is the segment (`seg_bitmap`), no offset resume inside a
+//!   segment (the no-range degraded precedent).
 //!
 //! Init sections (EXT-X-MAP) are fetched before the track body into
 //! their own staging files (the `init-<track>-<n>.mp4` name face);

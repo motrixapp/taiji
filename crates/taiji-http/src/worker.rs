@@ -10,18 +10,18 @@
 //! through injection seams:
 //!
 //! - [`WorkerTelemetry`]: task-level live readings (grid completion /
-//! per-source in-flight / extent and connection counts) — host
-//! implemented; the worker loop holds zero in-protocol telemetry
-//! state;
+//!   per-source in-flight / extent and connection counts) — host
+//!   implemented; the worker loop holds zero in-protocol telemetry
+//!   state;
 //! - [`WorkerOpts`]: request identity (per-transport-family credential
-//! slots) and the failure-arm `Retry-After` clamp — the protocol-face
-//! projection of host runtime options;
+//!   slots) and the failure-arm `Retry-After` clamp — the protocol-face
+//!   projection of host runtime options;
 //! - fatal channels: `WorkerRig::fatal_no_source`/`fatal_restart`
-//! (atomic flags) and `WorkerRig::fatal_protocol` (an
-//! `(HttpError, String)` slot) — a worker sets its flag and exits; the
-//! task driver consumes it as task-level failure/restart (structured
-//! failure mapping is host-side: canonical codes are frozen via
-//! [`HttpError::code`]).
+//!   (atomic flags) and `WorkerRig::fatal_protocol` (an
+//!   `(HttpError, String)` slot) — a worker sets its flag and exits; the
+//!   task driver consumes it as task-level failure/restart (structured
+//!   failure mapping is host-side: canonical codes are frozen via
+//!   [`HttpError::code`]).
 //!
 //! Upstream anchor mapping: docs/design/http.md
 
@@ -1027,13 +1027,13 @@ pub fn last_complete_block(extent_end: u64, total_len: u64, bs: u64, count: u64)
 /// `taiji_http_slowstart_seconds`): evaluated on the existing
 /// [`RuntimeStats`] poll —
 /// - Arm 1, connections first reach the cap: total AIMD connections
-/// across all sources >= cap x registered sources (sources share the
-/// growth cap);
+///   across all sources >= cap x registered sources (sources share the
+///   growth cap);
 /// - Arm 2, aggregate rate first reaches steady state: any source's
-/// AIMD has settled (the first `Hold` window decision — a gain below
-/// ~10% approximates the engine's own steady-state criterion of the
-/// aggregate rate at ~90%+ of baseline, or the cap is reached;
-/// [`RuntimeStats::slowstart_settled`] is the source of truth).
+///   AIMD has settled (the first `Hold` window decision — a gain below
+///   ~10% approximates the engine's own steady-state criterion of the
+///   aggregate rate at ~90%+ of baseline, or the cap is reached;
+///   [`RuntimeStats::slowstart_settled`] is the source of truth).
 ///
 /// No AIMD state (static baseline / empty snapshot) is always false —
 /// the slow-start metric only samples dynamic (AIMD-assembled) tasks.

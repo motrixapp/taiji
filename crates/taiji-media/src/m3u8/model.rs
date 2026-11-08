@@ -4,41 +4,41 @@
 //! transport/decrypt consumers use):
 //!
 //! * **Segment identity = absolute media sequence** (per the product
-//! spec): every
-//! `MediaSegment::sequence` is `media_sequence + appearance index`;
-//! IV derivation and per-segment bitmaps key on it, never on
-//! the array index.
+//!   spec): every
+//!   `MediaSegment::sequence` is `media_sequence + appearance index`;
+//!   IV derivation and per-segment bitmaps key on it, never on
+//!   the array index.
 //! * **BYTERANGE offsets are stored resolved** — an omitted offset is
-//! already accumulated per-URI by the parser (RFC 8216 §4.3.2.2
-//! semantics, the adopted per-URI appearance-order form),
-//! with `offset_omitted` keeping the provenance for golden asserts.
-//! All accumulation arithmetic is checked; overflow is a parse error.
+//!   already accumulated per-URI by the parser (RFC 8216 §4.3.2.2
+//!   semantics, the adopted per-URI appearance-order form),
+//!   with `offset_omitted` keeping the provenance for golden asserts.
+//!   All accumulation arithmetic is checked; overflow is a parse error.
 //! * **Key state is per-segment and materialized** (`MediaSegment::key`
-//! = the effective key at that segment). METHOD=NONE is an explicit
-//! reset: segments after it are plaintext (`key == None`) even when a
-//! key was active before — the m3u8-rs degradation
-//! (per the media spec's errata) cannot recur because no ambient
-//! state survives
-//! into the model.
+//!   = the effective key at that segment). METHOD=NONE is an explicit
+//!   reset: segments after it are plaintext (`key == None`) even when a
+//!   key was active before — the m3u8-rs degradation
+//!   (per the media spec's errata) cannot recur because no ambient
+//!   state survives
+//!   into the model.
 //! * **Init-section encryption is positional** (the media spec's
-//! boundary): an `InitSection::key` comes either from the `KEY=`
-//! attribute on the EXT-X-MAP itself, or from the ambient EXT-X-KEY
-//! active where the MAP is declared (RFC 8216 §4.3.2.5: a KEY
-//! covers "every Media Initialization Section declared by an
-//! EXT-X-MAP tag that appears between it and the next EXT-X-KEY
-//! tag"); a KEY declared after the MAP never covers it. The
-//! MAP-level `KEY=` attribute is a **taiji custom extension**
-//! (an erratum of record: not a clause of RFC 8216 or any rfc8216bis
-//! revision). The init IV resolves at decrypt time: the
-//! key's explicit IV, else the first following segment's absolute
-//! media sequence — a **practical taiji relaxation, not a spec
-//! clause** (RFC 8216 §4.3.2.5's spec-correct behavior on a
-//! missing init IV is to reject; taiji attempts the sequence
-//! derivation and reports an honest decrypt error when it cannot
-//! resolve one).
+//!   boundary): an `InitSection::key` comes either from the `KEY=`
+//!   attribute on the EXT-X-MAP itself, or from the ambient EXT-X-KEY
+//!   active where the MAP is declared (RFC 8216 §4.3.2.5: a KEY
+//!   covers "every Media Initialization Section declared by an
+//!   EXT-X-MAP tag that appears between it and the next EXT-X-KEY
+//!   tag"); a KEY declared after the MAP never covers it. The
+//!   MAP-level `KEY=` attribute is a **taiji custom extension**
+//!   (an erratum of record: not a clause of RFC 8216 or any rfc8216bis
+//!   revision). The init IV resolves at decrypt time: the
+//!   key's explicit IV, else the first following segment's absolute
+//!   media sequence — a **practical taiji relaxation, not a spec
+//!   clause** (RFC 8216 §4.3.2.5's spec-correct behavior on a
+//!   missing init IV is to reject; taiji attempts the sequence
+//!   derivation and reports an honest decrypt error when it cannot
+//!   resolve one).
 //! * URIs are kept verbatim (query strings included). Base-URL
-//! resolution is a transport concern; the digest/identity
-//! faces in [`super::digest`] do the query-stripping.
+//!   resolution is a transport concern; the digest/identity
+//!   faces in [`super::digest`] do the query-stripping.
 
 /// A whole parsed playlist — media or master (RFC 8216 §4: a playlist
 /// containing EXT-X-STREAM-INF (or EXT-X-MEDIA/I-FRAME-STREAM-INF) is a

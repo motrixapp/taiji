@@ -4,27 +4,27 @@
 //! # Policy
 //!
 //! - **Strip at every level by default (ERROR..TRACE alike)**: PT announce
-//! credentials (`?passkey=…` / `?authkey=…`) and webseed/HTTP pre-signed
-//! tokens all live in the query segment — this prevents the routine
-//! accident of credentials leaking through shared troubleshooting logs.
-//! Deliberately stricter than the references: aria2/libtorrent log the
-//! raw URL at debug. Debug is exactly the "please paste your logs"
-//! sharing mode, so the fullest form must not be a log-level side
-//! effect.
+//!   credentials (`?passkey=…` / `?authkey=…`) and webseed/HTTP pre-signed
+//!   tokens all live in the query segment — this prevents the routine
+//!   accident of credentials leaking through shared troubleshooting logs.
+//!   Deliberately stricter than the references: aria2/libtorrent log the
+//!   raw URL at debug. Debug is exactly the "please paste your logs"
+//!   sharing mode, so the fullest form must not be a log-level side
+//!   effect.
 //! - **Explicit verbatim switch** (CLI `--log-verbatim-urls` ->
-//! [`set_url_log_verbatim`]): on = [`redact_url_for_log`] returns the
-//! URL as-is (full query incl. credentials — local deep diagnostics
-//! only; scrub logs before sharing). Orthogonal to log level.
+//!   [`set_url_log_verbatim`]): on = [`redact_url_for_log`] returns the
+//!   URL as-is (full query incl. credentials — local deep diagnostics
+//!   only; scrub logs before sharing). Orthogonal to log level.
 //! - **Functional use bypasses this module**: announce/scrape/dial/pickup
-//! bodies and the RPC `tellStatus` data face keep the raw URL — only
-//! the log face is redacted.
+//!   bodies and the RPC `tellStatus` data face keep the raw URL — only
+//!   the log face is redacted.
 //!
 //! # Consumers (cross-protocol)
 //!
 //! - BT face: tracker announce/webseed (`taiji-bt` tracker actor +
-//! `taiji-engine` dial, re-exported via `taiji_bt::tracker`);
+//!   `taiji-engine` dial, re-exported via `taiji_bt::tracker`);
 //! - HTTP download face: the `taiji-http` client URL log points (a
-//! verbatim gate above its private `redact` Url form).
+//!   verbatim gate above its private `redact` Url form).
 //!
 //! The `userinfo` form (`scheme://user:pass@…`) has no precedent on any
 //! face and is intentionally not covered. Tests serialize on

@@ -2,11 +2,11 @@
 //!
 //! Cross-checked against the read-only reference:
 //! - Request parsing, branch by branch: `rpc_helper.cc`
-//! processJsonRpcRequest (missing id -> -32600; non-string method ->
-//! -32600; params absent -> empty; dict/named params -> -32602;
-//! explicit `params: null` also -> -32602);
+//!   processJsonRpcRequest (missing id -> -32600; non-string method ->
+//!   -32600; params absent -> empty; dict/named params -> -32602;
+//!   explicit `params: null` also -> -32602);
 //! - Response shape: `RpcResponse.cc` encodeJsonAll
-//! `{"id":..,"jsonrpc":"2.0","result"|"error":..}`;
+//!   `{"id":..,"jsonrpc":"2.0","result"|"error":..}`;
 //! - Error object shape: `RpcMethod.cc` (jsonRpc branch) `{code,message}`.
 //!
 //! Positional params only (aria2 does not support named params,

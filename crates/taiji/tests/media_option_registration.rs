@@ -3,9 +3,9 @@
 //! **from one source** —
 //!
 //! 1. the declaration table (`DECLARED_OPTION_DIFFS`, the core
-//! single source),
+//!    single source),
 //! 2. the runtime name lists (the CLI `--media-*` flag surface +
-//! the getGlobalOption echo / the GLOBAL_PATCH table mirror),
+//!    the getGlobalOption echo / the GLOBAL_PATCH table mirror),
 //! 3. the diff declaration document (`docs/rpc-api-diff.md`).
 //!
 //! A name on one face but missing another turns red here (the drift

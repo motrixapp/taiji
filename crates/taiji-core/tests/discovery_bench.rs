@@ -11,20 +11,20 @@
 //! fixtures mirror `tests/magnet_chain.rs`):
 //!
 //! 1. `magnet`: full magnet cold-start chain T0-T4 (local fake tracker +
-//! full seeder + in-place engine upgrade through download completion);
+//!    full seeder + in-place engine upgrade through download completion);
 //! 2. `tracker`: tracker announce success rate / latency (driven directly
-//! through `bt::tracker::actor`, the real announce component behind the
-//! engine's per-swarm face);
+//!    through `bt::tracker::actor`, the real announce component behind the
+//!    engine's per-swarm face);
 //! 3. `dht`: DHT bootstrap latency + get_peers first-response latency
-//! (three in-process DHT instances);
+//!    (three in-process DHT instances);
 //! 4. `pex`: PEX contribution rate, measured at two levels:
 //! - protocol wire swarm (raw metric, kept as the comparison baseline):
-//! real ut_pex codec/negotiation over loopback TCP, consumed by the
-//! harness itself;
+//!   real ut_pex codec/negotiation over loopback TCP, consumed by the
+//!   harness itself;
 //! - engine level (post-wiring): a real `DownloadEngine` discovers the
-//! announcer via the tracker, consumes the ut_pex frames into
-//! connection management, and the engine-level contribution counters
-//! are read from SessionMetrics (pex-sourced / total discovered).
+//!   announcer via the tracker, consumes the ut_pex frames into
+//!   connection management, and the engine-level contribution counters
+//!   are read from SessionMetrics (pex-sourced / total discovered).
 //!
 //! Iterations: env var `DISCOVERY_BENCH_ITERS` (default 12; acceptance
 //! requires >= 10).

@@ -4,28 +4,28 @@
 //! Topology (all in-process, loopback ports; port discipline per the
 //! scheduler contract):
 //! - A = DownloadEngine (4-piece torrent, `seed.super_seeding = true`,
-//! resident seeding on completion): first downloads all pieces from C
-//! -> enters the seeding state (BEP 21 upload_only broadcast + BEP 16
-//! super-seed bookkeeping mounted, engine.rs `enter_seeding_state`);
+//!   resident seeding on completion): first downloads all pieces from C
+//!   -> enters the seeding state (BEP 21 upload_only broadcast + BEP 16
+//!   super-seed bookkeeping mounted, engine.rs `enter_seeding_state`);
 //! - C = mini-seeder: serves all pieces (the download-phase supply
-//! source);
+//!   source);
 //! - B = super-seed consumer (dials into A's listen port once A seeds;
-//! the port is captured from the fake tracker's announce).
+//!   the port is captured from the fake tracker's announce).
 //!
 //! End-to-end assertions (BEP 16 text semantics + libtorrent anchors):
 //! 1. after registering, B receives **no bitfield** (bt_peer_connection.cpp
-//! "pretend to not have any piece and don't send a bitfield"); instead
-//! bootstrap HAVEs (at most two pieces);
+//!    "pretend to not have any piece and don't send a bitfield"); instead
+//!    bootstrap HAVEs (at most two pieces);
 //! 2. the ext handshake B receives carries `upload_only: 1` (BEP 21; the
-//! seeding-state-transition broadcast = engine.rs registration
-//! SetUploadOnly);
+//!    seeding-state-transition broadcast = engine.rs registration
+//!    SetUploadOnly);
 //! 3. B requests the assigned piece -> A serves it (piece frame);
-//! requesting a **non-assigned** piece -> reject (the
-//! peer_connection.cpp serving gate);
+//!    requesting a **non-assigned** piece -> reject (the
+//!    peer_connection.cpp serving gate);
 //! 4. B reports completion (HAVE of the assigned piece) -> A sends a new
-//! HAVE (a different piece) — "only send a new piece after the peer
-//! completes, and only pieces not yet propagated" (torrent.cpp
-//! completion rotation, peer_connection.cpp).
+//!    HAVE (a different piece) — "only send a new piece after the peer
+//!    completes, and only pieces not yet propagated" (torrent.cpp
+//!    completion rotation, peer_connection.cpp).
 
 use std::sync::Arc;
 use std::time::Duration;

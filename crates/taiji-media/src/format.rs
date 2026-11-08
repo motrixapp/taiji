@@ -4,18 +4,18 @@
 //! faces the RPC line consumes.
 //!
 //! * [`classify_entry`] — the sniff-order entry classification
-//! (content > extension > Content-Type) with the third outcome
-//! beyond manifest/not-media: a **direct media file** routes to the
-//! existing HTTP task family (zero new surface);
+//!   (content > extension > Content-Type) with the third outcome
+//!   beyond manifest/not-media: a **direct media file** routes to the
+//!   existing HTTP task family (zero new surface);
 //! * [`FormatNode`]/[`FormatTree`] — the unified format-tree node
-//! (0.3 value domain: what an HLS/DASH manifest makes available;
-//! rich fields unlock via the 0.5 bridge) and the tree snapshot —
-//! the `media_format` persisted payload and the `getMediaFormats`
-//! reply basis (serde: the row stores the tree verbatim);
+//!   (0.3 value domain: what an HLS/DASH manifest makes available;
+//!   rich fields unlock via the 0.5 bridge) and the tree snapshot —
+//!   the `media_format` persisted payload and the `getMediaFormats`
+//!   reply basis (serde: the row stores the tree verbatim);
 //! * the probe snapshot identity helpers ([`probe_token`],
-//! [`snapshot_url_key`]) — the server-side anti-forgery face: the
-//! token is opaque and server-minted; clients can only *name* a
-//! token, never hand back a format-tree blob.
+//!   [`snapshot_url_key`]) — the server-side anti-forgery face: the
+//!   token is opaque and server-minted; clients can only *name* a
+//!   token, never hand back a format-tree blob.
 //!
 //! Everything here is a pure function; fetching is the caller's
 //! business.
@@ -45,19 +45,19 @@
 //! # 0.5 bridge seams (seams canonicalized, not implemented here)
 //!
 //! * **Source-agnostic node**: [`FormatTree`] carries no HLS- or
-//! DASH-private fields — every fact rides the node vocabulary
-//! above. A bridge's `formats[]` therefore projects onto the same
-//! node contract without a tree-shaped fork.
+//!   DASH-private fields — every fact rides the node vocabulary
+//!   above. A bridge's `formats[]` therefore projects onto the same
+//!   node contract without a tree-shaped fork.
 //! * **Sniff-order fourth slot**: after content > extension >
-//! Content-Type, the 0.5 feature-gated extractor bridge takes the
-//! fourth slot (page-shaped entries → `taiji-ytdlp` trial parse).
-//! The seam is this module's [`EntryKind`] — a fourth variant (or a
-//! page classification) lands there; `classify_entry`'s three-signal
-//! order itself is frozen for 0.3.
+//!   Content-Type, the 0.5 feature-gated extractor bridge takes the
+//!   fourth slot (page-shaped entries → `taiji-ytdlp` trial parse).
+//!   The seam is this module's [`EntryKind`] — a fourth variant (or a
+//!   page classification) lands there; `classify_entry`'s three-signal
+//!   order itself is frozen for 0.3.
 //! * **Bridge token/snapshot consumption**: a bridge-produced tree
-//! goes through the same server-side `store`/`consume` cache —
-//! never a client-supplied blob ("no client-returned format tree"
-//! holds for the bridge era too; one anti-forgery posture, one token face).
+//!   goes through the same server-side `store`/`consume` cache —
+//!   never a client-supplied blob ("no client-returned format tree"
+//!   holds for the bridge era too; one anti-forgery posture, one token face).
 
 use serde::{Deserialize, Serialize};
 
@@ -272,8 +272,8 @@ fn split_codecs(codecs: Option<&str>) -> (String, String) {
 /// Build the format tree from a parsed manifest (the probe product).
 ///
 /// * master → one node per EXT-X-STREAM-INF variant (video, ordinal
-/// ids `vN`) + one node per EXT-X-MEDIA AUDIO rendition (`aN`) and
-/// SUBTITLES rendition (`sN`) that carries its own URI;
+///   ids `vN`) + one node per EXT-X-MEDIA AUDIO rendition (`aN`) and
+///   SUBTITLES rendition (`sN`) that carries its own URI;
 /// * media playlist → the single implicit node (`v0`).
 ///
 /// `manifest_url` resolves relative rendition URIs (RFC 3986 join).

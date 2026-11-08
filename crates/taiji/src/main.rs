@@ -2,33 +2,33 @@
 //!
 //! Modes (mirrors the upstream three-state assembly, ):
 //! - **Download mode** (a .torrent positional arg is given): parse the
-//! metainfo -> DownloadEngine download -> once all pieces complete,
-//! stay resident seeding; Ctrl-C/SIGTERM exits gracefully
-//! (part 3c; the M0 deliverable "command-line `taiji <torrent> -d dir`
-//! downloads a public-swarm torrent to completion and seeds it");
+//!   metainfo -> DownloadEngine download -> once all pieces complete,
+//!   stay resident seeding; Ctrl-C/SIGTERM exits gracefully
+//!   (part 3c; the M0 deliverable "command-line `taiji <torrent> -d dir`
+//!   downloads a public-swarm torrent to completion and seeds it");
 //! - **Download + RPC co-residence** (download mode + `--enable-rpc`):
-//! an RPC server starts in the same process — the engine path goes
-//! through the SessionActor pipeline (shared with idle) and the
-//! torrent is injected directly via the AddTorrent session command
-//! ([`run_download_with_rpc`] mirrors the third state of the
-//! `DownloadEngineFactory.cc` three-state assembly);
+//!   an RPC server starts in the same process — the engine path goes
+//!   through the SessionActor pipeline (shared with idle) and the
+//!   torrent is injected directly via the AddTorrent session command
+//!   ([`run_download_with_rpc`] mirrors the third state of the
+//!   `DownloadEngineFactory.cc` three-state assembly);
 //! - **Idle mode** (no positional arg): actor topology bootstrap + RPC
-//! service (axum `POST/GET /jsonrpc`, token/Basic auth, six methods) +
-//! signal/RPC dual-driven graceful shutdown (1s budget, SPEC
-//! §8.1);
+//!   service (axum `POST/GET /jsonrpc`, token/Basic auth, six methods) +
+//!   signal/RPC dual-driven graceful shutdown (1s budget, SPEC
+//!   §8.1);
 //! - **Migration import mode** (`import` subcommand: SPEC §10 —
-//! read-only import from a fork sqlite / `.aria2` file plus an aria2
-//! dereg list, see [`import`]);
+//!   read-only import from a fork sqlite / `.aria2` file plus an aria2
+//!   dereg list, see [`import`]);
 //! - **HTTP one-shot download** (`http` subcommand: SessionActor-driven
-//! with session-db bitmap resume, see [`http`]);
+//!   with session-db bitmap resume, see [`http`]);
 //! - **Batch download** (`--input-file <FILE>`, domain A: the aria2
-//! `-i` counterpart — list lines are classified one by one into the
-//! same session pipeline, exit code summarized once all tasks reach a
-//! terminal state, see [`run_input_file`]);
+//!   `-i` counterpart — list lines are classified one by one into the
+//!   same session pipeline, exit code summarized once all tasks reach a
+//!   terminal state, see [`run_input_file`]);
 //! - **Completion script generation** (the
-//! `--print-completions <bash|zsh|fish>` meta flag, :
-//! prints the minimal completion script to stdout and exits — enters
-//! no download/session mode, see [`completions`]).
+//!   `--print-completions <bash|zsh|fish>` meta flag, :
+//!   prints the minimal completion script to stdout and exits — enters
+//!   no download/session mode, see [`completions`]).
 //!
 //! Option naming freeze: `--dir`/`--listen-port`/`--rpc-*` are
 //! aria2-compatible names. aria2's `--listen-port` accepts a port range
@@ -42,12 +42,12 @@
 //! **Common baseline** ([`main`] entry layer, shared by the three
 //! modes, applied before mode dispatch):
 //! - `2` = usage/startup hard error: clap parse failure (value-domain
-//! rejection/missing arg), `--conf-path` fail-fast (unknown key /
-//! unreadable file), download-mode RPC group option conflict
-//! ([`rpc_group_conflict`]), conf-provided enable-rpc
-//! ([`conf_enable_rpc_download_conflict`]),
-//! `--bt-min-crypto-level`/`--bt-peer-connection-type` value-domain
-//! rejection;
+//!   rejection/missing arg), `--conf-path` fail-fast (unknown key /
+//!   unreadable file), download-mode RPC group option conflict
+//!   ([`rpc_group_conflict`]), conf-provided enable-rpc
+//!   ([`conf_enable_rpc_download_conflict`]),
+//!   `--bt-min-crypto-level`/`--bt-peer-connection-type` value-domain
+//!   rejection;
 //! - `1` = process infrastructure failure: tokio runtime build failure.
 //!
 //! Three-mode comparison (per code; the `http` column covers both the
@@ -56,20 +56,20 @@
 //! [`run_download`]; idle = no positional arg, [`run_idle`]):
 //!
 //! - `0` — bare: download complete / seeding stopped / Ctrl-C·SIGTERM
-//! graceful shutdown (signal = 0); http: task Complete (signal = 1,
-//! see divergence ①); idle: signal or RPC shutdown graceful stop
-//! (still 0 beyond the 1s budget, see divergence ②).
+//!   graceful shutdown (signal = 0); http: task Complete (signal = 1,
+//!   see divergence ①); idle: signal or RPC shutdown graceful stop
+//!   (still 0 beyond the 1s budget, see divergence ②).
 //! - `1` — bare: torrent read/parse/engine-config failure, engine
-//! Failed/panic, shutdown over the 1s budget; http: task
-//! error/removed, signal interrupt, concurrent session lock held,
-//! attach refused / in-flight row read failure / malformed gid,
-//! non-value-domain session command error; idle: RPC bind failure
-//! (the only 1 face).
+//!   Failed/panic, shutdown over the 1s budget; http: task
+//!   error/removed, signal interrupt, concurrent session lock held,
+//!   attach refused / in-flight row read failure / malformed gid,
+//!   non-value-domain session command error; idle: RPC bind failure
+//!   (the only 1 face).
 //! - `2` — bare: none (common baseline only); http: session command
-//! value-domain rejection (`taiji.option.invalid` prefix,
-//! `http::exit_code_of`), lock-file filesystem failure, missing URL,
-//! metalink document failure (read/over-cap/parse/zero entries);
-//! idle: none (common baseline only).
+//!   value-domain rejection (`taiji.option.invalid` prefix,
+//!   `http::exit_code_of`), lock-file filesystem failure, missing URL,
+//!   metalink document failure (read/over-cap/parse/zero entries);
+//!   idle: none (common baseline only).
 //!
 //! Documented divergences ( discipline: record faithfully, no
 //! behavior change):
@@ -4748,30 +4748,30 @@ fn input_file_exit_code(any_failed: bool) -> i32 {
 /// poll all tasks to a terminal state, summarize the exit code.
 ///
 /// - **Task creation face**: line targets are classified via
-/// [`classify_positional`] — magnet/http(s)/ftp(s) = AddUri (scheme
-/// dispatch belongs to the session: a magnet task / an HTTP task / a
-/// .torrent-URL metadata download); a `.torrent` path = spawn_blocking
-/// read -> AddTorrent. Task options = the CLI shared knobs
-/// ([`cli_shared_task_options`]) + the kind delta
-/// ([`kind_extra_task_options`]) + the in-line tab options (written
-/// later, per-line override semantics); the key-domain parse point =
-/// the session `parse_task_options` (unknown keys ignored, aria2
-/// rule). A refused/malformed/read-failed line = the failure bit is
-/// recorded and the remaining lines continue (a per-line failure does
-/// not abort the batch).
+///   [`classify_positional`] — magnet/http(s)/ftp(s) = AddUri (scheme
+///   dispatch belongs to the session: a magnet task / an HTTP task / a
+///   .torrent-URL metadata download); a `.torrent` path = spawn_blocking
+///   read -> AddTorrent. Task options = the CLI shared knobs
+///   ([`cli_shared_task_options`]) + the kind delta
+///   ([`kind_extra_task_options`]) + the in-line tab options (written
+///   later, per-line override semantics); the key-domain parse point =
+///   the session `parse_task_options` (unknown keys ignored, aria2
+///   rule). A refused/malformed/read-failed line = the failure bit is
+///   recorded and the remaining lines continue (a per-line failure does
+///   not abort the batch).
 /// - **Concurrency face**: multiple tasks enter the same session wait
-/// queue; actual concurrency is clamped by the session-global
-/// `--max-concurrent-downloads` (default 5) — the existing session
-/// face, no new CLI knob.
+///   queue; actual concurrency is clamped by the session-global
+///   `--max-concurrent-downloads` (default 5) — the existing session
+///   face, no new CLI knob.
 /// - **Exit code**: [`input_file_exit_code`] (any failure = 1, all
-/// passed = 0; a signal interrupt = 1 — the same rule as the http
-/// multi-task metalink form); a file-face startup hard error
-/// (missing/unreadable/over-cap/non-UTF-8/zero valid lines) = 2.
+///   passed = 0; a signal interrupt = 1 — the same rule as the http
+///   multi-task metalink form); a file-face startup hard error
+///   (missing/unreadable/over-cap/non-UTF-8/zero valid lines) = 2.
 /// - **RPC face**: the batch form does not assemble an RPC listener (a
-/// one-shot session pipeline — an explicit `--enable-rpc` is
-/// disclosed with a warning, never silent; the RPC group options
-/// already hard-error at the main gate without `--enable-rpc` —
-/// [`rpc_group_conflict`]).
+///   one-shot session pipeline — an explicit `--enable-rpc` is
+///   disclosed with a warning, never silent; the RPC group options
+///   already hard-error at the main gate without `--enable-rpc` —
+///   [`rpc_group_conflict`]).
 async fn run_input_file(
     path: PathBuf,
     cli: &Cli,
@@ -5599,14 +5599,14 @@ mod tests {
     /// the aria2 value domains bit for bit; anchors in the Cli field
     /// docs):
     /// - defaults = aria2 defaults (55/50K/0/0/60/60) plus gate
-    /// defaults (hash-check-seed true / hook gate true / magnet
-    /// family false);
+    ///   defaults (hash-check-seed true / hook gate true / magnet
+    ///   family false);
     /// - bt-max-peers: 0 accepted (aria2 min 0; the non-expressible
-    /// semantics live in the injection arm), negatives rejected;
+    ///   semantics live in the injection arm), negatives rejected;
     /// - tracker timeouts: 1..=600 (0/601 rejected — the aria2
-    /// NumberOptionHandler(…, "60", 1, 600) domain verbatim);
+    ///   NumberOptionHandler(…, "60", 1, 600) domain verbatim);
     /// - request-peer-speed-limit: 1024-based size literals (64K =
-    /// 65536, parse_aria2_size single parser);
+    ///   65536, parse_aria2_size single parser);
     /// - stop-timeout/interval: the full non-negative integer domain.
     #[test]
     fn w3b_bt_option_cli_domain_decision_table() {
@@ -5809,20 +5809,20 @@ mod tests {
     /// `GlobalOptions.hooks` projection; the same source across the
     /// idle/download+rpc/magnet one-shot/bare faces):
     /// - default face = all six slots unset (`has_any_command` false —
-    /// the bare form attaches no runner, a zero-overhead pass-through) +
-    /// the post-hash-check gate defaults true;
+    ///   the bare form attaches no runner, a zero-overhead pass-through) +
+    ///   the post-hash-check gate defaults true;
     /// - explicit face = each flag enters its `HookEvent` slot (the
-    /// name-face alignment is checked bit for bit via the
-    /// `HookEvent::option_name` single source, drift-proof); both the
-    /// space and `=` value forms are accepted;
+    ///   name-face alignment is checked bit for bit via the
+    ///   `HookEvent::option_name` single source, drift-proof); both the
+    ///   space and `=` value forms are accepted;
     /// - blank face = an empty-string value normalizes to unset (same
-    /// rule as aria2 `option->blank` — the same shape as the RPC
-    /// option face's non_empty, the conf source through the same
-    /// gate);
+    ///   rule as aria2 `option->blank` — the same shape as the RPC
+    ///   option face's non_empty, the conf source through the same
+    ///   gate);
     /// - projection face = after to_session_options each `g.hooks` slot
-    /// holds the same value (the echo face projects with the existing
-    /// session `global_option_echo` HookEvent::ALL — already tested
-    /// on the taiji-core side, not repeated here).
+    ///   holds the same value (the echo face projects with the existing
+    ///   session `global_option_echo` HookEvent::ALL — already tested
+    ///   on the taiji-core side, not repeated here).
     #[test]
     fn hook_on_flags_cli_to_hookset_decision_table() {
         use taiji_core::hook::HookEvent;
@@ -7116,16 +7116,16 @@ mod tests {
     /// pure function; mirrors aria2 UriListParser.cc line
     /// semantics + taiji hardening):
     /// - a leading BOM is stripped; blank/whitespace-only/`#` comment
-    /// lines are skipped; CRLF tolerated;
+    ///   lines are skipped; CRLF tolerated;
     /// - only a line-leading `#` is a comment (the URI fragment `#frag`
-    /// is preserved verbatim);
+    ///   is preserved verbatim);
     /// - tab split: the first token = the target, the rest `key=value`
-    /// (split on the first `=`, an inner `=` verbatim — the checksum
-    /// six-hash value-domain case); whitespace on both sides of a
-    /// token is stripped;
+    ///   (split on the first `=`, an inner `=` verbatim — the checksum
+    ///   six-hash value-domain case); whitespace on both sides of a
+    ///   token is stripped;
     /// - a token missing `=` / with an empty key = the line is
-    /// Malformed (line number + reason kept explicitly, never silently
-    /// dropped); 1-based line numbers travel with the entries.
+    ///   Malformed (line number + reason kept explicitly, never silently
+    ///   dropped); 1-based line numbers travel with the entries.
     #[test]
     fn input_file_line_parser_decision_table() {
         let text = "\u{feff}# header comment\n\

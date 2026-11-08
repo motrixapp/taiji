@@ -8,20 +8,20 @@
 //!
 //! Hard invariants:
 //! - Redirect loop control lives entirely in this layer (reqwest runs
-//! with `redirect(Policy::none)`); the loop key is
-//! (scheme, host, port, path) — a query-variant loop rejects as
-//! RedirectLoop, never burning the hop budget into a RedirectLimit
-//! misreport.
+//!   with `redirect(Policy::none)`); the loop key is
+//!   (scheme, host, port, path) — a query-variant loop rejects as
+//!   RedirectLoop, never burning the hop budget into a RedirectLimit
+//!   misreport.
 //! - Credential scope = (scheme, host, port); stripping is monotonic and
-//! irreversible: once stripped, no later hop revives credentials.
+//!   irreversible: once stripped, no later hop revives credentials.
 //! - Redirect-target IP hygiene ([`crate::redirect_guard`]): the initial
-//! URL is classified once under the `all` rule, every hop target under
-//! `any` (resolution failure fail-closed); a restricted target with a
-//! non-restricted initial aborts with
-//! [`HttpError::RedirectToRestrictedIp`].
+//!   URL is classified once under the `all` rule, every hop target under
+//!   `any` (resolution failure fail-closed); a restricted target with a
+//!   non-restricted initial aborts with
+//!   [`HttpError::RedirectToRestrictedIp`].
 //! - The probe plane must read raw headers: it uses a transport with
-//! auto-decompression off, since decompression strips the raw
-//! `Content-Encoding` header.
+//!   auto-decompression off, since decompression strips the raw
+//!   `Content-Encoding` header.
 //!
 //! Upstream anchor mapping: docs/design/http.md
 
@@ -71,19 +71,19 @@ pub const DEFAULT_H2_CONN_WINDOW: u32 = 16 * 1024 * 1024;
 /// current behavior, unchanged).
 ///
 /// - `Auto` (default): plaintext endpoints use http/1.1; https
-/// negotiates via rustls ALPN (h2 when the server advertises it,
-/// http/1.1 fallback otherwise). This is the status quo once reqwest's
-/// `http2` feature is enabled — the anchor value for unchanged
-/// default behavior.
+///   negotiates via rustls ALPN (h2 when the server advertises it,
+///   http/1.1 fallback otherwise). This is the status quo once reqwest's
+///   `http2` feature is enabled — the anchor value for unchanged
+///   default behavior.
 /// - `Http1`: http/1.1 only ([`reqwest::ClientBuilder::
 /// http1_only`]; the ALPN advertisement narrows to http/1.1) — a
-/// fallback/control knob that shuts the h2 upgrade path.
+///   fallback/control knob that shuts the h2 upgrade path.
 /// - `Http2`: HTTP/2 prior knowledge (RFC 7540 §3.5,
-/// [`reqwest::ClientBuilder::
+///   [`reqwest::ClientBuilder::
 /// http2_prior_knowledge`]): plaintext endpoints speak h2c directly
-/// (no Upgrade, **no h1 fallback**); https endpoints speak h2
-/// directly over TLS (no ALPN). Experimental: it fails outright
-/// against h1-only peers, hence off by default.
+///   (no Upgrade, **no h1 fallback**); https endpoints speak h2
+///   directly over TLS (no ALPN). Experimental: it fails outright
+///   against h1-only peers, hence off by default.
 ///
 /// No separate `h2c` value and no `h2c-auto` naming: reqwest prior
 /// knowledge is a single transport-level shape with no "automatic
@@ -326,15 +326,15 @@ impl Followed {
 /// Transport instances differ only in auto-decompression (all other
 /// settings identical item by item):
 /// - `inner` (data plane, K instances): reqwest's gzip feature is on by
-/// default, so responses are auto-decompressed — "reqwest
-/// decompresses, checksums apply to the decompressed bytes". When
-/// decompression happens, reqwest strips the
-/// `Content-Encoding`/`Content-Length` headers. K =
-/// `http2_max_connections` (default 1; K>1 spreads requests
-/// round-robin, each instance's independent pool = independent
-/// connections).
+///   default, so responses are auto-decompressed — "reqwest
+///   decompresses, checksums apply to the decompressed bytes". When
+///   decompression happens, reqwest strips the
+///   `Content-Encoding`/`Content-Length` headers. K =
+///   `http2_max_connections` (default 1; K>1 spreads requests
+///   round-robin, each instance's independent pool = independent
+///   connections).
 /// - `raw` (probe plane, one instance): explicit `gzip(false)` — the
-/// probe decision needs the unstripped raw `Content-Encoding` header.
+///   probe decision needs the unstripped raw `Content-Encoding` header.
 #[derive(Clone)]
 pub struct HttpClient {
     /// Data-plane transport instances (multiple connections): length =
@@ -391,22 +391,22 @@ impl std::fmt::Debug for HttpClient {
 /// # Isolation boundary (no existing external semantics change)
 ///
 /// - Key = the full [`ClientConfig`] (proxy/TLS/protocol
-/// shape/timeouts/retry/DNS pinning, field by field): any transport
-/// configuration difference means an independent instance, zero
-/// cross-config connection sharing.
+///   shape/timeouts/retry/DNS pinning, field by field): any transport
+///   configuration difference means an independent instance, zero
+///   cross-config connection sharing.
 /// - [`HttpClient::with_jar`] (the `--load-cookies` surface) **never
-/// enters the pool**: clients carrying a task-private jar stay
-/// per-instance (the conservative cookie-isolation boundary).
+///   enters the pool**: clients carrying a task-private jar stay
+///   per-instance (the conservative cookie-isolation boundary).
 /// - Task cookies do not go through this jar (`RequestCtx.task_cookies`
-/// is a per-task store, layered separately) — no cookie cross-talk
-/// between users of a shared instance; the shared empty jar is
-/// read-only at runtime (parse-time construction + `header_for`
-/// replay, no runtime write path).
+///   is a per-task store, layered separately) — no cookie cross-talk
+///   between users of a shared instance; the shared empty jar is
+///   read-only at runtime (parse-time construction + `header_for`
+///   replay, no runtime write path).
 /// - Zero involvement in pool semantics: connection liveness/eviction
-/// is managed entirely by the reqwest pool's own 90s idle recycling
-/// (no pre-warming, no eviction in this layer — surge-prewarm warm
-/// pooling is policy-level, not this layer's concern). The FTP reuse
-/// pool is unrelated to this pool.
+///   is managed entirely by the reqwest pool's own 90s idle recycling
+///   (no pre-warming, no eviction in this layer — surge-prewarm warm
+///   pooling is policy-level, not this layer's concern). The FTP reuse
+///   pool is unrelated to this pool.
 ///
 /// # Lifetime
 ///
@@ -439,25 +439,25 @@ const HOST_WARM_WINDOW: Duration = Duration::from_secs(90);
 /// # Approximate semantics (directional argument)
 ///
 /// - The signal is not "an idle connection exists in the pool right
-/// now" (reqwest's pool internals are opaque to this layer): it is a
-/// timestamp approximation of "the data plane succeeded on this host
-/// within the window" — it can only err warm (a fresh connect still
-/// happens on an occasional reuse miss; the per-host cap and the ramp
-/// retained for cold tasks bound the storm risk), never cold (an
-/// unlit host always takes the ramp).
+///   now" (reqwest's pool internals are opaque to this layer): it is a
+///   timestamp approximation of "the data plane succeeded on this host
+///   within the window" — it can only err warm (a fresh connect still
+///   happens on an occasional reuse miss; the per-host cap and the ramp
+///   retained for cold tasks bound the storm risk), never cold (an
+///   unlit host always takes the ramp).
 /// - The **probe plane (raw instance) never lights it**: probe
-/// connections live in a separate pool that data-plane slices cannot
-/// reuse — lighting it would mean "skip the ramp with no reuse", a
-/// pure misjudgment.
+///   connections live in a separate pool that data-plane slices cannot
+///   reuse — lighting it would mean "skip the ramp with no reuse", a
+///   pure misjudgment.
 /// - Races: std Mutex with nanosecond-scale critical sections, at most
-/// one read/write per request, no lock held across an await.
+///   one read/write per request, no lock held across an await.
 /// - **Capacity bound**: the warm table is a process-wide singleton;
-/// the grow-only shape would increase monotonically in long sessions
-/// with many hosts (the 90s window expiry applies implicitly at read
-/// time only; entries themselves are never reclaimed) —
-/// [`HOST_WARMTH_CAP`] entries with LRU eviction
-/// (least-recently-lit first). [`SHARED_CLIENTS`] is untouched (the
-/// set of config combinations is finite).
+///   the grow-only shape would increase monotonically in long sessions
+///   with many hosts (the 90s window expiry applies implicitly at read
+///   time only; entries themselves are never reclaimed) —
+///   [`HOST_WARMTH_CAP`] entries with LRU eviction
+///   (least-recently-lit first). [`SHARED_CLIENTS`] is untouched (the
+///   set of config combinations is finite).
 static HOST_WARMTH: OnceLock<StdMutex<WarmthTable>> = OnceLock::new();
 
 /// Warm table capacity bound: real download source sets have far lower
@@ -1096,18 +1096,18 @@ impl HttpClient {
     /// same URL request with that Authorization).
     ///
     /// - Credentials absent (`ctx.auth` None) or already stripped
-    /// cross-host -> `None`: the 401 is re-raised as-is (the probe
-    /// layer's classification semantics unchanged);
+    ///   cross-host -> `None`: the 401 is re-raised as-is (the probe
+    ///   layer's classification semantics unchanged);
     /// - Digest challenge -> [`auth::respond_digest`] (exactly once per
-    /// URL, a further 401 = [`HttpError::AuthFailed`]); exception: a
-    /// challenge carrying `stale=true` (RFC 7616 §3.6 — only the
-    /// nonce expired, the credentials themselves were verified) ->
-    /// one re-answer allowed, at most once per URL (the
-    /// `stale_retried` gate; a second stale is still AuthFailed);
+    ///   URL, a further 401 = [`HttpError::AuthFailed`]); exception: a
+    ///   challenge carrying `stale=true` (RFC 7616 §3.6 — only the
+    ///   nonce expired, the credentials themselves were verified) ->
+    ///   one re-answer allowed, at most once per URL (the
+    ///   `stale_retried` gate; a second stale is still AuthFailed);
     /// - Basic challenge: `AuthScheme::Basic` was already pre-sent (a
-    /// resend with the same credentials is pointless) -> AuthFailed;
-    /// `AuthScheme::Digest` credentials meeting a Basic challenge ->
-    /// answer with the pre-set Basic once;
+    ///   resend with the same credentials is pointless) -> AuthFailed;
+    ///   `AuthScheme::Digest` credentials meeting a Basic challenge ->
+    ///   answer with the pre-set Basic once;
     /// - Unrecognized challenge -> `None` (re-raised as-is).
     ///
     /// Multiple challenges in one header (RFC 9110 §11.6.1 `#challenge`)

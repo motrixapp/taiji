@@ -2,34 +2,34 @@
 //! transport protocol).
 //!
 //! - [`packet`]: 20-byte v1 big-endian header + extension chain + Selective
-//! ACK bitmap codec (protocol facts cite BEP-29; aria2 has no uTP
-//! implementation, so BEP-29 is the sole reference).
+//!   ACK bitmap codec (protocol facts cite BEP-29; aria2 has no uTP
+//!   implementation, so BEP-29 is the sole reference).
 //! - [`ledbat`]: LEDBAT congestion control (CCONTROL_TARGET = 100ms, gain
-//! formula, slow start, loss halving) + RTT/timeout estimation
-//! (BEP-29 / RFC 6817 / RFC 5681).
+//!   formula, slow start, loss halving) + RTT/timeout estimation
+//!   (BEP-29 / RFC 6817 / RFC 5681).
 //! - [`conn`]: connection driver task — Syn/SynRecv/Connected/Fin/Closed
-//! state machine, in-order delivery, SACK selective retransmit, timeout
-//! retransmit rounds, FIN/RESET paths.
+//!   state machine, in-order delivery, SACK selective retransmit, timeout
+//!   retransmit rounds, FIN/RESET paths.
 //! - [`listener`]: `UtpListener` — consumes the uTP inbound channel from
-//! [`crate::udp_demux`] and dispatches by (peer address, conn_id); a SYN
-//! creates an inbound connection pushed onto the accept queue; this layer
-//! only produces [`UtpStream`] (wiring into the bt peer accept path
-//! belongs to core).
+//!   [`crate::udp_demux`] and dispatches by (peer address, conn_id); a SYN
+//!   creates an inbound connection pushed onto the accept queue; this layer
+//!   only produces [`UtpStream`] (wiring into the bt peer accept path
+//!   belongs to core).
 //!
 //! [`UtpStream`] implements `AsyncRead + AsyncWrite`, so `PeerTransport`
 //! gains an implementation without making PeerTask TCP/uTP aware.
 //!
 //! Back-pressure and concurrency:
 //! - All channels are bounded: per-connection inbound packets mpsc(64),
-//! outbound packets mpsc(64) (merged into the demux outbound
-//! single-writer channel), app-data uplink/downlink mpsc(64), accept
-//! queue mpsc(64). A full inbound packet queue drops — UDP best-effort
-//! semantics, with reliability backstopped by retransmission.
+//!   outbound packets mpsc(64) (merged into the demux outbound
+//!   single-writer channel), app-data uplink/downlink mpsc(64), accept
+//!   queue mpsc(64). A full inbound packet queue drops — UDP best-effort
+//!   semantics, with reliability backstopped by retransmission.
 //! - Lock-free module overall (the listener connection table uses a std
-//! Mutex and is never held across an await).
+//!   Mutex and is never held across an await).
 //! - Retransmission is a periodic scan round, period = clamp(RTT/2) (see
-//! [`UtpConfig::retrans_scan_period`]); timeout/doubling parameters come
-//! from [`ledbat::Rtt`].
+//!   [`UtpConfig::retrans_scan_period`]); timeout/doubling parameters come
+//!   from [`ledbat::Rtt`].
 //!
 //! Rate-limit cooperation: `Arc<SpeedLimiter>` permits are awaited on the
 //! PeerTask read path, which naturally pushes back on the uTP send window

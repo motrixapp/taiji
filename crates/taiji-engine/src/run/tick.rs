@@ -819,30 +819,30 @@ pub(super) async fn handle_seed_tick(
 /// terminal barrier run/tail.rs `final_flush`):
 ///
 /// 1. fsync half first: fsync the data files of dirty faces (written
-/// since the last successful snapshot,
-/// [`FaceState::dirty_since_snapshot`], set by `on_piece_written`).
-/// Clean faces cost zero fsyncs (unchanged bitmap -> digest dedup
-/// skips the write). The bitmap only records PieceWritten pieces
-/// (verified AND written), and that event arrives before this
-/// function (single-task serial main loop), so every piece's pwrite
-/// has returned by the time we fsync — the structurally guaranteed
-/// "bitmap never runs ahead of data".
+///    since the last successful snapshot,
+///    [`FaceState::dirty_since_snapshot`], set by `on_piece_written`).
+///    Clean faces cost zero fsyncs (unchanged bitmap -> digest dedup
+///    skips the write). The bitmap only records PieceWritten pieces
+///    (verified AND written), and that event arrives before this
+///    function (single-task serial main loop), so every piece's pwrite
+///    has returned by the time we fsync — the structurally guaranteed
+///    "bitmap never runs ahead of data".
 /// 2. fsync failure = the whole bitmap row is skipped this round
-/// (fail-closed): prefer progress rollback, never phantom records.
-/// Handled at row level, not per-face None: the row is one atomic
-/// upsert (v1_bitfield + v2_file_bits together); setting a failed
-/// face to None would erase the last good barrier-passed bitmap in
-/// the store (re-introducing the full-recheck fallback on restore),
-/// while skipping the row keeps the last consistent row in place
-/// (the bitmap <= verified-bytes-on-disk invariant holds; the cost is
-/// at most one 60s progress delay, converged next round).
+///    (fail-closed): prefer progress rollback, never phantom records.
+///    Handled at row level, not per-face None: the row is one atomic
+///    upsert (v1_bitfield + v2_file_bits together); setting a failed
+///    face to None would erase the last good barrier-passed bitmap in
+///    the store (re-introducing the full-recheck fallback on restore),
+///    while skipping the row keeps the last consistent row in place
+///    (the bitmap <= verified-bytes-on-disk invariant holds; the cost is
+///    at most one 60s progress delay, converged next round).
 /// 3. Dirty flags clear only after a successful persist
-/// (Written/SkippedUnchanged): from that point every piece's bytes in
-/// the bitmap are fsynced. On persist failure the flags stay (fsync
-/// succeeded but the row did not land: bytes are already on disk, so
-/// next round rewrites the row without a fresh fsync — keeping the
-/// flag one extra round only costs one extra fsync, the safe
-/// direction).
+///    (Written/SkippedUnchanged): from that point every piece's bytes in
+///    the bitmap are fsynced. On persist failure the flags stay (fsync
+///    succeeded but the row did not land: bytes are already on disk, so
+///    next round rewrites the row without a fresh fsync — keeping the
+///    flag one extra round only costs one extra fsync, the safe
+///    direction).
 #[expect(
     clippy::too_many_arguments,
     reason = "the snapshot inputs are the persisted counter set; a one-use bundle adds no clarity"
@@ -1060,11 +1060,11 @@ mod sec21_tests {
     /// trait method returns Ok — barrier-order tests never touch disk):
     /// - `Ok`: count +1, then succeed;
     /// - `Fail`: count +1, then return the injected error (the failure
-    /// seam for the fail-closed test);
+    ///   seam for the fail-closed test);
     /// - `Gate`: count +1, wake the observer via Notify, then block on
-    /// the Condvar latch until the test releases (the order probe: the
-    /// barrier must reach fsync before the bitmap upsert — the
-    /// progress row must not be visible before release).
+    ///   the Condvar latch until the test releases (the order probe: the
+    ///   barrier must reach fsync before the bitmap upsert — the
+    ///   progress row must not be visible before release).
     enum FlushScript {
         Ok,
         Fail,

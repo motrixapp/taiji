@@ -10,17 +10,17 @@
 //! invisible to callers):
 //!
 //! - Non-Windows: identity ([`to_fs_path`] compiles away under
-//! `cfg(not(windows))` to a zero-cost borrow — call sites carry no cfg,
-//! no macros);
+//!   `cfg(not(windows))` to a zero-cost borrow — call sites carry no cfg,
+//!   no macros);
 //! - Windows: already-verbatim `\\?\` / `\??\` (incl. `\\?\UNC\`) and
-//! `\\.\` device paths pass through; absolute paths shorter than
-//! [`LONG_PATH_THRESHOLD`] UTF-16 units return unchanged (regular paths
-//! keep their bytes); otherwise normalize with `std::path::absolute`
-//! (GetFullPathNameW semantics: cwd, relative segments, forward slashes,
-//! `.`/`..`); if the result still reaches the threshold, prefix it —
-//! drive paths `\\?\C:\...`, UNC `\\server\share\...` ->
-//! `\\?\UNC\server\share\...`; `absolute()` failure returns the
-//! input unchanged (fail-open, as in the fork).
+//!   `\\.\` device paths pass through; absolute paths shorter than
+//!   [`LONG_PATH_THRESHOLD`] UTF-16 units return unchanged (regular paths
+//!   keep their bytes); otherwise normalize with `std::path::absolute`
+//!   (GetFullPathNameW semantics: cwd, relative segments, forward slashes,
+//!   `.`/`..`); if the result still reaches the threshold, prefix it —
+//!   drive paths `\\?\C:\...`, UNC `\\server\share\...` ->
+//!   `\\?\UNC\server\share\...`; `absolute()` failure returns the
+//!   input unchanged (fail-open, as in the fork).
 //!
 //! Length is measured in UTF-16 code units, not chars: the Win32 path
 //! surface (`GetFullPathNameW`/`CreateFileW`) counts UTF-16 units, and
@@ -129,7 +129,7 @@ pub fn prefix_kind_for(abs_wide: &[u16]) -> PrefixKind {
 ///
 /// - Non-Windows: identity borrow (compiled away; zero cost, no cfg);
 /// - Windows: semantics in the module doc; `absolute()` failure returns
-/// the input unchanged (fail-open).
+///   the input unchanged (fail-open).
 ///
 /// Short and already-verbatim paths allocate nothing (`Cow::Borrowed`).
 #[cfg(not(windows))]

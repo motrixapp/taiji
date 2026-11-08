@@ -1,6 +1,6 @@
 //! The ffmpeg fallback channel (per the media spec's synthesis line
 //! + the product spec's process face, checked against its
-//! red-line checklist).
+//!   red-line checklist).
 //!
 //! **A consumer of the discovery infrastructure, not a second
 //! process-governance line**: discovery ([`crate::discover`]), the

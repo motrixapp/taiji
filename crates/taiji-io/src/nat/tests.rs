@@ -1,16 +1,16 @@
 //! NAT tests.
 //!
 //! - **Packet vectors**: 13 NAT-PMP codec vectors, each annotated with its
-//! RFC 6886 section;
+//!   RFC 6886 section;
 //! - **Table-driven**: retransmission schedule (§3.1), renewal delay
-//! (SPEC §6.8 + RFC §3.3), round backoff (local policy), epoch regression
-//! (§3.6);
+//!   (SPEC §6.8 + RFC §3.3), round backoff (local policy), epoch regression
+//!   (§3.6);
 //! - **Mock four-path** (in-process loopback, no real network): map /
-//! renew / conflict (occupied port) / device-offline degradation,
-//! exercised over both NAT-PMP (UDP packets) and IGD (local HTTP/XML);
+//!   renew / conflict (occupied port) / device-offline degradation,
+//!   exercised over both NAT-PMP (UDP packets) and IGD (local HTTP/XML);
 //! - **Out of scope**: real-router interop (SSDP multicast discovery,
-//! gateway announcement listening) — environment-dependent, not a
-//! milestone gate.
+//!   gateway announcement listening) — environment-dependent, not a
+//!   milestone gate.
 //!
 //! Time: mocks use real loopback I/O (sub-millisecond RTT) with 30-50ms
 //! timer windows (~100x margin); no paused virtual clock — auto-advance

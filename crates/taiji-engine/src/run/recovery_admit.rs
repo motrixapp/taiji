@@ -427,26 +427,26 @@ fn unify_same_root(
 /// enabled for a layer-missing file):
 ///
 /// 1. Pipeline expected-root live seam: backfill the placeholder zero roots
-/// for the file's flat piece range with true piece roots (expected-root
-/// table + block-check file-root table; multi-file admissions accumulate
-/// on the live copy), publishing the whole book via `watch` — the store
-/// pipeline's gate-promotion arm rebuilds `VerifiedWriter` live (no
-/// restart);
+///    for the file's flat piece range with true piece roots (expected-root
+///    table + block-check file-root table; multi-file admissions accumulate
+///    on the live copy), publishing the whole book via `watch` — the store
+///    pipeline's gate-promotion arm rebuilds `VerifiedWriter` live (no
+///    restart);
 /// 2. Download gate promotion: lazy-fetch layer `Pending → Queued { next: 0 }`
-/// — the selector's candidate fold lifts and the piece returns to the
-/// candidate set; the first hit triggers the existing leaf-layer lazy
-/// fetch (plans already ready); after Done, block dispatch proceeds as
-/// usual;
+///    — the selector's candidate fold lifts and the piece returns to the
+///    candidate set; the first hit triggers the existing leaf-layer lazy
+///    fetch (plans already ready); after Done, block dispatch proceeds as
+///    usual;
 /// 3. Seeding hash service unlock: the recovery layer backfills
-/// `hash_files[file].piece_layer` — the
-/// [`taiji_domain::hash_source::MetaHashSource`] mounted at completion by
-/// `attach_seeding_sources` can then serve the file's piece-layer requests
-/// (the BEP-52 service obligation; before promotion, requests for this
-/// file could only be hash-rejected — a BEP-52-legal exit);
+///    `hash_files[file].piece_layer` — the
+///    [`taiji_domain::hash_source::MetaHashSource`] mounted at completion by
+///    `attach_seeding_sources` can then serve the file's piece-layer requests
+///    (the BEP-52 service obligation; before promotion, requests for this
+///    file could only be hash-rejected — a BEP-52-legal exit);
 /// 4. Dispatch bookkeeping reset: the pipeline rebuild destroys its write
-/// cache (unverified data never persists) — in-flight / buffered / refetch
-/// bookkeeping clears in sync; unsettled bytes are refetched by the
-/// existing dispatch path.
+///    cache (unverified data never persists) — in-flight / buffered / refetch
+///    bookkeeping clears in sync; unsettled bytes are refetched by the
+///    existing dispatch path.
 ///
 /// Returns whether a promotion happened (idempotent defense: a non-`Pending`
 /// file is already promoted / not layer-missing; no-op). Only
@@ -526,19 +526,19 @@ pub(crate) fn activate_recovered_file(
 /// Engine half: events are emitted at points the engine state machine
 /// already has (the RPC face only consumes and forwards) —
 /// - Started = task activation (activation chain: the set of files still
-/// layer-missing after assembly is non-empty — the `run()`
-/// assembly-complete point). The engine emits on every activation;
-/// exactly-once across repeated activations is enforced by the session
-/// face deduplicating on gid (session rebuild = new bookkeeping =
-/// re-emit).
+///   layer-missing after assembly is non-empty — the `run()`
+///   assembly-complete point). The engine emits on every activation;
+///   exactly-once across repeated activations is enforced by the session
+///   face deduplicating on gid (session rebuild = new bookkeeping =
+///   re-emit).
 /// - Completed = the promotion-propagation convergence point: emitted
-/// exactly once when the activation missing-set is fully promoted (gates
-/// Pending → Queued; the remaining set is monotonically decreasing, so the
-/// emptying transition happens at most once). Terminal-failure choice: no
-/// third event — there is no failure terminal (an exhausted budget stays
-/// recovering, waiting for a new peer); a stuck gate is observable as
-/// started without completed; the completed payload's status key is a
-/// reserved extension slot (the RPC render layer pins "ready").
+///   exactly once when the activation missing-set is fully promoted (gates
+///   Pending → Queued; the remaining set is monotonically decreasing, so the
+///   emptying transition happens at most once). Terminal-failure choice: no
+///   third event — there is no failure terminal (an exhausted budget stays
+///   recovering, waiting for a new peer); a stuck gate is observable as
+///   started without completed; the completed payload's status key is a
+///   reserved extension slot (the RPC render layer pins "ready").
 ///
 /// Payloads relay through [`taiji_domain::hook::HookRunner::notify_recovery`]
 /// (isomorphic relay slots; no user hook command triggers this) — the file
@@ -609,15 +609,15 @@ pub(super) fn note_promotions_core(
 /// getFiles layer-missing projection (pure function): files involved in
 /// recovery (booked ∪ was-missing) → 0-based meta.files position + state:
 /// - Booked: `Missing` = no hashes in flight/staged yet ("waiting for hash
-/// recovery") → [`RECOVERY_LAYER_MISSING`]; `Requesting/Received/Delivered`
-/// = fetch in progress → [`RECOVERY_RECOVERING`];
+///   recovery") → [`RECOVERY_LAYER_MISSING`]; `Requesting/Received/Delivered`
+///   = fetch in progress → [`RECOVERY_RECOVERING`];
 /// - Was-missing (in the started set) and promoted (not in the open set) →
-/// [`RECOVERY_READY`];
+///   [`RECOVERY_READY`];
 /// - Was-missing, bookkeeping removed but the gate still closed (the benign
-/// edge of bad-layer redundant removal) → [`RECOVERY_LAYER_MISSING`]
-/// (the gate is still shut; the miss stays observable);
+///   edge of bad-layer redundant removal) → [`RECOVERY_LAYER_MISSING`]
+///   (the gate is still shut; the miss stays observable);
 /// - Other files are not projected (metadata-carried layers / v1 /
-/// single-piece files — keys absent by default).
+///   single-piece files — keys absent by default).
 pub(super) fn recovery_file_states_core(
     faces: &[FaceState],
     recovery: &[RecoveryBook],

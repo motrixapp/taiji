@@ -13,20 +13,20 @@
 //! is the **session assembly chain**:
 //!
 //! - mock IGD full chain: powering -> engine activates Map (TCP+UDP) ->
-//! the external-port watch snapshot is visible
-//! ([`SessionHandle::nat_external_ports`]) -> the gateway reassigning
-//! (Conflict -> 40001) feeds the input face -> shutdown unmap (mock
-//! DeletePortMapping counts);
+//!   the external-port watch snapshot is visible
+//!   ([`SessionHandle::nat_external_ports`]) -> the gateway reassigning
+//!   (Conflict -> 40001) feeds the input face -> shutdown unmap (mock
+//!   DeletePortMapping counts);
 //! - default zero change: defaults (both options false) -> no powering, no
-//! assembly; behavior is bit-identical to the pre-wiring state; explicit
-//! both-on (`true`/`true`, the libtorrent settings_pack.cpp
-//! cross-validation shape) plus an unreachable gateway (dead endpoints)
-//! -> mapping failure degrades without blocking the download — the task
-//! still completes and the external-port snapshot keeps its default
-//! (the announce metric falls back to the local port); observable
-//! behavior matches the `nat: None` shape;
+//!   assembly; behavior is bit-identical to the pre-wiring state; explicit
+//!   both-on (`true`/`true`, the libtorrent settings_pack.cpp
+//!   cross-validation shape) plus an unreachable gateway (dead endpoints)
+//!   -> mapping failure degrades without blocking the download — the task
+//!   still completes and the external-port snapshot keeps its default
+//!   (the announce metric falls back to the local port); observable
+//!   behavior matches the `nat: None` shape;
 //! - all-off zero change: both options false -> no powering (snapshot face
-//! None) -> the download proceeds as usual.
+//!   None) -> the download proceeds as usual.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

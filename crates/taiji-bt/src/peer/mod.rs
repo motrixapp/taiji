@@ -4,56 +4,56 @@
 //! # Scope
 //!
 //! - Input is a byte stream whose handshake is already complete (the
-//! handshake and the BEP-52 upgrade path live elsewhere; `reserved[7] &
+//!   handshake and the BEP-52 upgrade path live elsewhere; `reserved[7] &
 //! 0x10` decides the v2 surface). This module neither sends nor receives
-//! handshakes.
+//!   handshakes.
 //! - Upload serving (inbound request -> fetch the block from disk, reply
-//! with a piece) is injected via [`PeerConfig::source`]. Our outbound
-//! handshakes always set the fast bit (`Reserved::aria2_default`; the
-//! engine-side reserved comes from the same source). Outbound Reject
-//! passes the gate according to the bits negotiated in the peer's
-//! handshake ([`PeerConfig::peer_fast`] — BEP-6 requires both ends to set
-//! the bit; for a peer that did not negotiate, silent drop = BEP3
-//! fallback, see conn.rs `OutboundWriter::send_reject`); `length > 16KiB`
-//! disconnects immediately.
+//!   with a piece) is injected via [`PeerConfig::source`]. Our outbound
+//!   handshakes always set the fast bit (`Reserved::aria2_default`; the
+//!   engine-side reserved comes from the same source). Outbound Reject
+//!   passes the gate according to the bits negotiated in the peer's
+//!   handshake ([`PeerConfig::peer_fast`] — BEP-6 requires both ends to set
+//!   the bit; for a peer that did not negotiate, silent drop = BEP3
+//!   fallback, see conn.rs `OutboundWriter::send_reject`); `length > 16KiB`
+//!   disconnects immediately.
 //! - On receiving choke, clear our pending slots locally (aria2
-//! equivalent); whether the peer answers our cleared slots with reject is
-//! its decision — this side does not retry.
+//!   equivalent); whether the peer answers our cleared slots with reject is
+//!   its decision — this side does not retry.
 //! - Piece selection lives above this module: Have/Bitfield are
-//! debug-logged only.
+//!   debug-logged only.
 //!
 //! Concurrency discipline:
 //! - control commands on a bounded channel (capacity 64 — raised from the
-//! original 8 as the target window clamps up; see
-//! `conn::COMMAND_CHANNEL_CAPACITY`; full = backpressure the caller;
-//! unbounded is forbidden);
+//!   original 8 as the target window clamps up; see
+//!   `conn::COMMAND_CHANNEL_CAPACITY`; full = backpressure the caller;
+//!   unbounded is forbidden);
 //! - piece data channel bounded ([`PeerConfig::data_channel`], default
-//! 16): when the read loop's `send().await` has no capacity it stops
-//! reading frames, propagating backpressure to TCP;
+//!   16): when the read loop's `send().await` has no capacity it stops
+//!   reading frames, propagating backpressure to TCP;
 //! - shutdown is dual-channel: parent-token hierarchical propagation
-//! plus an explicit `PeerCommand::Shutdown`;
+//!   plus an explicit `PeerCommand::Shutdown`;
 //! - no blocking operations, no locks held across await.
 //!
 //! # Module layout
 //!
 //! - `command`: control-command surface ([`PeerCommand`] / [`HashFetch`] /
-//! [`HashRequestError`] / [`PeerCommandRejected`] / [`PeerHandle`]);
+//!   [`HashRequestError`] / [`PeerCommandRejected`] / [`PeerHandle`]);
 //! - `config`: [`PeerConfig`] (+Debug/flat) and the connection event /
-//! final-state types ([`AvailEvent`] / [`PexEvent`] / [`PexExt`] /
-//! [`PieceData`] / [`PeerError`] / [`PeerEnd`]);
+//!   final-state types ([`AvailEvent`] / [`PexEvent`] / [`PexExt`] /
+//!   [`PieceData`] / [`PeerError`] / [`PeerEnd`]);
 //! - `sources`: [`PieceSource`] / [`HashSource`] data-source traits;
 //! - `ext`: BEP10 extension surface ([`ExtConfig`], requester fetch
-//! sessions, and `handle_extended` / ut_metadata / ut_pex frame dispatch);
+//!   sessions, and `handle_extended` / ut_metadata / ut_pex frame dispatch);
 //! - `handle`: [`PeerTaskHandle`] ([`PeerHandle`] impl + state mirrors);
 //! - `handshake`: BEP3 handshake exchange surface (exchange / accept_any /
-//! accept);
+//!   accept);
 //! - `conn`: [`PeerTask`] spawning and the message-loop body (connection
-//! state machine);
+//!   state machine);
 //! - `inbound`: inbound message handling (`serve_request` / `InboundCtx` /
-//! `handle_inbound`) and the hash-request rate-limit constants;
+//!   `handle_inbound`) and the hash-request rate-limit constants;
 //! - `read_pool`: face-level read pool (serve_request disk reads moved off
-//! the event loop: bounded queue + spawn_blocking dispatcher + in-order
-//! per-request re-injection + 16KiB aligned block-buffer reuse);
+//!   the event loop: bounded queue + spawn_blocking dispatcher + in-order
+//!   per-request re-injection + 16KiB aligned block-buffer reuse);
 //! - `tests` / `seeding_tests`: unit tests.
 //!
 //! Upstream anchor mapping: docs/design/peer-protocol.md

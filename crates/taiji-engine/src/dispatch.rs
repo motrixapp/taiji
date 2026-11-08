@@ -25,17 +25,17 @@
 //! # Hard invariants
 //!
 //! - Non-endgame behavior is unchanged bit-for-bit (default semantics
-//! preserved); endgame gates apply only to the rarest-first strategy.
+//!   preserved); endgame gates apply only to the rarest-first strategy.
 //! - Only a network-phase timeout produces a wire resend. The port of
-//! libtorrent's block tri-state requested/writing/finished
-//! (`piece_picker.hpp`, `torrent.cpp` mark_as_writing /
-//! mark_as_finished) judges reissue by the requested age only; the
-//! writing (store) phase never triggers reissue — store-confirmation
-//! lag never re-dispatches.
+//!   libtorrent's block tri-state requested/writing/finished
+//!   (`piece_picker.hpp`, `torrent.cpp` mark_as_writing /
+//!   mark_as_finished) judges reissue by the requested age only; the
+//!   writing (store) phase never triggers reissue — store-confirmation
+//!   lag never re-dispatches.
 //! - Endgame copies are capped at x2 per piece; relaxed to the holder
-//! count only inside last-mile, relax-only.
+//!   count only inside last-mile, relax-only.
 //! - An explicit `=0` on a knob restores the fallback behavior
-//! bit-for-bit.
+//!   bit-for-bit.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -222,15 +222,15 @@ pub(super) fn reissue_window_ceiled(adaptive_timeout: Duration, ceil: Duration) 
 /// command-channel room)`.
 ///
 /// - Target window = the peer's `PeerTaskHandle::target_request_window`
-/// lock-free mirror reading (BDP:
-/// `clamp(3s x payload-rate EWMA / 16KiB, 2, configurable cap)`, the
-/// libtorrent `peer_connection.cpp` port; fallback mode = the doubling
-/// heuristic reading);
+///   lock-free mirror reading (BDP:
+///   `clamp(3s x payload-rate EWMA / 16KiB, 2, configurable cap)`, the
+///   libtorrent `peer_connection.cpp` port; fallback mode = the doubling
+///   heuristic reading);
 /// - In flight = `PeerTaskHandle::in_flight` lock-free mirror reading (the
-/// RequestBook outstanding count);
+///   RequestBook outstanding count);
 /// - Room = `PeerTaskHandle::command_capacity` (remaining permits on the
-/// tokio bounded command channel; capacity 64, provenance in the bt
-/// side's `COMMAND_CHANNEL_CAPACITY`).
+///   tokio bounded command channel; capacity 64, provenance in the bt
+///   side's `COMMAND_CHANNEL_CAPACITY`).
 ///
 /// Saturation semantics: in-flight >= target -> cap 0 (never overshoot);
 /// room 0 -> 0 (the channel-full leave-in-queue behavior, moved early to
@@ -287,15 +287,15 @@ pub(super) const STORE_PENDING_GUARD: Duration = Duration::from_secs(30);
 /// [`super::run::state::EngineLoop::note_dispatch_debt`]). Any one
 /// condition settles all debt —
 /// 1. **Supply quiet**: every debted face has no unsettled in-flight
-/// requests (no InFlight/InFlightDuplicate entries in `blocks_sent`) —
-/// no coalescing gain, settle immediately;
+///    requests (no InFlight/InFlightDuplicate entries in `blocks_sent`) —
+///    no coalescing gain, settle immediately;
 /// 2. **Settle batch**: the face accrued >= [`DISPATCH_DEBT_SETTLE_BATCH`]
-/// block/piece settle events since the last settlement — batch-coalesce
-/// within a supply stream;
+///    block/piece settle events since the last settlement — batch-coalesce
+///    within a supply stream;
 /// 3. **Debt-age backstop**: [`DISPATCH_DEBT_MAX_AGE`] — a latency upper
-/// bound for pure-advertisement periods (HAVE storms) and all
-/// long-quiet faces (including main-loop park gaps — the debt ticker
-/// arm shares the period).
+///    bound for pure-advertisement periods (HAVE storms) and all
+///    long-quiet faces (including main-loop park gaps — the debt ticker
+///    arm shares the period).
 ///
 /// Rationale: a dispatch round is an O(peers x pieces) full-order rarity
 /// scan (`select_piece` two-phase x P peers), so rounds must not be driven
@@ -590,22 +590,22 @@ pub(super) fn endgame_triggered(
 /// reciprocity-aware tie-break; pure function).
 ///
 /// - Primary key = 30s-window download rate descending. libtorrent anchor
-/// for rate-ordered picking: `torrent.cpp` sorts peers by
-/// `download_queue_time(16*1024)` ascending ("The earlier a peer is in
-/// the list, the sooner we will fully download the block"), re-sorted
-/// after each request; that queue time derives from the peer's current
-/// download payload rate (`peer_connection.cpp`, falls back to the peak
-/// rate after 30s without data, floored at 50 B/s). The local side sorts
-/// the same way on the 30s-window rate (`down_windows`, the same
-/// statistics face as the choke sort key).
+///   for rate-ordered picking: `torrent.cpp` sorts peers by
+///   `download_queue_time(16*1024)` ascending ("The earlier a peer is in
+///   the list, the sooner we will fully download the block"), re-sorted
+///   after each request; that queue time derives from the peer's current
+///   download payload rate (`peer_connection.cpp`, falls back to the peak
+///   rate after 30s without data, floored at 50 B/s). The local side sorts
+///   the same way on the 30s-window rate (`down_windows`, the same
+///   statistics face as the choke sort key).
 /// - Tie-break = interested first (reciprocity: among equal-rate
-/// candidates prefer peers that want our pieces — tit-for-tat credit,
-/// the BiToS idea). The tie-break layer does not disturb the
-/// rarest-first primary: selection is still the strategy's decision;
-/// this order only decides who gets the dispatch slot first when several
-/// candidates share a piece.
+///   candidates prefer peers that want our pieces — tit-for-tat credit,
+///   the BiToS idea). The tie-break layer does not disturb the
+///   rarest-first primary: selection is still the strategy's decision;
+///   this order only decides who gets the dispatch slot first when several
+///   candidates share a piece.
 /// - Final key = connection index ascending (stable within a rank,
-/// deterministic for tests).
+///   deterministic for tests).
 pub(super) fn endgame_peer_order(rates: &[f64], interested: &[bool]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..rates.len()).collect();
     order.sort_by(|&a, &b| {
@@ -746,57 +746,57 @@ pub(super) fn endgame_inflight_copies(
 /// only when all of the following hold:
 ///
 /// 1. **Strict gate inactive**: in-flight pieces >= missing pieces.
-/// libtorrent `strict_end_game_mode` — `dont_pick_busy_blocks` is set
-/// when `p.get_download_queue_size() < p.num_want_left()`
-/// (`request_blocks.cpp`; download-queue granularity = pieces,
-/// `piece_picker.cpp`; `num_want_left()` = the still-needed piece
-/// count, `piece_picker.hpp`). Both local inputs share the source of
-/// [`endgame_triggered`] condition A (in-flight pieces = fresh claimed
-/// bits, missing pieces = the !done count) — rounds triggered by
-/// condition A always pass this gate; rounds triggered only by ETA
-/// (condition B) while unowned pieces remain are stopped here: no
-/// duplicates while unowned work exists.
+///    libtorrent `strict_end_game_mode` — `dont_pick_busy_blocks` is set
+///    when `p.get_download_queue_size() < p.num_want_left()`
+///    (`request_blocks.cpp`; download-queue granularity = pieces,
+///    `piece_picker.cpp`; `num_want_left()` = the still-needed piece
+///    count, `piece_picker.hpp`). Both local inputs share the source of
+///    [`endgame_triggered`] condition A (in-flight pieces = fresh claimed
+///    bits, missing pieces = the !done count) — rounds triggered by
+///    condition A always pass this gate; rounds triggered only by ETA
+///    (condition B) while unowned pieces remain are stopped here: no
+///    duplicates while unowned work exists.
 /// 2. **Peer empty-handed**: the peer's fresh in-flight block count = 0.
-/// Reference: `dq.size() + rq.size() > 0` skips busy picks
-/// (`request_blocks.cpp`, re-checked before busy selection) — a peer
-/// with outstanding requests stops manufacturing duplicates, giving the
-/// steady-state invariant **at most 1 busy allocation per peer at a
-/// time** (picking 1 busy piece makes in-flight nonzero; later rounds
-/// are stopped by 2 until its in-flight settles or expires). busy count
-/// <= in-flight count (a busy allocation IS an in-flight block), so
-/// "empty-handed" ⟺ "busy count < 1" — two formulations of one
-/// decision.
+///    Reference: `dq.size() + rq.size() > 0` skips busy picks
+///    (`request_blocks.cpp`, re-checked before busy selection) — a peer
+///    with outstanding requests stops manufacturing duplicates, giving the
+///    steady-state invariant **at most 1 busy allocation per peer at a
+///    time** (picking 1 busy piece makes in-flight nonzero; later rounds
+///    are stopped by 2 until its in-flight settles or expires). busy count
+///    <= in-flight count (a busy allocation IS an in-flight block), so
+///    "empty-handed" ⟺ "busy count < 1" — two formulations of one
+///    decision.
 ///
 /// # Deliberate divergence notes
 ///
 /// - **Granularity**: libtorrent's busy granularity is the **block**, at
-/// most 1 busy block per round (`piece_picker.cpp` picks a random piece
-/// from the piece_full bucket and takes one busy block not requested by
-/// this peer; `request_blocks.cpp` issues a single `add_request(busy)`;
-/// and only interesting+backup peers that cannot fill their request
-/// count enter — failing to fill sets `set_endgame(true)`). Local
-/// dispatch allocates by **piece** (one piece per peer per round), so
-/// the busy cap becomes at most 1 busy piece per peer at a time; the
-/// counterpart of "only when requests cannot be filled" is the
-/// first-level unowned pick coming up empty (the cursor's first-level
-/// `find` finds nothing) before this gate is consulted — wire shape
-/// equivalent (the duplicate-request volume is bounded at the same
-/// level); the granularity structure differs.
+///   most 1 busy block per round (`piece_picker.cpp` picks a random piece
+///   from the piece_full bucket and takes one busy block not requested by
+///   this peer; `request_blocks.cpp` issues a single `add_request(busy)`;
+///   and only interesting+backup peers that cannot fill their request
+///   count enter — failing to fill sets `set_endgame(true)`). Local
+///   dispatch allocates by **piece** (one piece per peer per round), so
+///   the busy cap becomes at most 1 busy piece per peer at a time; the
+///   counterpart of "only when requests cannot be filled" is the
+///   first-level unowned pick coming up empty (the cursor's first-level
+///   `find` finds nothing) before this gate is consulted — wire shape
+///   equivalent (the duplicate-request volume is bounded at the same
+///   level); the granularity structure differs.
 /// - **Fresh window**: the in-flight count input is
-/// [`endgame_peer_inflight`] (construction switches with
-/// [`two_phase_ledger`]: on = network phase + adaptive window, the same
-/// value source as claimed / [`endgame_inflight_copies`] via
-/// [`block_reissue_window`]; off = the fixed [`DISPATCH_REISSUE_WINDOW`]
-/// single-state reading).
+///   [`endgame_peer_inflight`] (construction switches with
+///   [`two_phase_ledger`]: on = network phase + adaptive window, the same
+///   value source as claimed / [`endgame_inflight_copies`] via
+///   [`block_reissue_window`]; off = the fixed [`DISPATCH_REISSUE_WINDOW`]
+///   single-state reading).
 /// - **Ownership overwrite corner**: the in-row owner is single-owner
-/// bookkeeping per coordinate — when a busy hop lands in
-/// [`BlockState::InFlightDup`] the coordinate's ownership is overwritten
-/// by the second hop, and in the accounting face the original holder
-/// becomes "empty-handed", free to issue its first busy allocation on
-/// **another** missing piece (on the wire that peer transiently holds
-/// two busy requests). The per-piece x2 cap does not go through
-/// ownership (`round_copies` counts states, not owners), so the
-/// amplification bound holds.
+///   bookkeeping per coordinate — when a busy hop lands in
+///   [`BlockState::InFlightDup`] the coordinate's ownership is overwritten
+///   by the second hop, and in the accounting face the original holder
+///   becomes "empty-handed", free to issue its first busy allocation on
+///   **another** missing piece (on the wire that peer transiently holds
+///   two busy requests). The per-piece x2 cap does not go through
+///   ownership (`round_copies` counts states, not owners), so the
+///   amplification bound holds.
 pub(super) fn endgame_busy_admitted(
     in_flight_pieces: u64,
     missing_pieces: u64,
@@ -820,17 +820,17 @@ pub(super) fn endgame_busy_admitted(
 /// # Red lines
 ///
 /// - The per-piece copy cap x2 ([`ENDGAME_MAX_COPIES`]) is **untouched** —
-/// K only widens the per-peer concurrent busy-piece count; the per-piece
-/// concurrency ceiling still caps at x2 (the anti-pileup gate as before).
+///   K only widens the per-peer concurrent busy-piece count; the per-piece
+///   concurrency ceiling still caps at x2 (the anti-pileup gate as before).
 /// - The last-mile boundary (`BH_ENDGAME_LASTMILE`) is **untouched** —
-/// missing <= N still opens fully (the
-/// [`endgame_busy_admitted_dispatch`] last_mile arm runs first; K
-/// tiering only applies in the strict segment).
+///   missing <= N still opens fully (the
+///   [`endgame_busy_admitted_dispatch`] last_mile arm runs first; K
+///   tiering only applies in the strict segment).
 /// - The busy-piece count granularity = **pieces** (the number of distinct
-/// pieces on which the peer currently holds fresh in-flight blocks,
-/// [`endgame_peer_busy_pieces`]) — equivalent to the old gate 2's block
-/// count at the zero check, and taking the local dispatch allocation
-/// granularity (piece) for the tier cap.
+///   pieces on which the peer currently holds fresh in-flight blocks,
+///   [`endgame_peer_busy_pieces`]) — equivalent to the old gate 2's block
+///   count at the zero check, and taking the local dispatch allocation
+///   granularity (piece) for the tier cap.
 pub(super) fn endgame_busy_admitted_tiered(
     my_inflight_pieces: u64,
     is_fast_tier: bool,
@@ -1085,16 +1085,16 @@ pub(super) fn checkout_weight(live_blocks: u32, blocks_per_piece: u32) -> u64 {
 /// [`supply_adjacent_pieces`] step 3.
 ///
 /// - OFF arm (the explicit `=0` fallback, the earlier default): the old
-/// whole-piece count `1 + continuable count` (the primary counts 1
-/// whole plus each still-continuable secondary counts 1) —
-/// `live_total`/`blocks_per_piece` are not consumed (decision-table rows
-/// pin the ignored inputs).
+///   whole-piece count `1 + continuable count` (the primary counts 1
+///   whole plus each still-continuable secondary counts 1) —
+///   `live_total`/`blocks_per_piece` are not consumed (decision-table rows
+///   pin the ignored inputs).
 /// - ON arm (soft accounting): `1 + checkout_weight(sum of secondary
 /// in-flight blocks, blocks per piece)` — the primary still counts 1
-/// whole (at this arm's entry the primary just dispatched via the
-/// primary arm, in-flight ≈ a full piece; secondaries are folded by
-/// their remaining in-flight blocks, so half-arrived pieces release
-/// slots proportionally).
+///   whole (at this arm's entry the primary just dispatched via the
+///   primary arm, in-flight ≈ a full piece; secondaries are folded by
+///   their remaining in-flight blocks, so half-arrived pieces release
+///   slots proportionally).
 ///
 /// Red line: this surface only changes the "cap" dimension comparison
 /// value — the append loop in `supply_adjacent_pieces` is still clamped
@@ -1245,22 +1245,22 @@ pub(super) fn next_adjacent_supply_piece_skipping(
 /// dispatch round).
 ///
 /// - strict = true (default): two-level pick — level 1 **unowned first**
-/// (the first missing piece "advertised AND held by nobody fresh in
-/// flight"); level 2 busy (the first "advertised AND held by others AND
-/// copies < cap" missing piece, reachable only when
-/// [`endgame_busy_admitted`] admits). References in those functions'
-/// docs.
+///   (the first missing piece "advertised AND held by nobody fresh in
+///   flight"); level 2 busy (the first "advertised AND held by others AND
+///   copies < cap" missing piece, reachable only when
+///   [`endgame_busy_admitted`] admits). References in those functions'
+///   docs.
 /// - strict = false (the `BH_ENDGAME_STRICT=0` fallback): single-level
-/// pick = the x2 reading byte-for-byte restored (the first "advertised
-/// AND copies < cap" missing piece — unowned vs other-held not
-/// distinguished).
+///   pick = the x2 reading byte-for-byte restored (the first "advertised
+///   AND copies < cap" missing piece — unowned vs other-held not
+///   distinguished).
 /// - `copies_limit` (parameterized): the per-piece copy-cap lookup
-/// closure — non-last-mile rounds always [`ENDGAME_MAX_COPIES`] (the x2
-/// gate, the same verdicts as the existing tables); last-mile rounds use
-/// [`endgame_lastmile_copies_limit`] (the holder count, relax-only). The
-/// strict=false fallback arm does not consume the relaxed value (the
-/// closure always passes x2 — the two fallback switches are orthogonal:
-/// with strict off the last-mile gate never fires).
+///   closure — non-last-mile rounds always [`ENDGAME_MAX_COPIES`] (the x2
+///   gate, the same verdicts as the existing tables); last-mile rounds use
+///   [`endgame_lastmile_copies_limit`] (the holder count, relax-only). The
+///   strict=false fallback arm does not consume the relaxed value (the
+///   closure always passes x2 — the two fallback switches are orthogonal:
+///   with strict off the last-mile gate never fires).
 pub(super) fn endgame_cursor_pick(
     pieces: &[u64],
     avail: Option<&PieceBitmap>,
@@ -1301,14 +1301,14 @@ pub(super) fn endgame_cursor_pick(
 /// change):
 /// - `None` = the old inner HashMap absent (no bookkeeping — dispatchable);
 /// - `InFlight`/`InFlightDup` = **network phase** (the old
-/// `InFlight(t)`/`InFlightDuplicate(t)`; the per-block `Instant`
-/// collapses into the piece-level shared timestamp
-/// [`PieceSentLedger::dispatched_at`] — approximation note in that
-/// struct's docs);
+///   `InFlight(t)`/`InFlightDuplicate(t)`; the per-block `Instant`
+///   collapses into the piece-level shared timestamp
+///   [`PieceSentLedger::dispatched_at`] — approximation note in that
+///   struct's docs);
 /// - `Settling`/`SettlingDup` = **store phase** (the old
-/// `Settling { at, dup }` with the `dup` bool split into its own variant
-/// — keeping the sibling-cancel criterion alive across phases; `at`
-/// likewise approximated by the piece-level timestamp);
+///   `Settling { at, dup }` with the `dup` bool split into its own variant
+///   — keeping the sibling-cancel criterion alive across phases; `at`
+///   likewise approximated by the piece-level timestamp);
 /// - `Buffered` = bytes are in the write cache — never re-dispatch.
 ///
 /// Two-phase lifecycle (per coordinate): `InFlight --arrival-->
@@ -1889,13 +1889,13 @@ pub(super) fn remove_peer_avail(face: &mut FaceState, cuid: u64) {
 ///
 /// Dual-reference anchors (in authority order):
 /// - libtorrent (primary): request candidates come only from the peer's
-/// piece map — `request_blocks.cpp` `auto const* bits =
+///   piece map — `request_blocks.cpp` `auto const* bits =
 /// &c.get_bitfield();` -> `p.pick_pieces(*bits, …)`; `piece_picker.cpp`
-/// `pick_pieces(typed_bitfield const& pieces, …)` takes the peer's
-/// bitmap as the candidate set; HAVE updates the bitmap immediately
-/// (`peer_connection.cpp`).
+///   `pick_pieces(typed_bitfield const& pieces, …)` takes the peer's
+///   bitmap as the candidate set; HAVE updates the bitmap immediately
+///   (`peer_connection.cpp`).
 /// - aria2 (secondary): `DefaultPieceStorage.cc` getMissingPiece filters
-/// request targets by `peer->getBitfield()`; `DefaultBtInteractive.cc`.
+///   request targets by `peer->getBitfield()`; `DefaultBtInteractive.cc`.
 ///
 /// On None the caller must skip the peer (wait for advertisements / a new
 /// peer) and must **not** fall back to a blind pick: the legacy
@@ -1949,20 +1949,20 @@ fn piece_live_inflight_blocks(face: &FaceState, piece: u64) -> u32 {
 /// rarity order ([`PieceStatMan::order`], the same order source as regular
 /// selection) satisfying all conditions —
 /// 1. this peer advertised it (the advertisement-aware semantics are not
-/// waived: a piece the peer never advertised cannot be delivered by it);
+///    waived: a piece the peer never advertised cannot be delivered by it);
 /// 2. unfinished (`done` already folds the mask / missing-layer gating);
 /// 3. not claimed this round (spread exclusivity as usual);
 /// 4. **an unowned whole piece** — `blocks_sent` has no entry at all (no
-/// peer delivered or buffered any block of the piece within this
-/// dispatch cycle).
-/// Condition 4 is the necessary-and-sufficient unambiguous-attribution
-/// face: once the suspect exclusively owns the whole piece, another
-/// failure ⟹ the bad block necessarily came from that peer (the
-/// dispatch-side premise of the smart_ban evidence chain; the structural
-/// counterpart of libtorrent's parole `prioritize_partials`,
-/// `torrent.cpp`). No qualifying piece -> None (skip the peer; waiting !=
-/// disconnecting — the same exit semantics as advertisement-aware
-/// selection).
+///    peer delivered or buffered any block of the piece within this
+///    dispatch cycle).
+///    Condition 4 is the necessary-and-sufficient unambiguous-attribution
+///    face: once the suspect exclusively owns the whole piece, another
+///    failure ⟹ the bad block necessarily came from that peer (the
+///    dispatch-side premise of the smart_ban evidence chain; the structural
+///    counterpart of libtorrent's parole `prioritize_partials`,
+///    `torrent.cpp`). No qualifying piece -> None (skip the peer; waiting !=
+///    disconnecting — the same exit semantics as advertisement-aware
+///    selection).
 pub(super) fn parole_pick_piece(
     face: &FaceState,
     peer_i: usize,
@@ -2092,17 +2092,17 @@ impl ClaimedSet {
 ///
 /// Anchors:
 /// - aria2 (the direct reference for this semantics):
-/// `DefaultPieceStorage.cc` getMissingPiece(index) returns null outright
-/// for `isPieceUsed(index)` (checked out in flight elsewhere) — an
-/// in-flight piece is not re-allocated; getMissingPiece(peer) checks out
-/// one piece per peer (usedPieces_ bookkeeping); `getMissingFastPiece`
-/// is the fast-face fallback when regular selection is empty — the
-/// counterpart of the caller falling back to
-/// [`select_advertised_piece`] when this function returns None (the
-/// tail / few-pieces-many-peers case stays busy).
+///   `DefaultPieceStorage.cc` getMissingPiece(index) returns null outright
+///   for `isPieceUsed(index)` (checked out in flight elsewhere) — an
+///   in-flight piece is not re-allocated; getMissingPiece(peer) checks out
+///   one piece per peer (usedPieces_ bookkeeping); `getMissingFastPiece`
+///   is the fast-face fallback when regular selection is empty — the
+///   counterpart of the caller falling back to
+///   [`select_advertised_piece`] when this function returns None (the
+///   tail / few-pieces-many-peers case stays busy).
 /// - libtorrent: block-level claims spread naturally — `piece_picker.cpp`
-/// mark_as_downloading records blocks under the claiming peer, and
-/// `request_blocks.cpp` picks per peer only unclaimed blocks.
+///   mark_as_downloading records blocks under the claiming peer, and
+///   `request_blocks.cpp` picks per peer only unclaimed blocks.
 ///
 /// Deliberate divergence from aria2: aria2 holds the whole-piece checkout
 /// exclusively until the piece completes or is cancelled; locally the
@@ -2746,21 +2746,21 @@ pub(super) fn drain_dispatch_replies(face: &mut FaceState) {
 /// `try_recv` each enqueued request command's receipt —
 ///
 /// - `Ok(())`: the request entered the peer's RequestBook -> the in-flight
-/// mark is kept, converging on BlockSettled / piece settle;
+///   mark is kept, converging on BlockSettled / piece settle;
 /// - `WindowFull`: the peer's adaptive window was full and the request
-/// **did not** enter its bookkeeping (the peer's RequestBook is the
-/// single decision point) -> clear the in-flight mark immediately +
-/// re-enter the refetch queue, so the next dispatch trigger refills per
-/// the peer's current window (the aria2 supply semantics: `window -
+///   **did not** enter its bookkeeping (the peer's RequestBook is the
+///   single decision point) -> clear the in-flight mark immediately +
+///   re-enter the refetch queue, so the next dispatch trigger refills per
+///   the peer's current window (the aria2 supply semantics: `window -
 /// outstanding` refill, `DefaultBtInteractive.cc`);
 /// - `Duplicate`: the peer already holds the same slot (genuinely in
-/// flight) -> keep the mark;
+///   flight) -> keep the mark;
 /// - `BadPieceId`/`Io`: keep the mark and let [`DISPATCH_REISSUE_WINDOW`]
-/// backstop it; do not re-queue (deterministic errors get no retry
-/// storm);
+///   backstop it; do not re-queue (deterministic errors get no retry
+///   storm);
 /// - Receipt side Closed (the peer task exited without replying) -> clear
-/// the mark + re-enter the refetch queue (continue from another peer, no
-/// 2s wait).
+///   the mark + re-enter the refetch queue (continue from another peer, no
+///   2s wait).
 ///
 /// Unanswered (Empty) entries are kept as-is. No new per-request
 /// allocations: the oneshot pairs and entry pushes reuse the allocations
@@ -2850,15 +2850,15 @@ pub(super) fn refetch_entry_for(
 /// Transition table (the arrival rows of the decision table):
 /// - `InFlight` -> `Settling`;
 /// - `InFlightDup` -> `SettlingDup` (the dup mark survives the phase
-/// change — the sibling-cancel criterion, consumed by
-/// `on_block_settled`);
+///   change — the sibling-cancel criterion, consumed by
+///   `on_block_settled`);
 /// - `Settling*` -> idempotent no-op (a repeat arrival keeps the first
-/// arrival moment; the guard age takes the conservative reading —
-/// approximated by the piece-level shared timestamp);
+///   arrival moment; the guard age takes the conservative reading —
+///   approximated by the piece-level shared timestamp);
 /// - `Buffered` (the out-of-order window where the confirmation beat the
-/// arrival) / missing bookkeeping (the arrival event was not emitted
-/// because the channel was full / the entry was already cleared by
-/// piece settle) -> no-op.
+///   arrival) / missing bookkeeping (the arrival event was not emitted
+///   because the channel was full / the entry was already cleared by
+///   piece settle) -> no-op.
 ///
 /// Total-function discipline: arrival and confirmation travel separate
 /// channels; any interleaving is harmless (a `Settling` row meeting
@@ -3129,11 +3129,11 @@ pub(super) fn store_pending_guard_scan(face: &FaceState, now: Instant) -> (u64, 
 /// Gating: when the selected piece's file leaf layer is not ready on a v2
 /// face —
 /// - Queued -> issue the lazy-fetch plan block to that peer; no blocks
-/// dispatch this tick;
+///   dispatch this tick;
 /// - Pending -> wait for the reply (lazy fetch is RTT-scale; block
-/// dispatch defers one tick);
+///   dispatch defers one tick);
 /// - Done / Failed -> dispatch normally (Failed = the whole-piece buffered
-/// fallback, warned on entry).
+///   fallback, warned on entry).
 ///
 /// Wiring: the round first drains dispatch replies
 /// ([`drain_dispatch_replies`]) — a peer's `WindowFull` request has its
@@ -3153,33 +3153,33 @@ pub(super) fn store_pending_guard_scan(face: &FaceState, now: Instant) -> (u64, 
 /// projections, dispatched by layout kind —
 ///
 /// - **Index reading** (both faces): the client file list order = the
-/// layout's **non-padding entry** order (0-based, BEP 53 "Files are
-/// zero-indexed"; padding is a transport placeholder, not a file —
-/// BEP 47). Out-of-range indexes / an empty selection = Err (by design:
-/// illegal input is rejected explicitly, never silently ignored — an
-/// empty selection would mean zero dispatch and zero completion, so
-/// refusing is the honest form).
+///   layout's **non-padding entry** order (0-based, BEP 53 "Files are
+///   zero-indexed"; padding is a transport placeholder, not a file —
+///   BEP 47). Out-of-range indexes / an empty selection = Err (by design:
+///   illegal input is rejected explicitly, never silently ignored — an
+///   empty selection would mean zero dispatch and zero completion, so
+///   refusing is the honest form).
 /// - **v2-only (V2Compact layout)**: the face's flat piece space = the
-/// cursor expansion of per-file `pieces_f = ceil(len_f/piece_len)` (the
-/// same walk as `session/recheck.rs` `encode_v2_file_bits` /
-/// `verify_face`; BEP 52 piece addressing = `(file_index,
+///   cursor expansion of per-file `pieces_f = ceil(len_f/piece_len)` (the
+///   same walk as `session/recheck.rs` `encode_v2_file_bits` /
+///   `verify_face`; BEP 52 piece addressing = `(file_index,
 /// piece_in_file)`) — a selected file -> its flat segment all-1,
-/// unselected -> 0; mask length = the face's piece count = sum of
-/// pieces_f. The old implementation flattened by the byte grid
-/// `ceil(total/piece_len)`: misaligned when file boundaries were not
-/// piece-aligned (wrong pieces selected/unselected + mask length != the
-/// face's piece count — half of enforcing "no global piece index
-/// assumptions").
+///   unselected -> 0; mask length = the face's piece count = sum of
+///   pieces_f. The old implementation flattened by the byte grid
+///   `ceil(total/piece_len)`: misaligned when file boundaries were not
+///   piece-aligned (wrong pieces selected/unselected + mask length != the
+///   face's piece count — half of enforcing "no global piece index
+///   assumptions").
 /// - **v1/hybrid (V1Padded layout)**: the face's flat piece space = the
-/// contiguous piece stream over the layout range (the byte grid); the
-/// projection rule = a piece's byte range `[k·pL, (k+1)·pL)` is selected
-/// when it intersects any selected real file's range (under
-/// piece-granularity download semantics, cross-file pieces must be
-/// fetched whole). On the pad-aligned face (BEP 47), file starts are
-/// piece-aligned so this reading is always bit-identical to the cursor
-/// projection (regression lock
-/// `selection_mask_v1_padded_face_bit_equivalence_lock` in engine::tests);
-/// this branch's code is unchanged.
+///   contiguous piece stream over the layout range (the byte grid); the
+///   projection rule = a piece's byte range `[k·pL, (k+1)·pL)` is selected
+///   when it intersects any selected real file's range (under
+///   piece-granularity download semantics, cross-file pieces must be
+///   fetched whole). On the pad-aligned face (BEP 47), file starts are
+///   piece-aligned so this reading is always bit-identical to the cursor
+///   projection (regression lock
+///   `selection_mask_v1_padded_face_bit_equivalence_lock` in engine::tests);
+///   this branch's code is unchanged.
 pub(super) fn selection_mask(
     layout: &Layout,
     piece_len: u32,
@@ -3247,22 +3247,22 @@ pub(super) fn selection_mask(
 /// level-valued variant of [`selection_mask`]; the index reading and
 /// per-face walks follow it exactly):
 /// - input `prio` = client file index (0-based non-padding order) -> level
-/// (-1 skip / 0 normal / 1..7 high) pairs; unlisted files default to 0.
-/// An empty table = Err (the same verdict as an empty selection — the
-/// caller fails explicitly);
+///   (-1 skip / 0 normal / 1..7 high) pairs; unlisted files default to 0.
+///   An empty table = Err (the same verdict as an empty selection — the
+///   caller fails explicitly);
 /// - **v2-only**: each file's cursor segment takes that file's level whole
-/// (piece addressing (file_index, piece_in_file) has no cross-file
-/// pieces);
+///   (piece addressing (file_index, piece_in_file) has no cross-file
+///   pieces);
 /// - **v1/hybrid**: when a piece's byte range intersects several real
-/// files, take the **highest level among the intersecting files** (under
-/// piece-granularity download semantics cross-file pieces are fetched
-/// whole — the strongest demand is served first; -1 does not join the
-/// max: the skip face is already invisible to the selector via the
-/// selection_mask -> done folding, and -1 segments here exist only for
-/// mirror consistency);
+///   files, take the **highest level among the intersecting files** (under
+///   piece-granularity download semantics cross-file pieces are fetched
+///   whole — the strongest demand is served first; -1 does not join the
+///   max: the skip face is already invisible to the selector via the
+///   selection_mask -> done folding, and -1 segments here exist only for
+///   mirror consistency);
 /// - consumer: the selection key (priority desc, count asc) (the `prio`
-/// arm of `select`/`select_two_phase`); endgame/allowed-fast do not
-/// consume it.
+///   arm of `select`/`select_two_phase`); endgame/allowed-fast do not
+///   consume it.
 pub(super) fn priority_mask(
     layout: &Layout,
     piece_len: u32,
@@ -5082,14 +5082,14 @@ impl V2DataPlane {
 
 /// Builds the v2 face's requester-side data plane:
 /// - HashTreeCache: the metadata piece layer is the trusted anchor
-/// (verified at bt::filetree load); for <= 16KiB single-block files the
-/// leaf hash == the pieces root, admitted at load (the tree IS the
-/// single leaf, the BEP 52 tree rule);
+///   (verified at bt::filetree load); for <= 16KiB single-block files the
+///   leaf hash == the pieces root, admitted at load (the tree IS the
+///   single leaf, the BEP 52 tree rule);
 /// - flat piece -> (file, piece_in_file) coordinate table (the logging
-/// reading) and flat -> (root, first-leaf index) table (block-level
-/// verification);
+///   reading) and flat -> (root, first-leaf index) table (block-level
+///   verification);
 /// - per-file lazy-fetch plans (base=0, length <= 512, see
-/// [`taiji_domain::hash_fetch`]).
+///   [`taiji_domain::hash_fetch`]).
 ///
 /// Non-v2 faces (hash_files = None) get the all-empty shell (v1 path
 /// behavior unchanged).

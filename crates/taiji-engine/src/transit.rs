@@ -244,19 +244,19 @@ impl BlockSink for FaceBlockSink {
 /// `handle_peer_left` feeds the `taiji_peer_leaves_total{reason}`
 /// counter family. Closed set:
 /// - `Local`: we disconnected (PeerEnd::Clean — turnover rotation /
-/// stall-valve seeder rotation / same-IP ban disconnect / engine
-/// shutdown, all command points);
+///   stall-valve seeder rotation / same-IP ban disconnect / engine
+///   shutdown, all command points);
 /// - `PeerClosed`: the peer closed normally (EOF) — the peer-side
-/// main class of connection-table loss;
+///   main class of connection-table loss;
 /// - `Io`: transport-layer errors (RST / the uTP timeout give-up
-/// family — the timeout carrier; io error strings are not
-/// subdivided, timeout-vs-reset attribution belongs to the log
-/// face);
+///   family — the timeout carrier; io error strings are not
+///   subdivided, timeout-vs-reset attribution belongs to the log
+///   face);
 /// - `Protocol`: protocol-face disconnects (violation / flooding —
-/// we disconnected for protocol reasons; the ban face keeps its
-/// own counters, this class is the connection-table attribution);
+///   we disconnected for protocol reasons; the ban face keeps its
+///   own counters, this class is the connection-table attribution);
 /// - `Cancelled`: engine shutdown cancellation (not churn; excluded
-/// from diagnostics denominators).
+///   from diagnostics denominators).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeaveKind {
     Local,
@@ -1548,26 +1548,26 @@ pub(super) enum CryptoShape {
 /// session/RPC options):
 ///
 /// - `require_crypto` -> [`CryptoShape::MseOnly`]: the existing
-/// behavior; the same upstream stance — under force/require, aria2
-/// forbids a legacy retry after an MSE failure
-/// (`InitiatorMSEHandshakeCommand.cc`).
+///   behavior; the same upstream stance — under force/require, aria2
+///   forbids a legacy retry after an MSE failure
+///   (`InitiatorMSEHandshakeCommand.cc`).
 /// - `min_level = Arc4` AND !require ->
-/// [`CryptoShape::MseFirstThenLegacy`]: raising the minimum crypto
-/// level to arc4 = outbound prefers encryption. Upstream cross-check:
-/// aria2's outbound default is MSE-first
-/// (`PeerInitiateConnectionCommand.h` defaults
-/// `mseHandshakeEnabled=true`) and on an MSE failure (non-force/
-/// require) it retries legacy on a fresh connection
-/// (`InitiatorMSEHandshakeCommand.cc` — the failed negotiation's
-/// bytes are not reusable); libtorrent's `out_enc_policy=pe_enabled`
-/// is the same shape (prefer/fallback alternation per-peer
-/// `pe_support`, `bt_peer_connection.cpp`). This mapping is more
-/// conservative than aria2's default: the default plain shape does
-/// not probe (keeping legacy-only peers free of a protocol-probe
-/// round trip); only explicit arc4 enables MSE-first.
+///   [`CryptoShape::MseFirstThenLegacy`]: raising the minimum crypto
+///   level to arc4 = outbound prefers encryption. Upstream cross-check:
+///   aria2's outbound default is MSE-first
+///   (`PeerInitiateConnectionCommand.h` defaults
+///   `mseHandshakeEnabled=true`) and on an MSE failure (non-force/
+///   require) it retries legacy on a fresh connection
+///   (`InitiatorMSEHandshakeCommand.cc` — the failed negotiation's
+///   bytes are not reusable); libtorrent's `out_enc_policy=pe_enabled`
+///   is the same shape (prefer/fallback alternation per-peer
+///   `pe_support`, `bt_peer_connection.cpp`). This mapping is more
+///   conservative than aria2's default: the default plain shape does
+///   not probe (keeping legacy-only peers free of a protocol-probe
+///   round trip); only explicit arc4 enables MSE-first.
 /// - `min_level = Plain` AND !require -> [`CryptoShape::LegacyOnly`]:
-/// the existing behavior (zero regression in the default plain
-/// shape).
+///   the existing behavior (zero regression in the default plain
+///   shape).
 ///
 /// Announce-bit consistency check (a zero-change conclusion): the
 /// arc4-prefer shape still announces supportcrypto=1 (assemble.rs via

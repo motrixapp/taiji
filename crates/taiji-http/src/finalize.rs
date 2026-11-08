@@ -16,29 +16,29 @@
 //!
 //! Execution order ([`Finalizer::finalize`]):
 //! 1. Intent before action: a `record_intent` failure is a task-level
-//! error and no rename is attempted (renaming before journaling has
-//! a crash window that loses completion state).
+//!    error and no rename is attempted (renaming before journaling has
+//!    a crash window that loses completion state).
 //! 2. Handles closed before rename: the caller proves it with the
-//! [`HandlesClosed`] credential (type-as-proof — only
-//! [`partfile::PartFile::close`] can produce one), satisfying the
-//! Windows/SMB handle-sharing and oplock constraints.
+//!    [`HandlesClosed`] credential (type-as-proof — only
+//!    [`partfile::PartFile::close`] can produce one), satisfying the
+//!    Windows/SMB handle-sharing and oplock constraints.
 //! 3. Rename, then directory fsync: network drives (SMB) may reject a
-//! directory fsync; a platform-scoped "server acknowledged" answer
-//! is accepted as degraded durability ([`dir_fsync_verdict`]:
-//! Windows Win32 codes 1/50, POSIX only EINVAL/EROFS; other
-//! flush/disk/transport errors fail as usual). File fsync is never
-//! relaxed — it lives in [`partfile::PartFile::sync_all`]. After a
-//! fatal directory fsync the rename has already landed: the intent
-//! is kept and startup retry self-heals.
+//!    directory fsync; a platform-scoped "server acknowledged" answer
+//!    is accepted as degraded durability ([`dir_fsync_verdict`]:
+//!    Windows Win32 codes 1/50, POSIX only EINVAL/EROFS; other
+//!    flush/disk/transport errors fail as usual). File fsync is never
+//!    relaxed — it lives in [`partfile::PartFile::sync_all`]. After a
+//!    fatal directory fsync the rename has already landed: the intent
+//!    is kept and startup retry self-heals.
 //! 4. Rename failures retry 3 times with exponential backoff; still
-//! failing = `Done` + `renamePending` (the intent is already in the
-//! database; no extra write needed).
+//!    failing = `Done` + `renamePending` (the intent is already in the
+//!    database; no extra write needed).
 //! 5. Idempotent close-out: target present with matching size =
-//! success (covers "renamed, crashed before clearing"). A target
-//! with a mismatched size is a foreign file and is never
-//! overwritten; it stays pending for manual/periodic handling
-//! (aria2 has no such state: its finalize resolves conflicts at
-//! creation time).
+//!    success (covers "renamed, crashed before clearing"). A target
+//!    with a mismatched size is a foreign file and is never
+//!    overwritten; it stays pending for manual/periodic handling
+//!    (aria2 has no such state: its finalize resolves conflicts at
+//!    creation time).
 //!
 //! Blocking discipline: [`PathOps`] is a synchronous trait (direct
 //! syscall surface); [`Finalizer`] wraps every call in
@@ -249,13 +249,13 @@ impl PathOps for FsOps {
 /// different things and must not be mixed).
 ///
 /// - Windows: SMB servers answer directory fsync with Win32
-/// `ERROR_INVALID_FUNCTION`(1) / `ERROR_NOT_SUPPORTED`(50) —
-/// accepted as "server acknowledged", recording the degraded
-/// durability contract (the Motrix PR #2132 contract: error 1/50,
-/// relaxable only with an SMB 2+ handle confirmation).
+///   `ERROR_INVALID_FUNCTION`(1) / `ERROR_NOT_SUPPORTED`(50) —
+///   accepted as "server acknowledged", recording the degraded
+///   durability contract (the Motrix PR #2132 contract: error 1/50,
+///   relaxable only with an SMB 2+ handle confirmation).
 /// - POSIX: only "unsupported / read-only" answers are accepted —
-/// `EINVAL`(22) / `EROFS`(30). errno 1 = `EPERM`, 50 = `ENETDOWN`
-/// (Darwin): same values, different meanings — fail as usual.
+///   `EINVAL`(22) / `EROFS`(30). errno 1 = `EPERM`, 50 = `ENETDOWN`
+///   (Darwin): same values, different meanings — fail as usual.
 ///
 /// All other flush/disk/transport errors (EIO/ENOSPC/EACCES...) fail
 /// as usual in both domains; file fsync is never relaxed (it lives in

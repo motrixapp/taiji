@@ -9,12 +9,12 @@
 //! The test dials into the engine as two remote peers: peer 0 first (slow
 //! answers), then peer 1 once it has settled:
 //! - peer 0: every request is answered 6 s late (> the redispatch window,
-//! creating the in-flight overlap);
+//!   creating the in-flight overlap);
 //! - peer 1: begin==0 answered immediately, the rest 8 s late (only the
-//! first block lands inside the piece's in-flight window).
-//! (The redispatch window = max(2 s, min(peer adaptive timeout, 5 s));
-//! for a sample-less peer the window is the 5 s cap, so answer latencies
-//! that create the overlap must be > 5 s.)
+//!   first block lands inside the piece's in-flight window).
+//!   (The redispatch window = max(2 s, min(peer adaptive timeout, 5 s));
+//!   for a sample-less peer the window is the 5 s cap, so answer latencies
+//!   that create the overlap must be > 5 s.)
 //!
 //! Timeline: t0 all 4 candidate blocks go to peer 0 -> the redispatch
 //! window expires (sample-less peer window = the 5 s cap) and the

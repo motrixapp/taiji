@@ -4,28 +4,28 @@
 //! Contract embodied by [`MediaCommand`]/[`MediaChild`]:
 //!
 //! - **argv array, zero shell**: arguments travel as an `OsString`
-//! vector — there is no string-assembly API, so no shell
-//! metacharacter surface exists by construction;
+//!   vector — there is no string-assembly API, so no shell
+//!   metacharacter surface exists by construction;
 //! - **absolute paths only**: a non-absolute program path is refused
-//! ([`MediaError::NotAbsolute`] — no PATH
-//! lookup at spawn time, discovery owns resolution);
+//!   ([`MediaError::NotAbsolute`] — no PATH
+//!   lookup at spawn time, discovery owns resolution);
 //! - **explicit `-f`**: the [`MediaCommand::output`] face refuses an
-//! output path unless an explicit `-f <fmt>` was recorded first —
-//! container format is never guessed; output paths are
-//! absolute and a leading `-` in the filename is rejected
-//! (option-injection guard);
+//!   output path unless an explicit `-f <fmt>` was recorded first —
+//!   container format is never guessed; output paths are
+//!   absolute and a leading `-` in the filename is rejected
+//!   (option-injection guard);
 //! - **piped trio**: stdin/stdout/stderr are all piped; the stdin write
-//! end is dropped at spawn (EOF upstream; the argv carries `-nostdin`
-//! as the belt to that suspenders);
+//!   end is dropped at spawn (EOF upstream; the argv carries `-nostdin`
+//!   as the belt to that suspenders);
 //! - **`kill_on_drop` + cancel token + watchdog**: the child dies with
-//! its handle (no orphans), the caller's [`CancellationToken`]
-//! aborts it through the TERM→(5s)→KILL escalation
-//! ([`MediaError::Cancelled`]), and the progress watchdog
-//! (frame/total_size stall window) escalates
-//! identically to [`MediaError::Stalled`];
+//!   its handle (no orphans), the caller's [`CancellationToken`]
+//!   aborts it through the TERM→(5s)→KILL escalation
+//!   ([`MediaError::Cancelled`]), and the progress watchdog
+//!   (frame/total_size stall window) escalates
+//!   identically to [`MediaError::Stalled`];
 //! - **resource limits** (unix): RLIMIT_AS 512 MiB (ffprobe
-//! 256 MiB) + RLIMIT_CPU 3600 s + niceness 19, in force before any
-//! ffmpeg code runs.
+//!   256 MiB) + RLIMIT_CPU 3600 s + niceness 19, in force before any
+//!   ffmpeg code runs.
 //!
 //! ## Limit mechanism deviation on the record (unsafe_code = forbid)
 //!

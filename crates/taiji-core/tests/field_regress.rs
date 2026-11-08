@@ -4,15 +4,15 @@
 //! fake-tracker vehicle, all in-process).
 //!
 //! - Truncate-on-fresh-add: preset data + a fresh add (no progress row in the store) ->
-//! engine allocation must not truncate the on-disk file (observed in
-//! the field: after addUri, `file allocation done effect= Truncated`
-//! and the file SHA changed).
+//!   engine allocation must not truncate the on-disk file (observed in
+//!   the field: after addUri, `file allocation done effect= Truncated`
+//!   and the file SHA changed).
 //! - Premature completed announce: the event chain of a seed-only task (restored bitmap full) —
-//! the completed state must already be visible before the first
-//! announce (SwarmSnapshot initialization), only started is sent (on
-//! the wire this is STARTED_AFTER_COMPLETION), and completed is never
-//! sent (observed in the field: completed(up=0) 1s after started ->
-//! inflated snatch counts on the site).
+//!   the completed state must already be visible before the first
+//!   announce (SwarmSnapshot initialization), only started is sent (on
+//!   the wire this is STARTED_AFTER_COMPLETION), and completed is never
+//!   sent (observed in the field: completed(up=0) 1s after started ->
+//!   inflated snatch counts on the site).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

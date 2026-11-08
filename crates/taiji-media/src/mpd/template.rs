@@ -15,17 +15,17 @@
 //! Rules:
 //! * `$$` is the literal `$` (the only escape);
 //! * `$RepresentationID$`/`$Bandwidth$` substitute always;
-//! `$Number$`/`$Time$` substitute the segment's number/time and are
-//! an error when the addressing form does not provide the value
-//! (a `$Number$` template under timeline addressing without a
-//! startNumber, a `$Time$` under `@duration` addressing is served
-//! by the computed segment time — [`super::expand`]'s ruled
-//! mapping);
+//!   `$Number$`/`$Time$` substitute the segment's number/time and are
+//!   an error when the addressing form does not provide the value
+//!   (a `$Number$` template under timeline addressing without a
+//!   startNumber, a `$Time$` under `@duration` addressing is served
+//!   by the computed segment time — [`super::expand`]'s ruled
+//!   mapping);
 //! * a bare unpaired `$` or an unknown identifier is a parse-class
-//! error (`manifest_parse`) — the spec's "invalid MPD" clause;
+//!   error (`manifest_parse`) — the spec's "invalid MPD" clause;
 //! * `$RepresentationID$` does not take a format tag (its value is a
-//! string); the format tag zero-pads to the width with the given
-//! conversion (`d` decimal, `x`/`X` hex).
+//!   string); the format tag zero-pads to the width with the given
+//!   conversion (`d` decimal, `x`/`X` hex).
 //!
 //! Output bounds (the amplification guard — a ≤16MiB input must not
 //! drive unbounded allocation): a format-tag **width over

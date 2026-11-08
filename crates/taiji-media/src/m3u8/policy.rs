@@ -8,20 +8,20 @@
 //! tie-breaks):
 //!
 //! * `highest` (default): maximum BANDWIDTH; ties broken by
-//! resolution, then declaration order;
+//!   resolution, then declaration order;
 //! * `resolution=<H>`: among variants whose RESOLUTION height is
-//! **≤ H**, the same ordering as `highest` (a cap, matching the
-//! SPEC-Media selector predicate family `res<=`); variants without
-//! a RESOLUTION attribute are ineligible — an unmeasurable cap
-//! candidate is never guessed;
+//!   **≤ H**, the same ordering as `highest` (a cap, matching the
+//!   SPEC-Media selector predicate family `res<=`); variants without
+//!   a RESOLUTION attribute are ineligible — an unmeasurable cap
+//!   candidate is never guessed;
 //! * `bandwidth=<B>`: maximum BANDWIDTH **≤ B**; an exact B match is
-//! not required;
+//!   not required;
 //! * an empty candidate set is an explicit `variant_policy` error,
-//! never a silent fallback to a different variant;
+//!   never a silent fallback to a different variant;
 //! * `EXT-X-I-FRAME-STREAM-INF` renditions are excluded from every
-//! policy (trick-play only, RFC 8216 §4.3.4.3) — an i-frame playlist
-//! selected by hand fails later as `iframes_unsupported` at its own
-//! media-playlist parse.
+//!   policy (trick-play only, RFC 8216 §4.3.4.3) — an i-frame playlist
+//!   selected by hand fails later as `iframes_unsupported` at its own
+//!   media-playlist parse.
 
 use super::model::{MasterPlaylist, Variant};
 use crate::error::MediaError;

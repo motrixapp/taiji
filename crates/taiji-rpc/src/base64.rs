@@ -12,11 +12,11 @@
 //! # Registered difference
 //!
 //! - **Non-canonical trailing bits accepted**: input whose final group
-//! has non-zero leftover bits (e.g. `Zh==` — the canonical form would
-//! be `Zg==`) decodes by its value. RFC 4648 §4 says SHOULD reject;
-//! aria2 `base64::decode` is likewise lenient at the bit level, and
-//! rejecting would break interop with ecosystem encoders that carry
-//! noisy trailing bits. A test pins this acceptance.
+//!   has non-zero leftover bits (e.g. `Zh==` — the canonical form would
+//!   be `Zg==`) decodes by its value. RFC 4648 §4 says SHOULD reject;
+//!   aria2 `base64::decode` is likewise lenient at the bit level, and
+//!   rejecting would break interop with ecosystem encoders that carry
+//!   noisy trailing bits. A test pins this acceptance.
 
 #[cfg(test)]
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

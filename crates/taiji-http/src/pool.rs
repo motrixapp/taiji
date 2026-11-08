@@ -6,18 +6,18 @@
 //! # Responsibility boundary (decision face / execution ring)
 //!
 //! - **Decision face** ([`crate::aimd::AimdBook`], exclusive to the
-//! coordinator actor): slow-start doubling / gain threshold /
-//! congestion multiplicative decrease — it only produces numbers,
-//! never touches connections;
+//!   coordinator actor): slow-start doubling / gain threshold /
+//!   congestion multiplicative decrease — it only produces numbers,
+//!   never touches connections;
 //! - **Execution ring** (this module, held by the HttpTask driver
-//! loop): consumes
-//! [`crate::coordinator::CoordinatorHandle::aimd_snapshot`]
-//! snapshots; grow = emit spawn directives (the driver side spawns
-//! new workers accordingly); shrink = lower the desired count —
-//! in-place workers claim a "surplus slot" via CAS at extent
-//! boundaries through [`WorkerPool::should_stop`] and exit
-//! gracefully (never interrupting an in-flight extent; graceful
-//! shutdown of excess connections along the AIMD decrease path).
+//!   loop): consumes
+//!   [`crate::coordinator::CoordinatorHandle::aimd_snapshot`]
+//!   snapshots; grow = emit spawn directives (the driver side spawns
+//!   new workers accordingly); shrink = lower the desired count —
+//!   in-place workers claim a "surplus slot" via CAS at extent
+//!   boundaries through [`WorkerPool::should_stop`] and exit
+//!   gracefully (never interrupting an in-flight extent; graceful
+//!   shutdown of excess connections along the AIMD decrease path).
 //!
 //! # Shrink protocol (surplus-slot claiming, anti-overshoot /
 //! anti-dangling tickets)
@@ -143,16 +143,16 @@ impl WorkerPool {
     /// in scaling (the supervisor-only single-write entry):
     ///
     /// - snapshot values (clamped `[1, cap]`) overwrite that source's
-    /// desired count; snapshot-absent sources keep their desired
-    /// count (first round = the slow-start start);
+    ///   desired count; snapshot-absent sources keep their desired
+    ///   count (first round = the slow-start start);
     /// - removed sources' desired = 0 (snapshot values never override
-    /// a removal decision — removal wins);
+    ///   a removal decision — removal wins);
     /// - grow: returns the `(source, delta)` spawn-directive sequence
-    /// (the shortfall of registered < desired; the caller must
-    /// acknowledge with [`WorkerPool::note_spawn`] after acting);
+    ///   (the shortfall of registered < desired; the caller must
+    ///   acknowledge with [`WorkerPool::note_spawn`] after acting);
     /// - shrink: the desired count is already lowered; convergence is
-    /// left to the worker-boundary surplus claiming in
-    /// [`WorkerPool::should_stop`] (no tickets at this entry).
+    ///   left to the worker-boundary surplus claiming in
+    ///   [`WorkerPool::should_stop`] (no tickets at this entry).
     ///
     /// Returns the `(source, count)` sequence needing fresh spawns
     /// (only sources with delta > 0).

@@ -289,8 +289,8 @@ impl PieceStatMan {
     /// Two-phase bucket read: returns `(spread, plain)` with the same
     /// decisions as the legacy O(n) single pass —
     /// - `plain` = the first eligible piece in (count, order rank) order =
-    /// globally rarest eligible, ties by shuffle order (same as the legacy
-    /// "strictly-less replaces" full scan);
+    ///   globally rarest eligible, ties by shuffle order (same as the legacy
+    ///   "strictly-less replaces" full scan);
     /// - `spread` = the first eligible piece not yet `claimed`;
     /// - nothing eligible -> `(None, None)`.
     ///

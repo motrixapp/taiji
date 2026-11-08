@@ -6,10 +6,10 @@
 //! Cross-validation sources (aria2, read-only):
 //! - SeedCheckCommand.cc (latch + halt), BtSetup.cc (assembly);
 //! - BtStopDownloadCommand.cc (1 s tick / speed reset / timeout forced
-//! stop);
+//!   stop);
 //! - RequestGroup.cc (enableSeedOnly);
 //! - DefaultBtProgressInfoFile.cc (uploadLength -> uploadLengthAtStartup,
-//! read back as torrent_progress.upload_at_startup).
+//!   read back as torrent_progress.upload_at_startup).
 
 use std::sync::Arc;
 use std::time::Duration;

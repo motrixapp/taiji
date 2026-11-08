@@ -8,14 +8,14 @@
 //! -> engine downloads -> assert:
 //!
 //! 1. the download completes and the file matches byte for byte (all
-//! correct blocks are kept; no whole-piece refetch);
+//!    correct blocks are kept; no whole-piece refetch);
 //! 2. only the corrupt block is refetched: the seeder-side request count
-//! is (1, 32768) = 2 and 1 for each of the other 7 blocks;
+//!    is (1, 32768) = 2 and 1 for each of the other 7 blocks;
 //! 3. log surface: capture the tracing output — BlockRejected and the
-//! single-block refetch request both appear with (file_index,
-//! piece_in_file, block) coordinates, and there is no whole-piece
-//! drop event (PieceFailed semantics do not trigger — the isolation
-//! property of v2 per-block verification).
+//!    single-block refetch request both appear with (file_index,
+//!    piece_in_file, block) coordinates, and there is no whole-piece
+//!    drop event (PieceFailed semantics do not trigger — the isolation
+//!    property of v2 per-block verification).
 //!
 //! Protocol source: BEP 52 hash exchange (lazy fetch base=0, length a
 //! power of two <= 512) and v2 block granularity 16KiB; upstream aria2

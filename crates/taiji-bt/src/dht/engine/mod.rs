@@ -13,10 +13,10 @@
 //!
 //! - Command `mpsc(64)` + oneshot replies, event `mpsc(64)` (frozen values);
 //! - Inbound packets consume the dht channel, outbound writes
-//! `OutboundPacket` (demux single-writer discipline; core bridges the
-//! `UdpDemuxHandle` via [`forward_outbound`]);
+//!   `OutboundPacket` (demux single-writer discipline; core bridges the
+//!   `UdpDemuxHandle` via [`forward_outbound`]);
 //! - Task queues = immediate + periodic, 15 concurrent each (simplification,
-//! [`super::task`]).
+//!   [`super::task`]).
 //!
 //! The behavior mapping against aria2/libtorrent and the intentional
 //! divergence list live in docs/design/dht.md ("Upstream anchor mapping").
@@ -28,19 +28,19 @@
 //! plus libtorrent node_id.cpp). The engine wires it at three points:
 //!
 //! 1. Local derive: `DhtCommand::SetExternalIp` supplies the external
-//! address; the current id is kept if it still verifies, otherwise
-//! re-derived (libtorrent `node::update_node_id`, node.cpp; table nodes
-//! are kept, the bucket skeleton is rebuilt around the new id — same
-//! rule as routing_table.cpp);
+//!    address; the current id is kept if it still verifies, otherwise
+//!    re-derived (libtorrent `node::update_node_id`, node.cpp; table nodes
+//!    are kept, the bucket skeleton is rebuilt around the new id — same
+//!    rule as routing_table.cpp);
 //! 2. Inbound queries: an invalid sender id means its announce_peer is not
-//! stored (storage refusal); queries are still answered, tokens still
-//! issued, nodes still enter the table (the BEP42 text constrains only
-//! storage: "MUST never be used to store information on" + "Requests
-//! ... should always be serviced"; excluding such nodes from the routing
-//! table has no textual basis — mainstream bootstrap routers ship
-//! non-compliant ids, so exclusion would sever bootstrapping);
+//!    stored (storage refusal); queries are still answered, tokens still
+//!    issued, nodes still enter the table (the BEP42 text constrains only
+//!    storage: "MUST never be used to store information on" + "Requests
+//!    ... should always be serviced"; excluding such nodes from the routing
+//!    table has no textual basis — mainstream bootstrap routers ship
+//!    non-compliant ids, so exclusion would sever bootstrapping);
 //! 3. Outbound storage: announce_peer goes only to id-compliant nodes
-//! (the BEP42 "MUST never be used to store information on" clause).
+//!    (the BEP42 "MUST never be used to store information on" clause).
 //!
 //! # Persistence
 //!

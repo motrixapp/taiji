@@ -2317,11 +2317,11 @@ impl SessionActor {
     /// extension event bus). Engine payloads are stamped with the task gid
     /// before entering the bus:
     /// - `Started`: exactly once per gid per session lifetime (the engine
-    /// emits at every activation, this closure only admits the first via
-    /// `recovery_notified` — the "repeated activation does not re-emit"
-    /// design standard; a session rebuild = new bookkeeping = re-emits);
+    ///   emits at every activation, this closure only admits the first via
+    ///   `recovery_notified` — the "repeated activation does not re-emit"
+    ///   design standard; a session rebuild = new bookkeeping = re-emits);
     /// - `Completed`: not deduplicated (a convergence-wave event — legal
-    /// across activations, see the recovery_admit module docs).
+    ///   across activations, see the recovery_admit module docs).
     pub(super) fn recovery_relay(&self, gid: Gid) -> Arc<dyn Fn(RecoveryNotice) + Send + Sync> {
         let bus = self.recovery_bus.clone();
         let seen = Arc::clone(&self.recovery_notified);
@@ -2680,27 +2680,27 @@ impl SessionActor {
     /// released this tick — no idle beat between release and backfill.
     /// Segments:
     /// 1. check promotion — check_pending admission within
-    /// `max-concurrent-checks`: the parked front moves into the
-    /// in-flight checking registry and the recheck spawns (the
-    /// checking_progress registration lives in spawn_recheck —
-    /// the ⟺ in-flight invariant); a completed recheck frees the
-    /// slot and the next admission happens in the same tick's
-    /// trailing pump (release-then-backfill);
+    ///    `max-concurrent-checks`: the parked front moves into the
+    ///    in-flight checking registry and the recheck spawns (the
+    ///    checking_progress registration lives in spawn_recheck —
+    ///    the ⟺ in-flight invariant); a completed recheck frees the
+    ///    slot and the next admission happens in the same tick's
+    ///    trailing pump (release-then-backfill);
     /// 2. seed promotion — seed_wait reactivation within the seed
-    /// budget (FIFO; the reactivation occupies a seed slot only,
-    /// never a download slot);
+    ///    budget (FIFO; the reactivation occupies a seed slot only,
+    ///    never a download slot);
     /// 3. synthesis promotion — proc_wait permit admission
-    /// within `media-synthesis-concurrency`: the parked front moves
-    /// into the processing registry and its gate permit fires (the
-    /// driver's gate await wakes and Processing truly begins inside
-    /// the synthesis slot). The permit-end lookup precedes the
-    /// registry move (a head whose permit end is gone = the
-    /// remove-race defensive residual — the loop breaks, the Ended
-    /// consume clears the entry); a flagged head (pause/remove
-    /// racing the gate) never admits (`proc_wait_front`). In-flight
-    /// syntheses are never evicted (narrowing does not preempt);
+    ///    within `media-synthesis-concurrency`: the parked front moves
+    ///    into the processing registry and its gate permit fires (the
+    ///    driver's gate await wakes and Processing truly begins inside
+    ///    the synthesis slot). The permit-end lookup precedes the
+    ///    registry move (a head whose permit end is gone = the
+    ///    remove-race defensive residual — the loop breaks, the Ended
+    ///    consume clears the entry); a flagged head (pause/remove
+    ///    racing the gate) never admits (`proc_wait_front`). In-flight
+    ///    syntheses are never evicted (narrowing does not preempt);
     /// 4. download fillup — the former `pump` body (no new engine
-    /// spawns after shutdown).
+    ///    spawns after shutdown).
     async fn pump_all(&mut self) {
         if self.token.is_cancelled() {
             return;

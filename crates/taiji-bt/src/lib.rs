@@ -2,18 +2,18 @@
 //!
 //! Responsibilities:
 //! - peer wire (unified v1 + v2 framing): handshake (including the BEP52
-//! `reserved[7] & 0x10` upgrade path), message codec, request bookkeeping
-//! (adaptive outstanding window 6->256), flood control, HAVE advertising;
+//!   `reserved[7] & 0x10` upgrade path), message codec, request bookkeeping
+//!   (adaptive outstanding window 6->256), flood control, HAVE advertising;
 //! - v2 hash exchange (BEP52 messages 21/22/23), both endpoint semantics;
 //! - MSE/PE: DH-768 + ARC4 (dropping the first 1024B of keystream) +
-//! PLAIN negotiation;
+//!   PLAIN negotiation;
 //! - tracker: HTTP / UDP (BEP15) / announce tier state machine / scrape /
-//! LSD (BEP14);
+//!   LSD (BEP14);
 //! - DHT (BEP5): K=8 routing table, dual identity of v1 sha1 and v2
-//! truncated sha256;
+//!   truncated sha256;
 //! - PEX (BEP11), ut_metadata (BEP9);
 //! - piece selection (rarest-first / endgame / priority) and choking
-//! (10s rounds).
+//!   (10s rounds).
 //!
 //! Status: bencode, peer wire framing, and file tree + Merkle parsing are
 //! in place; tracker/DHT/PEX/PE proceed per the milestone plan in `docs/`.

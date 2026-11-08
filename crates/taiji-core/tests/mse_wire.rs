@@ -1,20 +1,20 @@
 //! MSE engine wiring (engine-face regression).
 //!
 //! 1. `require_crypto_rejects_legacy_inbound`: with `--bt-require-crypto`,
-//! an inbound legacy handshake on the engine face is rejected
-//! (`bt::mse::accept_any` sniffing routes it ->
-//! `AcceptError::LegacyRejected`, cross-check
-//! `ReceiverMSEHandshakeCommand.cc`) — the connection is closed right
-//! after the peer sends its handshake, with no reply bytes;
+//!    an inbound legacy handshake on the engine face is rejected
+//!    (`bt::mse::accept_any` sniffing routes it ->
+//!    `AcceptError::LegacyRejected`, cross-check
+//!    `ReceiverMSEHandshakeCommand.cc`) — the connection is closed right
+//!    after the peer sends its handshake, with no reply bytes;
 //! 2. `forced_encryption_local_seeder_loop`: the forced-encryption local
-//! seeder chain closes the loop — the tracker returns the seeder -> the
-//! engine's outbound `bt::mse::connect` initiator negotiation (provide
-//! excludes plain) -> the BT handshake over the encrypted stream -> the
-//! ARC4 data face completes the single-piece download (Completed +
-//! matching content);
+//!    seeder chain closes the loop — the tracker returns the seeder -> the
+//!    engine's outbound `bt::mse::connect` initiator negotiation (provide
+//!    excludes plain) -> the BT handshake over the encrypted stream -> the
+//!    ARC4 data face completes the single-piece download (Completed +
+//!    matching content);
 //! 3. `mse_inbound_duplex_handshake`: an inbound MSE client -> the engine
-//! sniffs and accepts -> the BT handshake completes over the encrypted
-//! stream -> the engine sends Interested (duplex proof).
+//!    sniffs and accepts -> the BT handshake completes over the encrypted
+//!    stream -> the engine sends Interested (duplex proof).
 
 use std::net::SocketAddr;
 use std::time::Duration;

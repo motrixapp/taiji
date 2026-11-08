@@ -3,11 +3,11 @@
 //! a real SessionActor command surface:
 //!
 //! 1. `--max-overall-download-limit` (session global option) throttling
-//! engages — the download completes and the rate stays <= limit x
-//! tolerance;
+//!    engages — the download completes and the rate stays <= limit x
+//!    tolerance;
 //! 2. per-task `max-download-limit` (addTorrent options, a K-suffix
-//! literal) throttling engages — proves K/M parsing (matching aria2
-//! getRealSize, Util.cc) plus the per-task bucket in the chain.
+//!    literal) throttling engages — proves K/M parsing (matching aria2
+//!    getRealSize, Util.cc) plus the per-task bucket in the chain.
 //!
 //! Rate observation = time to file completion (the honest observable
 //! without a query seam: the completion duration must be >= payload /

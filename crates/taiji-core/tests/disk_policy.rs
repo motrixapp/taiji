@@ -1,12 +1,12 @@
 //! Disk-protection tiers end to end (the store pipeline's consumption
 //! surface):
 //! 1. flush beat — with `flush_interval` mounted, periodic fsyncs happen
-//! through the shared handle; the throughput default tier (None) has
-//! no periodic fsync (behavior-unchanged, tested explicitly);
+//!    through the shared handle; the throughput default tier (None) has
+//!    no periodic fsync (behavior-unchanged, tested explicitly);
 //! 2. allocation mode — the hdd-sequential tier preallocates the full
-//! length with real allocation as soon as a new task starts
-//! (st_blocks non-sparse); the default tier keeps sparse trunc
-//! (existing behavior).
+//!    length with real allocation as soon as a new task starts
+//!    (st_blocks non-sparse); the default tier keeps sparse trunc
+//!    (existing behavior).
 //!
 //! Network-free shape: the announce points at a dead port (tracker
 //! retries stay silent); the storage pipeline finishes building +

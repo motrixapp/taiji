@@ -4,16 +4,16 @@
 //! against a real SessionActor:
 //!
 //! - Six trigger-point argv assertions (table-driven start/pause/stop +
-//! error + bt-complete/complete): argv = [gidHex16, numFiles,
-//! firstFilename] — the reference `util.cc executeHook` argv passing,
-//! with no placeholder substitution;
+//!   error + bt-complete/complete): argv = [gidHex16, numFiles,
+//!   firstFilename] — the reference `util.cc executeHook` argv passing,
+//!   with no placeholder substitution;
 //! - bt-complete and complete dual-fire semantics (a BT task fires both
-//! events, as in aria2's DefaultPieceStorage.cc + RequestGroupMan.cc);
+//!   events, as in aria2's DefaultPieceStorage.cc + RequestGroupMan.cc);
 //! - hook failure isolation: a missing command or nonzero exit does not
-//! affect task state (util.cc semantics);
+//!   affect task state (util.cc semantics);
 //! - zero overhead with no hook options: the existing hookless path is
-//! unchanged (the runner is not attached; see the hook.rs unit test
-//! `fire_without_command_is_noop`).
+//!   unchanged (the runner is not attached; see the hook.rs unit test
+//!   `fire_without_command_is_noop`).
 //!
 //! Coverage (trigger point -> test):
 //!

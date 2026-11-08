@@ -26,12 +26,12 @@
 //! and the fallback presence:
 //!
 //! * native unsupported (TS source pre-0.4, MKV output, multi-MAP
-//! codec change, non-fMP4 init, multi-trak init) → fallback
-//! Required;
+//!   codec change, non-fMP4 init, multi-trak init) → fallback
+//!   Required;
 //! * fallback absent + required → `taiji.media.ffmpeg_missing` (start
-//! precheck ③ — before any of this runs the task activation chain
-//! applies the same verdict to avoid downloading a whole track for
-//! nothing);
+//!   precheck ③ — before any of this runs the task activation chain
+//!   applies the same verdict to avoid downloading a whole track for
+//!   nothing);
 //! * native primary, fallback = safety net when present.
 //!
 //! **Both-channels terminal state** (②): the compound error embeds

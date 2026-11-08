@@ -5,24 +5,24 @@
 //! # Semantics
 //!
 //! - Transaction timeout 10s (`DHTConstants.h` `DHT_MESSAGE_TIMEOUT`,
-//! matching the `--dht-message-timeout` option); expiry is
-//! `elapsed >= timeout` (`DHTMessageTrackerEntry.cc`, closed boundary);
+//!   matching the `--dht-message-timeout` option); expiry is
+//!   `elapsed >= timeout` (`DHTMessageTrackerEntry.cc`, closed boundary);
 //! - Reply match key: transaction id + peer (ip, port)
-//! (`DHTMessageTrackerEntry.cc` match; aria2 additionally tolerates
-//! `::ffff:` IPv4-mapped string forms — an artifact of storing IPs as
-//! strings; with [`SocketAddr`] value semantics the dual form does not
-//! exist, see docs/design/dht.md);
+//!   (`DHTMessageTrackerEntry.cc` match; aria2 additionally tolerates
+//!   `::ffff:` IPv4-mapped string forms — an artifact of storing IPs as
+//!   strings; with [`SocketAddr`] value semantics the dual form does not
+//!   exist, see docs/design/dht.md);
 //! - One sweep removes all expired entries in a single pass
-//! (`DHTMessageTracker.cc` handleTimeout's remove_if);
+//!   (`DHTMessageTracker.cc` handleTimeout's remove_if);
 //! - Node scoring after expiry (timeout + bad -> replace) does not happen
-//! in the table — the engine calls `RoutingTable::record_timeout` on the
-//! [`PendingTransaction`] (aria2 handleTimeoutEntry,
-//! `DHTMessageTracker.cc`);
+//!   in the table — the engine calls `RoutingTable::record_timeout` on the
+//!   [`PendingTransaction`] (aria2 handleTimeoutEntry,
+//!   `DHTMessageTracker.cc`);
 //! - Error replies (y="e") take the exception path in aria2 and are
-//! treated as timeouts (`DHTMessageTracker.cc` catch
-//! RecoverableException -> handleTimeoutEntry); this implementation's
-//! [`TransactionOutcome::Error`] lets the engine run `record_timeout`
-//! the same way.
+//!   treated as timeouts (`DHTMessageTracker.cc` catch
+//!   RecoverableException -> handleTimeoutEntry); this implementation's
+//!   [`TransactionOutcome::Error`] lets the engine run `record_timeout`
+//!   the same way.
 //!
 //! # Concurrency
 //!
@@ -37,31 +37,31 @@
 //! was added (a cap would be dead defensive code):
 //!
 //! - Registrations happen only on **our own outbound queries** with a
-//! tracking task (`engine/wire.rs send_query(task_id: Some)`);
-//! announce_peer is fire-and-forget (`task_id: None`, no entry);
-//! inbound query floods never register.
+//!   tracking task (`engine/wire.rs send_query(task_id: Some)`);
+//!   announce_peer is fire-and-forget (`task_id: None`, no entry);
+//!   inbound query floods never register.
 //! - The registration rate is engine-driven and alpha-capped: each
-//! lookup keeps at most [`super::task::ALPHA`] (= 3) queries in flight
-//! (`LookupTask::next_outgoing` gates on `in_flight >= ALPHA`), and
-//! the concurrent task population is itself bounded (bucket refresh ≤ 1
-//! lookup per stale bucket × 8 buckets, peer lookups single-flight per
-//! announce entry — `engine/state.rs` `AnnounceEntry::inflight`,
-//! bootstrap rounds ≤ entry count). Worst case is tens of entries ×
-//! ~150B ≈ a few KiB.
+//!   lookup keeps at most [`super::task::ALPHA`] (= 3) queries in flight
+//!   (`LookupTask::next_outgoing` gates on `in_flight >= ALPHA`), and
+//!   the concurrent task population is itself bounded (bucket refresh ≤ 1
+//!   lookup per stale bucket × 8 buckets, peer lookups single-flight per
+//!   announce entry — `engine/state.rs` `AnnounceEntry::inflight`,
+//!   bootstrap rounds ≤ entry count). Worst case is tens of entries ×
+//!   ~150B ≈ a few KiB.
 //! - Reclamation has no delay gap: the main loop runs the sweep every
-//! iteration and its wake deadline includes
-//! [`TransactionTable::next_deadline`], so a lost reply costs exactly
-//! `message_timeout` (10s); the parallel `route` map
-//! (`HashMap<TransactionKey, RouteTarget>`) is removed on **every**
-//! settlement path (`on_transaction_done` covers response / error /
-//! timeout / sweep / duplicate-replace) — no residue.
+//!   iteration and its wake deadline includes
+//!   [`TransactionTable::next_deadline`], so a lost reply costs exactly
+//!   `message_timeout` (10s); the parallel `route` map
+//!   (`HashMap<TransactionKey, RouteTarget>`) is removed on **every**
+//!   settlement path (`on_transaction_done` covers response / error /
+//!   timeout / sweep / duplicate-replace) — no residue.
 //! - Autosave (`emit_persist`) serializes only the K-bucket routing table
-//! (`persist.rs` `encode_table`, ≤ K×buckets nodes plus replacement
-//! candidates); transactions, routes and peer-records are never
-//! persisted, and the in-memory peer-record store has its own caps
-//! (500/key, 8192 total, 30min sanitization — `engine/wire.rs` +
-//! `engine/state.rs`), so no save/load cycle can accumulate stale
-//! HashMap entries across restarts.
+//!   (`persist.rs` `encode_table`, ≤ K×buckets nodes plus replacement
+//!   candidates); transactions, routes and peer-records are never
+//!   persisted, and the in-memory peer-record store has its own caps
+//!   (500/key, 8192 total, 30min sanitization — `engine/wire.rs` +
+//!   `engine/state.rs`), so no save/load cycle can accumulate stale
+//!   HashMap entries across restarts.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

@@ -20,16 +20,16 @@ use crate::faces::{FaceState, XorShift};
 /// and recovery-as-complete paths):
 ///
 /// - **BEP21**: broadcast the `upload_only` announce — the state
-/// transition is itself the re-advertise (BEP21 semantics; the same
-/// shape as libtorrent's state-change broadcast `torrent::
+///   transition is itself the re-advertise (BEP21 semantics; the same
+///   shape as libtorrent's state-change broadcast `torrent::
 /// send_upload_only`, torrent.cpp). Connections registered afterwards
-/// catch up via the registration arm's SetUploadOnly.
+///   catch up via the registration arm's SetUploadOnly.
 /// - **BEP16**: when the master switch `super_seeding`
-/// (`SeedPolicy::super_seeding`, default off) is on, create the
-/// super-seed book and mount all existing connections (matching
-/// libtorrent `torrent::set_super_seeding(on)`, torrent.cpp — the off
-/// face is unsupported locally: the switch is a task-static policy
-/// and never flips mid-run).
+///   (`SeedPolicy::super_seeding`, default off) is on, create the
+///   super-seed book and mount all existing connections (matching
+///   libtorrent `torrent::set_super_seeding(on)`, torrent.cpp — the off
+///   face is unsupported locally: the switch is a task-static policy
+///   and never flips mid-run).
 pub(super) fn enter_seeding_state(
     faces: &mut [FaceState],
     upload_only: &mut bool,

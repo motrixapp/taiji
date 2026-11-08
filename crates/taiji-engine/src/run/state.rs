@@ -483,16 +483,16 @@ impl EngineLoop {
     /// Rules (aria2 semantics ported; upstream anchors in the constant
     /// docs):
     /// - count below the threshold -> admit (the same form as
-    /// `BtRuntime.h`); the threshold is the hard cap when `hard_cap` or
-    /// seeding, the target count for leecher outbound dials;
+    ///   `BtRuntime.h`); the threshold is the hard cap when `hard_cap` or
+    ///   seeding, the target count for leecher outbound dials;
     /// - a leecher with download rate below [`PEER_REQUEST_SPEED_LIMIT`] ->
-    /// admitted anyway (`PeerReceiveHandshakeCommand.cc` /
-    /// `ActivePeerConnectionCommand.cc`: slow download means connection
-    /// count yields to supply — the structural anti-starvation guard; the
-    /// gate only tightens while the download is healthy);
+    ///   admitted anyway (`PeerReceiveHandshakeCommand.cc` /
+    ///   `ActivePeerConnectionCommand.cc`: slow download means connection
+    ///   count yields to supply — the structural anti-starvation guard; the
+    ///   gate only tightens while the download is healthy);
     /// - the seeding state (`completed`) has no rescue arm (aria2's seeder
-    /// branch has only the count gate,
-    /// `ActivePeerConnectionCommand.cc`).
+    ///   branch has only the count gate,
+    ///   `ActivePeerConnectionCommand.cc`).
     pub(super) fn admission_open(&mut self, hard_cap: bool, now: Instant) -> bool {
         let speed = self.speed_calc.calculate(now);
         // Download-healthy = seeding (no supply demand; the gate counts
@@ -542,16 +542,16 @@ pub(crate) fn admission_verdict(
 /// the constant and wrapper docs).
 ///
 /// - Threshold: `hard_cap || completed` -> hard cap; otherwise (the
-/// leecher outbound-target form) -> target count;
+///   leecher outbound-target form) -> target count;
 /// - Rescue: only for a leecher (`!completed`) with an unhealthy download,
-/// tightened to relax at most up to the hard cap (`max`), never
-/// unbounded — connection growth with no supply only burns CPU without
-/// bringing bytes; aria2's slow-download top-up is likewise count-bounded
-/// (`ActivePeerConnectionCommand.cc`: at most 5 connections per 10s,
-/// still inside the `bt-max-peers` hard cap). The anti-starvation band
-/// from target to hard cap (default 100-120; fallback 51-64) stays open
-/// during stalls (including the redial previously-connected-first band);
-/// the stall valve (`run::stall`) aims the top-up at supply.
+///   tightened to relax at most up to the hard cap (`max`), never
+///   unbounded — connection growth with no supply only burns CPU without
+///   bringing bytes; aria2's slow-download top-up is likewise count-bounded
+///   (`ActivePeerConnectionCommand.cc`: at most 5 connections per 10s,
+///   still inside the `bt-max-peers` hard cap). The anti-starvation band
+///   from target to hard cap (default 100-120; fallback 51-64) stays open
+///   during stalls (including the redial previously-connected-first band);
+///   the stall valve (`run::stall`) aims the top-up at supply.
 pub(crate) fn admission_verdict_limits(
     total: usize,
     completed: bool,
@@ -670,14 +670,14 @@ pub(crate) const PEER_REQUEST_SPEED_LIMIT: u64 = 50 * 1024;
 /// Standing of the three sources relative to the silent-endpoint ledger
 /// (the silent module's "relations" section):
 /// - `Discovery` (tracker/DHT/PEX): gated — skipped inside cooldown or
-/// backoff windows;
+///   backoff windows;
 /// - `Punch` (the ut_holepunch connect command): exempt — the introducer
-/// asserts reachability, which is fresh external evidence (the same
-/// spirit as libtorrent's tracker-reannounce count reduction,
-/// `peer_list.cpp`), and holepunch peers are often NAT peers that are
-/// silent to direct dials but alive via punch;
+///   asserts reachability, which is fresh external evidence (the same
+///   spirit as libtorrent's tracker-reannounce count reduction,
+///   `peer_list.cpp`), and holepunch peers are often NAT peers that are
+///   silent to direct dials but alive via punch;
 /// - `Redial` (the redial pool): exempt — the pool manages its own failure
-/// policy (60s base backoff, drop after 3 failures, unchanged).
+///   policy (60s base backoff, drop after 3 failures, unchanged).
 #[derive(Debug)]
 pub(super) enum DialSource {
     /// Discovery surface (tracker Peers / DHT PeersFound / ut_pex).

@@ -86,12 +86,12 @@ pub(crate) fn classify_connect_io(kind: std::io::ErrorKind) -> &'static str {
 /// high-frequency cases are sampled as a periodic summary + full failure
 /// logging):
 /// - Failures: logged in full — `peer_connect` already aggregates a target's
-/// per-transport attempts into one line (addr + the attempts' class
-/// sequence), so this sampler only counts;
+///   per-transport attempts into one line (addr + the attempts' class
+///   sequence), so this sampler only counts;
 /// - Successes: a high-frequency flood risk → counted into the periodic
-/// summary (one `dial summary` line per [`DIAL_LOG_SUMMARY_WINDOW`], only
-/// in windows with dial activity; per-target success lines stay at the
-/// existing DEBUG text "outbound connected").
+///   summary (one `dial summary` line per [`DIAL_LOG_SUMMARY_WINDOW`], only
+///   in windows with dial activity; per-target success lines stay at the
+///   existing DEBUG text "outbound connected").
 ///
 /// Process-level singleton ([`Self::global`]): one session-semantic logging
 /// state per process; tests use [`Self::with_window`] (private) to inject a
@@ -166,18 +166,18 @@ impl DialLogSampler {
 /// tracker/DHT/PEX arms).
 ///
 /// - Batch-level: the gate is decided once per batch (no state can change
-/// between batches inside the single-writer loop, so per-address
-/// re-checking within a batch is pure redundancy) — gate closed = the
-/// whole batch is skipped;
+///   between batches inside the single-writer loop, so per-address
+///   re-checking within a batch is pure redundancy) — gate closed = the
+///   whole batch is skipped;
 /// - Before dedup consumption: addresses stopped by the gate never enter
-/// the dedup table, so the next announce/PEX re-offer retries them — the
-/// backfill chain is preserved (consuming first and blocking later would
-/// leave a static tracker list unable to backfill for one 10 min dedup
-/// window after a peer leaves);
+///   the dedup table, so the next announce/PEX re-offer retries them — the
+///   backfill chain is preserved (consuming first and blocking later would
+///   leave a static tracker list unable to backfill for one 10 min dedup
+///   window after a peer leaves);
 /// - Form: leecher target gate + slow-download relief (aria2 minPeers
-/// semantics + the `--bt-request-peer-speed-limit` valve; see
-/// [`super::state::EngineLoop::admission_open`] and the constant docs) —
-/// the gate only tightens while the download is healthy.
+///   semantics + the `--bt-request-peer-speed-limit` valve; see
+///   [`super::state::EngineLoop::admission_open`] and the constant docs) —
+///   the gate only tightens while the download is healthy.
 ///
 /// Returns false = skip the whole batch (the caller short-circuits).
 pub(super) fn discovery_admission_open(state: &mut EngineLoop) -> bool {

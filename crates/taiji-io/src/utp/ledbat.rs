@@ -4,26 +4,26 @@
 //!
 //! Mechanism (full BEP-29/RFC quotes and rationale: docs/design/io.md):
 //! - reply.micro = now - peer timestamp_microseconds, echoed back in
-//! timestamp_difference_microseconds on every packet;
+//!   timestamp_difference_microseconds on every packet;
 //! - base_delay = minute-bucketed sliding minimum over the last two minutes
-//! ("Each socket keeps a sliding minimum of the lowest value for the last
-//! two minutes."); our_delay = sample - base_delay;
+//!   ("Each socket keeps a sliding minimum of the lowest value for the last
+//!   two minutes."); our_delay = sample - base_delay;
 //! - gain: delay_factor = off_target / CCONTROL_TARGET; window_factor =
-//! outstanding_packet / max_window; scaled_gain =
-//! MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor;
-//! max_window += scaled_gain. CCONTROL_TARGET = 100 ms; off_target =
-//! CCONTROL_TARGET - our_delay, so our_delay > target shrinks the window.
-//! BEP-29's closing prose sentence reverses this sign (erratum); the
-//! formula wins, matching libtorrent/libutp. MAX_CWND_INCREASE has no
-//! BEP-29 value — a local tuning knob (see [`LedbatConfig`]). Floor:
-//! "If max_window becomes less than 0, it is set to 0."
+//!   outstanding_packet / max_window; scaled_gain =
+//!   MAX_CWND_INCREASE_PACKETS_PER_RTT * delay_factor * window_factor;
+//!   max_window += scaled_gain. CCONTROL_TARGET = 100 ms; off_target =
+//!   CCONTROL_TARGET - our_delay, so our_delay > target shrinks the window.
+//!   BEP-29's closing prose sentence reverses this sign (erratum); the
+//!   formula wins, matching libtorrent/libutp. MAX_CWND_INCREASE has no
+//!   BEP-29 value — a local tuning knob (see [`LedbatConfig`]). Floor:
+//!   "If max_window becomes less than 0, it is set to 0."
 //! - slow start x2/RTT: RFC 6817 §2.2 defers to RFC 5681 §3.1 (cwnd += SMSS
-//! per ACK => doubling per RTT); initial window 2xMSS (RFC 6817 §2.5:
-//! "INIT_CWND and MIN_CWND SHOULD both be 2.");
+//!   per ACK => doubling per RTT); initial window 2xMSS (RFC 6817 §2.5:
+//!   "INIT_CWND and MIN_CWND SHOULD both be 2.");
 //! - loss: max_window x0.5 ("When a packet is lost, the max_window is
-//! multiplied by 0.5 to mimic TCP.");
+//!   multiplied by 0.5 to mimic TCP.");
 //! - timeout: max_window and packet_size reset to the smallest packet size,
-//! 150 bytes ([`MIN_PACKET_SIZE`]).
+//!   150 bytes ([`MIN_PACKET_SIZE`]).
 //!
 //! Upstream anchor mapping: docs/design/io.md
 //!

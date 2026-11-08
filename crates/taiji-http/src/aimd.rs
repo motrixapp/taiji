@@ -62,15 +62,15 @@ pub const GAIN_THRESHOLD: f64 = 0.10;
 /// this value:
 ///
 /// - the baseline rebuild window after a [`CongestionKind::Reset`]
-/// decrease (`in_recovery` set; a `Throttled` decrease always keeps the
-/// spec window — fast re-probing of a throttling source is neither
-/// polite nor effective);
+///   decrease (`in_recovery` set; a `Throttled` decrease always keeps the
+///   spec window — fast re-probing of a throttling source is neither
+///   polite nor effective);
 /// - the **cold-start first window** (the startup establishment window is
-/// isomorphic to the post-decrease rebuild window: baseline absent +
-/// optimistic probe Grow, and the window length is the startup latency).
-/// Under the 5s spec window the connection ramp spans several whole
-/// windows on a real network before reaching the cap; a 2s establishment
-/// window moves the first probe earlier.
+///   isomorphic to the post-decrease rebuild window: baseline absent +
+///   optimistic probe Grow, and the window length is the startup latency).
+///   Under the 5s spec window the connection ramp spans several whole
+///   windows on a real network before reaching the cap; a 2s establishment
+///   window moves the first probe earlier.
 ///
 /// Sample-size argument: 2s x starting connections x single-stream rate
 /// still exceeds what judging the 10% gain threshold requires — this

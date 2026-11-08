@@ -8,12 +8,12 @@
 //!
 //! * the selected variant's own playlist — [`TrackRole::Required`];
 //! * the independent audio rendition of the variant's AUDIO group
-//! (when it carries its own URI) — [`TrackRole::Required`]
-//! ("selected means required": a selected track failing fails the set);
+//!   (when it carries its own URI) — [`TrackRole::Required`]
+//!   ("selected means required": a selected track failing fails the set);
 //! * subtitle renditions of the variant's SUBTITLES group when
-//! `--media-subtitles=sidecar` — [`TrackRole::Sidecar`]:
-//! explicitly-attached side tracks degrade to completion + warning
-//! on failure (never selected-by-default content).
+//!   `--media-subtitles=sidecar` — [`TrackRole::Sidecar`]:
+//!   explicitly-attached side tracks degrade to completion + warning
+//!   on failure (never selected-by-default content).
 //!
 //! Unselected variant/rendition rows are **not downloaded** (the
 //! grading rule: unselected backup tracks are not downloaded).

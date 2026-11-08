@@ -3,9 +3,9 @@
 //! the probe could not —
 //! 1. where tier 0 is stuck (attempt/result lines + tier/scheme/elapsed);
 //! 2. who was dialed (same-line coverage for the dial arm lives in the
-//! engine transit/dial unit tests — this file focuses on the announce
-//! surface; the dial surface is engine-internal and unreachable from
-//! integration tests);
+//!    engine transit/dial unit tests — this file focuses on the announce
+//!    surface; the dial surface is engine-internal and unreachable from
+//!    integration tests);
 //! 3. why it failed (failure class + reason string).
 //!
 //! Replica shape: tier 0 = an HTTP tracker on a closed local port (the

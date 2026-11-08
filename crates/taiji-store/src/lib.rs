@@ -2,19 +2,19 @@
 //!
 //! Responsibilities:
 //! - disk writes: `write_all_at` (unix) / `seek_write` positioned writes
-//! (Windows); multi-file layout (v2-only compact / v1 / hybrid adopts the
-//! v1 layout + `.pad` placeholders); lazy-opened handles +
-//! `OpenedFileCounter`;
+//!   (Windows); multi-file layout (v2-only compact / v1 / hybrid adopts the
+//!   v1 layout + `.pad` placeholders); lazy-opened handles +
+//!   `OpenedFileCounter`;
 //! - file allocation: `none|trunc|falloc|prealloc` (Adaptive probes 4 KiB
-//! falloc);
+//!   falloc);
 //! - write cache: WrDiskCache direct translation (DataCells merged in goff
-//! order; eviction = smallest min-loss size first — aria2's largest-first
-//! eviction was removed with the min-loss eviction model);
+//!   order; eviction = smallest min-loss size first — aria2's largest-first
+//!   eviction was removed with the min-loss eviction model);
 //! - persistence: `taiji.sqlite3` (WAL, `user_version` migration ledger,
-//! single-writer PersistWriter, SHA-256 digest dedup skip-write; the
-//! `persist` module);
+//!   single-writer PersistWriter, SHA-256 digest dedup skip-write; the
+//!   `persist` module);
 //! - v2 data model: file tree, per-file piece-layer bitmaps, synthetic
-//! bitmaps.
+//!   bitmaps.
 //!
 //! Red lines: SPEC §2.1 (no global piece index; `.pad` never hits disk),
 //! §2.3 (persistence contract: single writer, dedup before write,

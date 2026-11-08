@@ -17,16 +17,16 @@
 //!
 //! Hard invariants:
 //! - block completion and steal grants are decided only at this single
-//! serial point, in message FIFO order;
+//!   serial point, in message FIFO order;
 //! - the persisted bitmap is written only through the sink; a sink
-//! failure is a task-level fault that ends the actor (handles then get
-//! `Err`, never a hang);
+//!   failure is a task-level fault that ends the actor (handles then get
+//!   `Err`, never a hang);
 //! - channel capacity = 2 x workers; a full queue backpressures the
-//! worker call sites (no unbounded queues);
+//!   worker call sites (no unbounded queues);
 //! - no `Mutex`/`RwLock` crosses an `await`: grid and queue state are
-//! actor-exclusive (message passing is the synchronization point);
+//!   actor-exclusive (message passing is the synchronization point);
 //! - a steal race can only waste bandwidth (at most one sub-block of
-//! write overshoot per steal), never corrupt already-written bytes.
+//!   write overshoot per steal), never corrupt already-written bytes.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -497,12 +497,12 @@ impl CoordinatorHandle {
 ///
 /// - `grid`: the task's block grid (`block_size` frozen);
 /// - `plan`: the static allocation plan ([`StaticPlan::build`]; its
-/// `block_size` must match the grid's — both products of one validated
-/// task configuration);
+///   `block_size` must match the grid's — both products of one validated
+///   task configuration);
 /// - `sink`: the core-injected persistence write face (the only
-/// bookkeeping entry point, see module docs);
+///   bookkeeping entry point, see module docs);
 /// - `workers`: the upper bound on task workers (channel capacity =
-/// 2 x workers).
+///   2 x workers).
 pub fn spawn(
     gid: &str,
     grid: BlockGrid,
@@ -577,18 +577,18 @@ pub fn spawn_dynamic(
 /// bookkeeping domain. Adds to the [`spawn_dynamic`] contract:
 ///
 /// - EWMA-weighted share arbitration: allocations that would exceed a
-/// source's weighted share are clamped to min-chunk (the weight =
-/// per-source rate EWMA, halved when demoted, equal before
-/// establishment; the composition formula's output is not rewritten);
+///   source's weighted share are clamped to min-chunk (the weight =
+///   per-source rate EWMA, halved when demoted, equal before
+///   establishment; the composition formula's output is not rewritten);
 /// - source demote/remove: extent failures count by windowed failure
-/// rate (see [`crate::sources`]) — 3 in the window demotes, 5
-/// removes; success reports enter the window; a demoted source
-/// recovers when windowed failures fall back below the demotion
-/// threshold;
+///   rate (see [`crate::sources`]) — 3 in the window demotes, 5
+///   removes; success reports enter the window; a demoted source
+///   recovers when windowed failures fall back below the demotion
+///   threshold;
 /// - failover: a failed extent returns to the pool via Abandon and is
-/// reallocated to surviving sources; all sources removed with pool
-/// work remaining -> [`CoordinatorHandle::acquire`] answers
-/// [`HttpError::NoSource`].
+///   reallocated to surviving sources; all sources removed with pool
+///   work remaining -> [`CoordinatorHandle::acquire`] answers
+///   [`HttpError::NoSource`].
 ///
 /// Source health snapshots are consumed via
 /// [`CoordinatorHandle::runtime_stats`]'s [`RuntimeStats::source_states`].

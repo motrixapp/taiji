@@ -6,11 +6,11 @@
 //! Layers (exactly one layer per selector expression):
 //! 1. **presets** — `best` / `best-combined` / `audio-only`;
 //! 2. **predicate subset** — `res<=1080`, `codec!=h264`, `lang=en`,
-//! `ext=mp4` (space/comma-joined; every predicate must hold);
+//!    `ext=mp4` (space/comma-joined; every predicate must hold);
 //! 3. **escape hatch** — `format_id=v0,a1` (multi-value = an
-//! **explicit multi-stream** download: the first id picks the
-//! primary variant, the rest are attached side tracks, the
-//! necessity grading applies).
+//!    **explicit multi-stream** download: the first id picks the
+//!    primary variant, the rest are attached side tracks, the
+//!    necessity grading applies).
 //!
 //! Resolution output ([`Selection`]): the primary variant URI + the
 //! explicit attached renditions (audio/subtitle URIs) + the

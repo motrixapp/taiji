@@ -425,21 +425,21 @@ pub struct TrackerActor {
 ///
 /// Two semantics worth noting:
 /// - **Duplicate announce URLs fold (first occurrence kept, exact string
-/// match)**: a magnet with repeated `tr=` entries (`tasks.rs`
-/// enumerates each) can produce two slots with the same URL —
-/// libtorrent keeps exactly one `announce_entry` per URL (multiple
-/// endpoints), so duplicate entries fold into a single slot. The fold
-/// happens at this one sink (the slot-table build), covering the
-/// magnet/SetTrackers/global-import entries; the tier event table
-/// folds in step (the halt sequence's `failed_walk` count stays
-/// consistent with the slots, so the sequence can complete). Exact
-/// string match = the same convention as announce issue; no host/port
-/// normalization (that is configuration-surface semantics, outside
-/// this module).
+///   match)**: a magnet with repeated `tr=` entries (`tasks.rs`
+///   enumerates each) can produce two slots with the same URL —
+///   libtorrent keeps exactly one `announce_entry` per URL (multiple
+///   endpoints), so duplicate entries fold into a single slot. The fold
+///   happens at this one sink (the slot-table build), covering the
+///   magnet/SetTrackers/global-import entries; the tier event table
+///   folds in step (the halt sequence's `failed_walk` count stays
+///   consistent with the slots, so the sequence can complete). Exact
+///   string match = the same convention as announce issue; no host/port
+///   normalization (that is configuration-surface semantics, outside
+///   this module).
 /// - **Slot identity tokens**: allocated from a monotonically increasing
-/// counter inside the actor; after a SetTrackers rebuild, in-flight
-/// results from the old table find no landing by token and are dropped
-/// (never mislabeled onto new-table slots).
+///   counter inside the actor; after a SetTrackers rebuild, in-flight
+///   results from the old table find no landing by token and are dropped
+///   (never mislabeled onto new-table slots).
 ///
 /// The tier event table stays at **URL level** (one entry per URL,
 /// matching the configuration/event-machine convention); the slot table
@@ -508,15 +508,15 @@ fn build_tables(
 /// Announce URL -> the slot's face set (family + whether failures are
 /// silent):
 /// - http/https or an unparseable URL -> `[(None, false)]` (a single
-/// slot, the existing convention — an unparseable URL fails as
-/// invalid-url at issue time);
+///   slot, the existing convention — an unparseable URL fails as
+///   invalid-url at issue time);
 /// - a udp literal v4/v6 -> a single face (family = the literal family;
-/// it is the URL's only carrier -> failures report as usual);
+///   it is the URL's only carrier -> failures report as usual);
 /// - a udp domain -> `[(V4, false), (V6, true)]` (dual-stack announce
-/// separately; v6 is the attached face: no AAAA / resolution failure
-/// silently skips with independent backoff and does not affect the v4
-/// face — libtorrent endpoint failure isolation,
-/// `udp_tracker_connection.cpp`).
+///   separately; v6 is the attached face: no AAAA / resolution failure
+///   silently skips with independent backoff and does not affect the v4
+///   face — libtorrent endpoint failure isolation,
+///   `udp_tracker_connection.cpp`).
 fn slot_faces(url: &str) -> Vec<(Option<ResolveFamily>, bool)> {
     let Ok(parsed) = super::http::parse_announce_url(url) else {
         return vec![(None, false)];
@@ -681,11 +681,11 @@ impl TrackerActor {
     /// events bypass the periodic gate (the interval compliance red line
     /// only constrains periodic re-announces; same as upstream):
     /// - the halt stopped sequence: aria2's halt branch has no timer gate
-    /// (`DefaultBtAnnounce.cc`; a shutdown stopped must be delivered
-    /// promptly);
+    ///   (`DefaultBtAnnounce.cc`; a shutdown stopped must be delivered
+    ///   promptly);
     /// - the completed sequence: libtorrent's `need_send_complete`
-    /// exception (`src/announce_entry.cpp`) + aria2's completed branch
-    /// has no timer gate.
+    ///   exception (`src/announce_entry.cpp`) + aria2's completed branch
+    ///   has no timer gate.
     ///
     /// The periodic/default `next_due` gate is kept as-is; the
     /// "ready-now" of Announce/Reannounce/Stop commands is implemented by

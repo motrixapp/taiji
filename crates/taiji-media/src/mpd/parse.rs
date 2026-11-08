@@ -23,20 +23,20 @@
 //!
 //! Refusals wired here (the media spec's verdict-table rows):
 //! * `@type="dynamic"` → `live_unsupported` (0.3 row; 0.4 owns
-//! the sliding window);
+//!   the sliding window);
 //! * `<ContentProtection>` — **any level, any scheme** →
-//! `drm_unsupported` (never supported; the 0.3 DASH
-//! key/decrypt consumption face is this refusal);
+//!   `drm_unsupported` (never supported; the 0.3 DASH
+//!   key/decrypt consumption face is this refusal);
 //! * body over 16MiB → `manifest_too_large` (defense in depth — the
-//! fetch face already caps; a direct library call cannot bypass);
+//!   fetch face already caps; a direct library call cannot bypass);
 //! * a `<SegmentList>` over 100 000 `<SegmentURL>` rows →
-//! `manifest_too_large` (a single list past the cap can never
-//! produce an in-cap task; the cross-period task-level cap is
-//! [`super::expand`]'s);
+//!   `manifest_too_large` (a single list past the cap can never
+//!   produce an in-cap task; the cross-period task-level cap is
+//!   [`super::expand`]'s);
 //! * every other malformed shape → `manifest_parse` (bad XML, a
-//! DOCTYPE present, no root `MPD`, no `<Period>`, a period with no
-//! `<AdaptationSet>`, unparseable numbers/durations/ranges, a
-//! wrongly-placed known element…).
+//!   DOCTYPE present, no root `MPD`, no `<Period>`, a period with no
+//!   `<AdaptationSet>`, unparseable numbers/durations/ranges, a
+//!   wrongly-placed known element…).
 //!
 //! Unknown elements and unknown attributes are **ignored** (verdict
 //! table "unknown manifest tags ignored" — forward compatibility), **whole subtrees

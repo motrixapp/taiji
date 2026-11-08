@@ -8,17 +8,17 @@
 //! command surface:
 //!
 //! 1. switching to default (rarest_first) = the engine arm accepts (the
-//! oneshot round-trip completes) and the engine stays queryable
-//! afterwards (the loop undisturbed);
+//!    oneshot round-trip completes) and the engine stays queryable
+//!    afterwards (the loop undisturbed);
 //! 2. the sequential policy accepts + is idempotent (the engine half
-//! validated here, the session/engine split validated on both sides;
-//! no silent fallback to default); streaming= accepts;
+//!    validated here, the session/engine split validated on both sides;
+//!    no silent fallback to default); streaming= accepts;
 //! 3. after switching, the engine keeps running (the policy-object swap
-//! has zero side effects — an atomic object swap inside the
-//! single-writer loop, lock-free);
+//!    has zero side effects — an atomic object swap inside the
+//!    single-writer loop, lock-free);
 //! 4. the playhead surface: a valid call returns Ok + a repeated call
-//! (advance) returns Ok; out-of-range file/position returns an
-//! explicit Err (the engine-side validation half).
+//!    (advance) returns Ok; out-of-range file/position returns an
+//!    explicit Err (the engine-side validation half).
 //!
 //! Evidence that default piece selection is behavior-unchanged lives in
 //! the unit tests (the engine::strategy decision table, the existing

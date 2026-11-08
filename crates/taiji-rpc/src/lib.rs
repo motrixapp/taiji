@@ -2,24 +2,24 @@
 //!
 //! Module map (transport base + Basic auth):
 //! - [`server`]: axum HTTP service — `POST /jsonrpc` (single / batch /
-//! system.multicall), `GET /jsonrpc` WebSocket upgrade, Basic auth
-//! gate, CORS, body limit, 1s unauthorized delay, graceful shutdown;
+//!   system.multicall), `GET /jsonrpc` WebSocket upgrade, Basic auth
+//!   gate, CORS, body limit, 1s unauthorized delay, graceful shutdown;
 //! - [`jsonrpc`]: JSON-RPC 2.0 codec (positional params only; no
-//! XML-RPC);
+//!   XML-RPC);
 //! - [`auth`]: `token:` first-parameter stripping + secret validation
-//! (aria2 RpcMethod.cc) + HTTP Basic (in-process random HMAC compare,
-//! HttpServer.cc; plaintext never lingers);
+//!   (aria2 RpcMethod.cc) + HTTP Basic (in-process random HMAC compare,
+//!   HttpServer.cc; plaintext never lingers);
 //! - [`base64`]: addTorrent first-parameter decoding (hand-rolled
-//! standard base64, RpcMethodImpl.cc counterpart; fuzz target
-//! `rpc_base64`);
+//!   standard base64, RpcMethodImpl.cc counterpart; fuzz target
+//!   `rpc_base64`);
 //! - [`dispatch`]: method dispatch, real method semantics,
-//! system.multicall RPC-layer expansion;
+//!   system.multicall RPC-layer expansion;
 //! - [`error`]: error mapping table — aria2 numeric codes + `taiji.*`
-//! string codes + HTTP status mapping, the repo-wide single source;
+//!   string codes + HTTP status mapping, the repo-wide single source;
 //! - [`guards`] (crate-internal): exposure guards — connection
-//! concurrency ledger (total 256 / per-IP 32) + auth-failure
-//! exponential backoff (1s..60s); caps/thresholds are injectable
-//! constants, not CLI knobs.
+//!   concurrency ledger (total 256 / per-IP 32) + auth-failure
+//!   exponential backoff (1s..60s); caps/thresholds are injectable
+//!   constants, not CLI knobs.
 //!
 //! Compatibility freeze: the method registration surface =
 //! `taiji_core::session::RPC_METHODS` (the promised-method table, 35

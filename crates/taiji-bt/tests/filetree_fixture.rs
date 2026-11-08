@@ -5,13 +5,13 @@
 //! algorithm, verified against libtorrent 2.1.1.0 (see
 //! tests/fixtures/README.md and hybrid_info_hash.rs). This test asserts:
 //! 1. `filetree::parse` accepts the fixture (including the per-file
-//! layer->root re-validation);
+//!    layer->root re-validation);
 //! 2. FileEntry roots/layers match the fixture bytes (hardcoded
-//! expectations taken from the fixture itself, whose infohashes are
-//! locked by the libtorrent engine);
+//!    expectations taken from the fixture itself, whose infohashes are
+//!    locked by the libtorrent engine);
 //! 3. file tree DFS order == the v1 `files` list order (minus `.pad`;
-//! BEP-47 pads exist only in the v1 layout) — the hybrid
-//! dual-representation consistency (SPEC §4.2).
+//!    BEP-47 pads exist only in the v1 layout) — the hybrid
+//!    dual-representation consistency (SPEC §4.2).
 
 use std::fs;
 use std::path::Path;

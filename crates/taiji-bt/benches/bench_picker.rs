@@ -8,11 +8,11 @@
 //! O(1) seed handling. Three scenarios:
 //!
 //! 1. `have_storm_round`: 1000 HAVEs + one 50-peer pick round (throughput
-//! = Elements(1000); criterion reports the per-HAVE amortized cost);
+//!    = Elements(1000); criterion reports the per-HAVE amortized cost);
 //! 2. `seed_cycle`: 50 HaveAll->leave cycles (the seed O(1) face,
-//! `piece_picker.cpp`);
+//!    `piece_picker.cpp`);
 //! 3. `select_round_steady`: steady-state pick rounds with no events
-//! (bucket reads vs full-order scans).
+//!    (bucket reads vs full-order scans).
 //!
 //! Inputs are deterministically constructed (fixed-seed xorshift), no
 //! IO/clock. Memory accounting (order 4B + counts 2B + bucket slot 4B =

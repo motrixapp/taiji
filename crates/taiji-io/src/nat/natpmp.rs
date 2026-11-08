@@ -6,12 +6,12 @@
 //! Structure:
 //!
 //! - pure codec [`Request::encode`]/[`decode_reply`]: total functions, no
-//! panic (the fuzz target `nat_pmp_reply` guards the same implementation);
+//!   panic (the fuzz target `nat_pmp_reply` guards the same implementation);
 //! - [`EpochTracker`]: pure state machine for §3.6 state-loss detection;
 //! - [`NatPmpClient`]: async transactions (retransmission schedule +
-//! source-address check + opcode/internal-port attribution checks); the
-//! socket is injected by the caller (tokio::net::UdpSocket; mock tests
-//! bind loopback).
+//!   source-address check + opcode/internal-port attribution checks); the
+//!   socket is injected by the caller (tokio::net::UdpSocket; mock tests
+//!   bind loopback).
 //!
 //! The full packet facts and the SPEC-vs-RFC divergence notes live in
 //! docs/design/io.md.
@@ -451,16 +451,16 @@ impl EpochPoisonGuard {
 /// Renewal delay (pure function, locked by table-driven tests).
 ///
 /// - granted == 0 => `None`: UPnP `NewLeaseDuration=0` means a permanent
-/// mapping (WANIPConnection:2 spec §2.5.16.2: '0' denotes an out-of-band
-/// permanent mapping interpreted as 604800s; §2.5.16.3 requires control
-/// points to use 1..=604800) — permanent mappings need no renewal. A
-/// NAT-PMP success reply never grants lifetime 0 (0 appears only in §3.4
-/// delete replies, which callers do not feed in).
+///   mapping (WANIPConnection:2 spec §2.5.16.2: '0' denotes an out-of-band
+///   permanent mapping interpreted as 604800s; §2.5.16.3 requires control
+///   points to use 1..=604800) — permanent mappings need no renewal. A
+///   NAT-PMP success reply never grants lifetime 0 (0 appears only in §3.4
+///   delete replies, which callers do not feed in).
 /// - granted >= 60min => 60min (the SPEC §6.8 renewal cadence; divergence
-/// noted in docs/design/io.md).
+///   noted in docs/design/io.md).
 /// - granted < 60min => granted/2 (RFC 6886 §3.3 "SHOULD begin trying to
-/// renew the mapping halfway to expiry time"; the gateway "MAY reduce the
-/// lifetime", so renewal must precede real expiry).
+///   renew the mapping halfway to expiry time"; the gateway "MAY reduce the
+///   lifetime", so renewal must precede real expiry).
 pub fn renew_delay(granted: Duration) -> Option<Duration> {
     if granted.is_zero() {
         return None;

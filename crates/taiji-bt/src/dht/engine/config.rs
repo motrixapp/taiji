@@ -34,18 +34,18 @@ pub const DHT_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// traffic model:
 ///
 /// - A legitimate single source is one Kademlia client querying this
-/// node: its lookup keeps ALPHA=3 in flight
-/// ([`crate::dht::task::ALPHA`], aria2 `DHTAbstractNodeLookupTask.h`)
-/// advancing once per RTT (tens of ms on the public internet), and this
-/// node only appears at the fringe of its candidate set — a sustained
-/// single source is single-digit pps, so 25 pps leaves several times
-/// margin and normal queries never feel the limit;
+///   node: its lookup keeps ALPHA=3 in flight
+///   ([`crate::dht::task::ALPHA`], aria2 `DHTAbstractNodeLookupTask.h`)
+///   advancing once per RTT (tens of ms on the public internet), and this
+///   node only appears at the fringe of its candidate set — a sustained
+///   single source is single-digit pps, so 25 pps leaves several times
+///   margin and normal queries never feel the limit;
 /// - A malicious single source is pinned at 25 pps (once the burst is
-/// spent), far below what one source can occupy of the demux dht
-/// channel (capacity 1024, `taiji-io/src/udp_demux.rs`) — the
-/// per-source bound forces flooding to come from many distinct sources,
-/// and distinct sources are in turn bounded by the same-scale
-/// suppression table (`query_limit::QUERY_LIMITER_MAX_SOURCES`).
+///   spent), far below what one source can occupy of the demux dht
+///   channel (capacity 1024, `taiji-io/src/udp_demux.rs`) — the
+///   per-source bound forces flooding to come from many distinct sources,
+///   and distinct sources are in turn bounded by the same-scale
+///   suppression table (`query_limit::QUERY_LIMITER_MAX_SOURCES`).
 pub const DHT_PER_SOURCE_QUERY_RATE: u32 = 25;
 
 /// Default capacity of the per-source inbound query token bucket

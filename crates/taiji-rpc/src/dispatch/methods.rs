@@ -7,17 +7,17 @@
 //! validation semantics are frozen; the routing category = the core
 //! [`RpcMethodKind`] descriptor):
 //! - immediate-semantics commands (shutdown/forceShutdown thread through
-//! to shutdown; addMetalink executes at the [`crate::metalink`]
-//! consumption seam — parse -> per-task AddUri expansion;
-//! `taiji.createTorrent` calls the `taiji_core::create` facade
-//! directly);
+//!   to shutdown; addMetalink executes at the [`crate::metalink`]
+//!   consumption seam — parse -> per-task AddUri expansion;
+//!   `taiji.createTorrent` calls the `taiji_core::create` facade
+//!   directly);
 //! - the query families (tellStatus/tellActive/tellWaiting/tellStopped/
-//! getFiles/getPeers/getServers/getUris/getOption) run through the
-//! [`QUERY_METHODS`] table-driven loop: the entry closures carry the
-//! decode shape / command construction / reply rendering, with keys
-//! and pagination semantics unchanged;
+//!   getFiles/getPeers/getServers/getUris/getOption) run through the
+//!   [`QUERY_METHODS`] table-driven loop: the entry closures carry the
+//!   decode shape / command construction / reply rendering, with keys
+//!   and pagination semantics unchanged;
 //! - the remaining methods decode and send a SessionCommand; replies
-//! are normalized to aria2 JSON by [`super::view::encode_reply`].
+//!   are normalized to aria2 JSON by [`super::view::encode_reply`].
 //!
 //! Upstream anchor mapping: docs/design/rpc.md
 
@@ -51,30 +51,30 @@ use super::view::{
 /// `createTorrent(files, outputDir, options?)`
 ///
 /// - `files`: explicit disk path strings (>=1). No directory recursion
-/// (the caller enumerates — the creator input model is an explicit
-/// file list); in-torrent relative paths and the torrent name are
-/// derived by the core facade from the common parent directory
-/// (single file = the file name).
+///   (the caller enumerates — the creator input model is an explicit
+///   file list); in-torrent relative paths and the torrent name are
+///   derived by the core facade from the common parent directory
+///   (single file = the file name).
 /// - `outputDir`: the output directory (aria2 style; the product is
-/// `<derived-name>.torrent`, overwriting same names; the directory
-/// must exist).
+///   `<derived-name>.torrent`, overwriting same names; the directory
+///   must exist).
 /// - `options` (optional dict, camelCase like the taiji.* face):
 /// - `pieceLength`: a number or numeric string, bytes (a power of two
-/// and >=16KiB; default 16384 — the BEP52 floor, the same value as
-/// the libtorrent automatic floor in `create_torrent.cpp`; an
-/// engine freedom: aria2 has no createTorrent to cross-check
-/// against);
+///   and >=16KiB; default 16384 — the BEP52 floor, the same value as
+///   the libtorrent automatic floor in `create_torrent.cpp`; an
+///   engine freedom: aria2 has no createTorrent to cross-check
+///   against);
 /// - `format`: "v1"|"v2"|"hybrid" (default "hybrid" — with
-/// libtorrent's default flags both hash sets are present, i.e.
-/// hybrid, `create_torrent.hpp`);
+///   libtorrent's default flags both hash sets are present, i.e.
+///   hybrid, `create_torrent.hpp`);
 /// - `private`: bool or "true"/"false" (BEP27);
 /// - `comment`: a string;
 /// - `announce`: a string or string array (1 = the top-level
-/// announce; >=2 = announce + announce-list with each entry its
-/// own tier, BEP12);
+///   announce; >=2 = announce + announce-list with each entry its
+///   own tier, BEP12);
 /// - `creationDate`: unix seconds (omitted by default — libtorrent's
-/// default writes the current time, `create_torrent.cpp`;
-/// omitting here keeps identical material byte-identical).
+///   default writes the current time, `create_torrent.cpp`;
+///   omitting here keeps identical material byte-identical).
 ///
 /// Synchronous return: success = written to disk + a reply with output/
 /// name/format/pieceLength/totalLength/infohashV1/infohashV2 (the

@@ -9,12 +9,12 @@
 //! Concurrency discipline:
 //! - TorrentTask exclusively owns its state (no shared locks);
 //! - subtasks (PeerTask/TrackerTask/...) are managed via
-//! `tokio::task::JoinSet`; shutdown propagates through the
-//! `CancellationToken` child-token hierarchy (Session -> Torrent ->
-//! Peer);
+//!   `tokio::task::JoinSet`; shutdown propagates through the
+//!   `CancellationToken` child-token hierarchy (Session -> Torrent ->
+//!   Peer);
 //! - control commands use `mpsc::channel(16)`: commands are
-//! low-frequency; a full channel backpressures the caller; unbounded
-//! is banned.
+//!   low-frequency; a full channel backpressures the caller; unbounded
+//!   is banned.
 
 use std::time::Duration;
 

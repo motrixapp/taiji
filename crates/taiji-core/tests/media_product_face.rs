@@ -4,28 +4,28 @@
 //! the Done close-out), asserting:
 //!
 //! * **template matrix** — the default `{id}.{ext}` shape, the
-//! six-field explicit template, the missing-field `NA` convention,
-//! the unknown-field `taiji.option.invalid` refusal with **zero
-//! segment traffic**, the sanitization rewrite (warning + the
-//! sanitized name used + the row read-back consistent), and the HLS
-//! `{title}` = `NA` anchor (no standard HLS title source — never
-//! synthesized);
+//!   six-field explicit template, the missing-field `NA` convention,
+//!   the unknown-field `taiji.option.invalid` refusal with **zero
+//!   segment traffic**, the sanitization rewrite (warning + the
+//!   sanitized name used + the row read-back consistent), and the HLS
+//!   `{title}` = `NA` anchor (no standard HLS title source — never
+//!   synthesized);
 //! * **DASH value-domain wiring** — `ProgramInformation/
 //! Title` fills `{title}` (the DASH linkage) and embeds `©nam`; the
-//! anchored-scheme thumbnail descriptor fetches and embeds `covr`;
-//! `--no-meta` disables the embed face;
+//!   anchored-scheme thumbnail descriptor fetches and embeds `covr`;
+//!   `--no-meta` disables the embed face;
 //! * **archive** — the Done close-out records the fingerprints;
-//! checkpoint ① (same URL, rotated query) skips with **zero outbound
-//! of any kind**; checkpoint ② (an alias URL serving the identical
-//! manifest) skips with the manifest fetched but **zero segment
-//! traffic**; both rides the `archive_duplicate` warning; the
-//! `taiji.clearMediaArchive` RPC clears and the same fingerprint
-//! re-downloads;
+//!   checkpoint ① (same URL, rotated query) skips with **zero outbound
+//!   of any kind**; checkpoint ② (an alias URL serving the identical
+//!   manifest) skips with the manifest fetched but **zero segment
+//!   traffic**; both rides the `archive_duplicate` warning; the
+//!   `taiji.clearMediaArchive` RPC clears and the same fingerprint
+//!   re-downloads;
 //! * **info.json** — default off; on = the frozen whitelist, the
-//! redacted manifest URL (the signed query never reaches disk), the
-//! forbidden keys structurally absent, `--no-meta` orthogonal;
+//!   redacted manifest URL (the signed query never reaches disk), the
+//!   forbidden keys structurally absent, `--no-meta` orthogonal;
 //! * **SSRF negative** — a private-network thumbnail URI is
-//! refused before any outbound to it (degrade + warning, zero hits).
+//!   refused before any outbound to it (degrade + warning, zero hits).
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

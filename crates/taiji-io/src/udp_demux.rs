@@ -13,35 +13,35 @@
 //! [`classify`] is independently testable)
 //!
 //! 1. First byte `0x64` ('d', bencode dict) -> DHT. BEP-5: "The KRPC
-//! protocol is a simple RPC mechanism consisting of bencoded
-//! dictionaries sent over UDP" — all three KRPC message kinds
-//! (query/response/error) are single dicts, so the first byte is
-//! 'd';
+//!    protocol is a simple RPC mechanism consisting of bencoded
+//!    dictionaries sent over UDP" — all three KRPC message kinds
+//!    (query/response/error) are single dicts, so the first byte is
+//!    'd';
 //! 2. first 8 bytes == the BEP-15 connect magic `0x41727101980`
-//! (big-endian) -> a UDP tracker request. Magic source: the fixed
-//! connection_id first field of the BEP-15 connect request,
-//! matching aria2 `UDPTrackerClient.h UDPT_INITIAL_CONNECTION_ID`;
+//!    (big-endian) -> a UDP tracker request. Magic source: the fixed
+//!    connection_id first field of the BEP-15 connect request,
+//!    matching aria2 `UDPTrackerClient.h UDPT_INITIAL_CONNECTION_ID`;
 //! 3. tracker **reply**-class packets (connect/announce/scrape/error
-//! replies) -> tracker. Replies carry no magic; the first 4 bytes
-//! are a big-endian action ∈ {0,1,2,3} (the BEP-15 reply format),
-//! double-checked via the action field (aria2 `UDPTrackerClient.cc
+//!    replies) -> tracker. Replies carry no magic; the first 4 bytes
+//!    are a big-endian action ∈ {0,1,2,3} (the BEP-15 reply format),
+//!    double-checked via the action field (aria2 `UDPTrackerClient.cc
 //! receiveReply` dispatches by action; `UDPTrackerRequest.h
 //! UDPT_ACT_{CONNECT=0,ANNOUNCE=1,SCRAPE=2,ERROR=3}`). Such packets
-//! are mutually exclusive with µTP shapes (first-byte low nibble:
-//! replies are always 0, µTP v1 always 1), independent of rule 4
-//! ordering. Safety hardening: also require packet length >=
-//! [`UDP_TRACKER_MIN_REPLY_LEN`] (16B, the shortest legal reply =
-//! a connect reply) — with only ">=4B and action <=3", legitimate
-//! 16B replies (truncated / empty-message errors) would classify as
-//! Drop; integrity stays the consumer's job;
+//!    are mutually exclusive with µTP shapes (first-byte low nibble:
+//!    replies are always 0, µTP v1 always 1), independent of rule 4
+//!    ordering. Safety hardening: also require packet length >=
+//!    [`UDP_TRACKER_MIN_REPLY_LEN`] (16B, the shortest legal reply =
+//!    a connect reply) — with only ">=4B and action <=3", legitimate
+//!    16B replies (truncated / empty-message errors) would classify as
+//!    Drop; integrity stays the consumer's job;
 //! 4. `(b0 >> 4) <= 4 && (b0 & 0x0f) == 1` -> µTP v1. BEP-29 "header
-//! format": the first byte's high nibble = type, low nibble =
-//! version, "The current version is 1"; type only defines
-//! ST_DATA=0 / ST_FIN=1 / ST_STATE=2 / ST_RESET=3 / ST_SYN=4
-//! (aria2 has no µTP implementation, so this branch follows the
-//! BEP text directly);
+//!    format": the first byte's high nibble = type, low nibble =
+//!    version, "The current version is 1"; type only defines
+//!    ST_DATA=0 / ST_FIN=1 / ST_STATE=2 / ST_RESET=3 / ST_SYN=4
+//!    (aria2 has no µTP implementation, so this branch follows the
+//!    BEP text directly);
 //! 5. anything else is dropped and counted
-//! ([`DemuxStatsSnapshot::dropped_classify`]).
+//!    ([`DemuxStatsSnapshot::dropped_classify`]).
 //!
 //! Classification only classifies and forwards; it does **not** parse
 //! DHT bencode / tracker packets / µTP header semantics (the design
@@ -62,25 +62,25 @@
 //! # Lifecycle
 //!
 //! - [`spawn`] produces an independent instance per (bind_addr,
-//! config) (v4/v6 dual instances = the caller spawns twice, SPEC §3.2
-//! one per family);
+//!   config) (v4/v6 dual instances = the caller spawns twice, SPEC §3.2
+//!   one per family);
 //! - after `shutdown` ([`CancellationToken`]) the task exits promptly
-//! (a ≪1s budget); dropping the last [`UdpDemuxHandle`] also ends
-//! the task (RAII semantics);
+//!   (a ≪1s budget); dropping the last [`UdpDemuxHandle`] also ends
+//!   the task (RAII semantics);
 //! - port semantics match `--listen-port`: an explicit port binds
-//! exactly; `port == 0` tries one by one from a random start within
-//! the default 6881-6999 range (aria2 `PeerListenCommand.cc
+//!   exactly; `port == 0` tries one by one from a random start within
+//!   the default 6881-6999 range (aria2 `PeerListenCommand.cc
 //! bindPort`: shuffle and take the first bindable; the default range
-//! from `OptionHandlerFactory.cc "6881-6999"`, SPEC §11 "random
-//! start");
+//!   from `OptionHandlerFactory.cc "6881-6999"`, SPEC §11 "random
+//!   start");
 //! - v6 creation point: `IPV6_V6ONLY=1` set before bind (the socket2
-//! safe wrapper, matching aria2 `SocketCore.cc`) — under the Linux
-//! ipv6(7) `bindv6only=0` default, a bare [::] is a dual-stack
-//! socket, mutually exclusive with 0.0.0.0 on the same port
-//! (EADDRINUSE), so the v6 face could never bind; with V6ONLY the
-//! v4/v6 dual instances coexist on one port. A v6 bind failure (no
-//! v6 kernel/address) propagates as-is and the caller degrades to
-//! v4 (existing semantics unchanged).
+//!   safe wrapper, matching aria2 `SocketCore.cc`) — under the Linux
+//!   ipv6(7) `bindv6only=0` default, a bare [::] is a dual-stack
+//!   socket, mutually exclusive with 0.0.0.0 on the same port
+//!   (EADDRINUSE), so the v6 face could never bind; with V6ONLY the
+//!   v4/v6 dual instances coexist on one port. A v6 bind failure (no
+//!   v6 kernel/address) propagates as-is and the caller degrades to
+//!   v4 (existing semantics unchanged).
 //!
 //! Concurrency discipline: the module is lock-free (atomics for
 //! counters), no lock across await, no unbounded channel.

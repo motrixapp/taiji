@@ -3,14 +3,14 @@
 //! Full-chain assertions (reference: aria2 `TrackerWatcherCommand.cc`
 //! announce orchestration + stop semantics):
 //! 1. tier0 (404 fake tracker) started fails -> tier1 succeeds next (BEP
-//! 12);
+//!    12);
 //! 2. event sequence: started -> ... -> Stop -> stopped -> Halted
-//! (noMoreAnnounce in the actor, `DefaultBtAnnounce.cc`) -> the engine
-//! returns `EngineEnd::Cancelled` (torn down only after the stop
-//! sequence completes);
+//!    (noMoreAnnounce in the actor, `DefaultBtAnnounce.cc`) -> the engine
+//!    returns `EngineEnd::Cancelled` (torn down only after the stop
+//!    sequence completes);
 //! 3. tracker table persistence: the tier0 row carries last_error; the
-//! tier1 row carries
-//! enabled/last_interval/next_announce_at/last_ok_at/seeds/leechers.
+//!    tier1 row carries
+//!    enabled/last_interval/next_announce_at/last_ok_at/seeds/leechers.
 
 use std::sync::Arc;
 use std::sync::Mutex;

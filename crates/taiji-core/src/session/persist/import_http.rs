@@ -695,7 +695,7 @@ impl HttpImportPlanner {
     /// 2. `out` sanitizing (the same rules as addUri) -> violation = Failed;
     /// 3. `(dir,out)` occupancy conflict -> Skip/Rename per the action;
     /// 4. assemble the row (weak resume: bitmap/progress/probe payloads
-    /// empty, the warning made explicit).
+    ///    empty, the warning made explicit).
     pub fn plan(&mut self, input: HttpPlanInput<'_>) -> HttpPlanEntry {
         let HttpPlanInput {
             task,
@@ -1000,20 +1000,20 @@ pub async fn apply_http_import(
 /// partial data and the imported bitmap are lost together. Guards (skip
 /// adoption rather than destroy data):
 /// - bitmap rows only (`block_bitmap` present): renaming a row without a
-/// bitmap would let an activation-time Restart truncate it = data
-/// destruction; the final file is left to the auto-rename semantics
-/// (the data survives the rename);
+///   bitmap would let an activation-time Restart truncate it = data
+///   destruction; the final file is left to the auto-rename semantics
+///   (the data survives the rename);
 /// - the part slot is free (`<out><suffix>` absent): if taken, the two
-/// data sets cannot be merged and both stay as-is — auto-rename is
-/// disabled for bitmap rows, so activation reports the conflict
-/// explicitly;
+///   data sets cannot be merged and both stay as-is — auto-rename is
+///   disabled for bitmap rows, so activation reports the conflict
+///   explicitly;
 /// - `<out>` is a regular file: directories and other shapes are not
-/// adopted (an explicit conflict at activation);
+///   adopted (an explicit conflict at activation);
 /// - `out` is set: unset = the name is only fixed at activation, nothing
-/// to adopt at import time;
+///   to adopt at import time;
 /// - a failed rename is not fatal: the row is stored as usual and the
-/// activation defenses take over (equivalent to the pre-fix behavior,
-/// never silently destroying data).
+///   activation defenses take over (equivalent to the pre-fix behavior,
+///   never silently destroying data).
 async fn adopt_fork_data_file(p: &PlannedHttpImport) {
     if p.row.block_bitmap.is_none() || p.row.out.is_empty() {
         return;

@@ -384,11 +384,11 @@ pub(super) async fn spawn_udp_face(
 ///
 /// - `dht.transmissionbt.com:6881`: stable AAAA; included.
 /// - `dht.libtorrent.org:25401`: the libtorrent default bootstrap
-/// (libtorrent `src/settings_pack.cpp`); long-TTL AAAA; included.
+///   (libtorrent `src/settings_pack.cpp`); long-TTL AAAA; included.
 /// - `router.bittorrent.com:6881`: no real AAAA (one resolver returns a
-/// NAT64-synthesized form); excluded.
+///   NAT64-synthesized form); excluded.
 /// - `router.utorrent.com:6881`: AAAA unstable and not a DHT service
-/// (mostly CDN edge / NAT64-synthesized answers); excluded.
+///   (mostly CDN edge / NAT64-synthesized answers); excluded.
 pub(super) const DEFAULT_BOOTSTRAP_NODES_V6: &[(&str, u16)] = &[
     ("dht.transmissionbt.com", 6881),
     ("dht.libtorrent.org", 25401),

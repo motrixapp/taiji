@@ -204,14 +204,14 @@ impl fmt::Display for IpBlock {
 ///
 /// Verdict order (local policy; the reason is the comment):
 /// 1. **Automatic bans first**: a ban is reactive evidence of measured
-/// misbehavior (hash-failure streaks / protocol violations) and is not
-/// voided by a blocklist wildcard allow;
+///    misbehavior (hash-failure streaks / protocol violations) and is not
+///    voided by a blocklist wildcard allow;
 /// 2. **Manual bans rank with automatic bans**: ranges persisted from
-/// `taiji.banAddr` with reason=manual are checked before allow rules —
-/// an explicit user ban is not exempted by a blocklist wildcard allow
-/// (same reasoning as for automatic bans);
+///    `taiji.banAddr` with reason=manual are checked before allow rules —
+///    an explicit user ban is not exempted by a blocklist wildcard allow
+///    (same reasoning as for automatic bans);
 /// 3. **allow wins** (eMule semantics): any covering allow rule permits
-/// the address;
+///    the address;
 /// 4. a deny hit rejects.
 ///
 /// Separately, the identity rules [`IpGuard::client_blocks`] are a
@@ -414,19 +414,19 @@ impl IpGuard {
 ///
 /// Branch-by-branch translation:
 /// - **same address**: ports in ascending order, then
-/// `crc32c(port_lo_be || port_hi_be)` (4B);
+///   `crc32c(port_lo_be || port_hi_be)` (4B);
 /// - **v4, different addresses**: mask by common-prefix depth (memcmp
-/// 2B/3B -> the three-row mask table
-/// `{ff,ff,55,55}/{ff,ff,ff,55}/{ff,ff,ff,ff}`; endpoint pairs within
-/// the same /16 get identical ranks — no difference within the prefix
-/// is ranking-neutral), then `crc32c(b1||b2)` (8B);
+///   2B/3B -> the three-row mask table
+///   `{ff,ff,55,55}/{ff,ff,ff,55}/{ff,ff,ff,ff}`; endpoint pairs within
+///   the same /16 get identical ranks — no difference within the prefix
+///   is ranking-neutral), then `crc32c(b1||b2)` (8B);
 /// - **v6, different addresses**: from the first differing byte `i`,
-/// `offset = max(i+1, 5)`; bytes after that are masked with `0x55` on
-/// both sides, then `crc32c(b1||b2)` (32B);
+///   `offset = max(i+1, 5)`; bytes after that are masked with `0x55` on
+///   both sides, then `crc32c(b1||b2)` (32B);
 /// - **cross-family**: the reference asserts `is_v4(e1)==is_v4(e2)`
-/// (cross-family endpoint pairs cannot interconnect) — this side
-/// returns the fixed value 0 (ranking-neutral, both directions get 0,
-/// symmetry preserved).
+///   (cross-family endpoint pairs cannot interconnect) — this side
+///   returns the fixed value 0 (ranking-neutral, both directions get 0,
+///   symmetry preserved).
 ///
 /// CRC32C reuses the BEP-42 table-driven implementation
 /// ([`crate::dht::crc32c`]; standard check values anchored) with the same
@@ -508,11 +508,11 @@ pub fn bep40_rank(local: SocketAddr, remote: SocketAddr) -> u32 {
 /// Shared IpGuard snapshot handle (arc-swap hot swap).
 ///
 /// - Read side (engine accept/dial filter points): `load()` is a lock-free
-/// snapshot read;
+///   snapshot read;
 /// - write side (core orchestration: ban activation / blocklist import /
-/// expiry sweep): `store()` replaces the whole snapshot — the immutable
-/// snapshot guarantees readers always see a consistent structure, with
-/// no invalidation notifications needed.
+///   expiry sweep): `store()` replaces the whole snapshot — the immutable
+///   snapshot guarantees readers always see a consistent structure, with
+///   no invalidation notifications needed.
 #[derive(Clone, Default)]
 pub struct IpGuardHandle(Arc<ArcSwap<IpGuard>>);
 

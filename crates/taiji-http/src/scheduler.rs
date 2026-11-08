@@ -359,50 +359,50 @@ impl GuidedConfig {
 /// ```
 ///
 /// - `remaining` = unallocated, unfinished bytes in the pool (guided
-/// semantics: each allocation takes 1/(2W) of the remaining work, W =
-/// active-worker snapshot at allocation time, including the requester, >=
-/// 1 so no division by zero);
+///   semantics: each allocation takes 1/(2W) of the remaining work, W =
+///   active-worker snapshot at allocation time, including the requester, >=
+///   1 so no division by zero);
 /// - the rate term is a **3-second lease for one worker**
-/// (`rate_ewma*3s/W`): the concrete form of "never hand out more than
-/// ~3s of work". `rate_ewma` is the per-source **aggregate** rate shared
-/// by all W workers; sizing one lease at aggregate-rate*3s would
-/// over-provision by W and inflate the lease to `W*3s` (48s+ at 16
-/// connections) — the pool moves into flight early and idle workers have
-/// nothing to claim;
+///   (`rate_ewma*3s/W`): the concrete form of "never hand out more than
+///   ~3s of work". `rate_ewma` is the per-source **aggregate** rate shared
+///   by all W workers; sizing one lease at aggregate-rate*3s would
+///   over-provision by W and inflate the lease to `W*3s` (48s+ at 16
+///   connections) — the pool moves into flight early and idle workers have
+///   nothing to claim;
 /// - EWMA unestablished (first 10s) or non-positive: the rate term is the
-/// **block granule** (the user's explicit download granularity — the
-/// engine-side equivalent of fork `min-split-size`). In the cold-start
-/// burst all workers' acquires arrive within milliseconds and the W
-/// snapshot ramps per request (the first lease sees W=1); pure guided
-/// would carve max-chunk-scale giant leases. A block-granule lease lasts
-/// seconds; the rate term takes over once the EWMA is established;
+///   **block granule** (the user's explicit download granularity — the
+///   engine-side equivalent of fork `min-split-size`). In the cold-start
+///   burst all workers' acquires arrive within milliseconds and the W
+///   snapshot ramps per request (the first lease sees W=1); pure guided
+///   would carve max-chunk-scale giant leases. A block-granule lease lasts
+///   seconds; the rate term takes over once the EWMA is established;
 /// - **thin-zone whole-block floor**: when the guided share drops below the
-/// block granule (iff `remaining < 2W*block` — the predicate is the
-/// formula itself: no new constant, invariant to block scale), the guided
-/// term is clamped back up to a whole block so tail leases stay
-/// whole-block instead of shrinking into fragments (fragmented leases
-/// amortize more request rounds per byte and bite back on tail
-/// throughput). The floor applies to the guided term **before** the min
-/// with the rate term: the rate term's 3s lease-cap semantics survive
-/// (slow sources stay capped) and the `max` composition keeps `len`
-/// monotone in `remaining` — a floor applied after the clamp would let
-/// the lower bound jump with `remaining` at the boundary and break the
-/// monotonicity argument. Endgame (remaining blocks < W) does not pass
-/// through this formula — the single sub-block arm
-/// ([`GuidedPlan::pop_single_granule`]) and the steal decision face never
-/// touch it;
+///   block granule (iff `remaining < 2W*block` — the predicate is the
+///   formula itself: no new constant, invariant to block scale), the guided
+///   term is clamped back up to a whole block so tail leases stay
+///   whole-block instead of shrinking into fragments (fragmented leases
+///   amortize more request rounds per byte and bite back on tail
+///   throughput). The floor applies to the guided term **before** the min
+///   with the rate term: the rate term's 3s lease-cap semantics survive
+///   (slow sources stay capped) and the `max` composition keeps `len`
+///   monotone in `remaining` — a floor applied after the clamp would let
+///   the lower bound jump with `remaining` at the boundary and break the
+///   monotonicity argument. Endgame (remaining blocks < W) does not pass
+///   through this formula — the single sub-block arm
+///   ([`GuidedPlan::pop_single_granule`]) and the steal decision face never
+///   touch it;
 /// - **alignment clamp = sub-block floor** (line/ledger decoupling: the
-/// engine-internal block/4, no CLI knob). The old "always >= 1 block
-/// after alignment" structural floor is gone: once W ramps up, guided
-/// shares below the block granule are no longer clamped to whole blocks
-/// and leases refine down to sub-blocks (retiring wave quantization —
-/// the 16-connection tail wave idling half its workers). Refinement
-/// holds only in the thick-pool zone; the thin zone clamps back to whole
-/// blocks. The aligned length is always >= 1 sub-block (the clamp floor
-/// is the alignment granularity; blocks are whole multiples of
-/// sub-blocks, so a whole-block floor stays whole after alignment). The
-/// only exception is the `min(len, remaining)` file-tail truncation (the
-/// last block may be partial).
+///   engine-internal block/4, no CLI knob). The old "always >= 1 block
+///   after alignment" structural floor is gone: once W ramps up, guided
+///   shares below the block granule are no longer clamped to whole blocks
+///   and leases refine down to sub-blocks (retiring wave quantization —
+///   the 16-connection tail wave idling half its workers). Refinement
+///   holds only in the thick-pool zone; the thin zone clamps back to whole
+///   blocks. The aligned length is always >= 1 sub-block (the clamp floor
+///   is the alignment granularity; blocks are whole multiples of
+///   sub-blocks, so a whole-block floor stays whole after alignment). The
+///   only exception is the `min(len, remaining)` file-tail truncation (the
+///   last block may be partial).
 fn compose_len(
     remaining: u64,
     active_workers: usize,

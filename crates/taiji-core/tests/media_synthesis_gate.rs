@@ -11,19 +11,19 @@
 //! suite therefore asserts through two instrument families:
 //!
 //! * **event-order + meter assertions** (fully deterministic): on the
-//! single six-event channel, the backfilled task's `Start` must
-//! precede the gated task's terminal (`Complete`) — with
-//! max-concurrent-downloads = 1 the backfill could not have happened
-//! unless the download slot was released **at the gate**, before the
-//! holder's terminal; the download meter stays at exactly the
-//! download budget with a *downloading* task throughout (the
-//! synthesis seat never leaks into the meter);
+//!   single six-event channel, the backfilled task's `Start` must
+//!   precede the gated task's terminal (`Complete`) — with
+//!   max-concurrent-downloads = 1 the backfill could not have happened
+//!   unless the download slot was released **at the gate**, before the
+//!   holder's terminal; the download meter stays at exactly the
+//!   download budget with a *downloading* task throughout (the
+//!   synthesis seat never leaks into the meter);
 //! * **tight-loop park catch** (an earlier pool's precedent,
-//! check.rs's "tight loop, no sleep" shape): a parked proc_wait
-//! member's tellWaiting projection is sampled at full poll rate
-//! across the millisecond-scale park window (multi-round with fresh
-//! tasks; the caught sample IS the ②/⑥ precondition, and every
-//! post-command face is durable).
+//!   check.rs's "tight loop, no sleep" shape): a parked proc_wait
+//!   member's tellWaiting projection is sampled at full poll rate
+//!   across the millisecond-scale park window (multi-round with fresh
+//!   tasks; the caught sample IS the ②/⑥ precondition, and every
+//!   post-command face is durable).
 //!
 //! Registry-count mechanics (budget boundary, flag carrying, halt
 //! semantics, the nine-domain union) are pinned table-driven in

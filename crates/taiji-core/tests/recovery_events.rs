@@ -12,14 +12,14 @@
 //! assert:
 //!
 //! 1. Converged success: Started exactly once (payload files = [1]) ->
-//! admission/promotion -> Completed exactly once (same payload
-//! order) -> download finishes and the file matches byte for byte
-//! (the whole chain really runs beneath the events — nothing
-//! synthetic).
+//!    admission/promotion -> Completed exactly once (same payload
+//!    order) -> download finishes and the file matches byte for byte
+//!    (the whole chain really runs beneath the events — nothing
+//!    synthetic).
 //! 2. Gate-stuck ("started without completed"): the seeder keeps
-//! returning bad layers -> Started fires, Completed never appears in
-//! the window (there is no failure terminal state; budget exhaustion
-//! keeps the state recovering, so completed-exactly-once stays clean).
+//!    returning bad layers -> Started fires, Completed never appears in
+//!    the window (there is no failure terminal state; budget exhaustion
+//!    keeps the state recovering, so completed-exactly-once stays clean).
 //!
 //! Protocol source: BEP 52 hash exchange (recovery's whole-file base
 //! layer fetch is the same hash-request surface as lazy fetch). The

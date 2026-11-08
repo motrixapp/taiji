@@ -24,9 +24,9 @@ use crate::jsonrpc::RpcResponse;
 /// - "HTTP"/"HTTPS": HTTP download base (rustls TLS surface);
 /// - "GZip": identity negotiation + automatic decompression;
 /// - "Metalink": metalink v4 parsing + addMetalink (feature-gated — the
-/// compiled state is presented accurately; the whole name is absent
-/// when the feature is off; new fields go into the difference
-/// declaration, aria2 ENABLE_METALINK same name and shape).
+///   compiled state is presented accurately; the whole name is absent
+///   when the feature is off; new fields go into the difference
+///   declaration, aria2 ENABLE_METALINK same name and shape).
 ///
 /// FTP/FTPS/SFTP transport adapters are not listed — no overclaiming.
 pub const ENABLED_FEATURES: &[&str] = &[

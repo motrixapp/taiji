@@ -14,21 +14,21 @@
 //! Classification table:
 //!
 //! - 206 + `Content-Range: bytes 0-0/TOTAL` → segmentable; TOTAL is
-//! the authoritative length ([`ProbeVerdict::RangeWithLength`]).
+//!   the authoritative length ([`ProbeVerdict::RangeWithLength`]).
 //! - 206 + `Content-Range: bytes 0-0/*` → Range supported, no total →
-//! single-connection degrade, no bitmap (weak)
-//! ([`ProbeVerdict::RangeNoLength`]).
+//!   single-connection degrade, no bitmap (weak)
+//!   ([`ProbeVerdict::RangeNoLength`]).
 //! - 200 + Content-Length → Range ignored → single-connection degrade
-//! ([`ProbeVerdict::NoRangeWithLength`]).
+//!   ([`ProbeVerdict::NoRangeWithLength`]).
 //! - 200 + chunked/no length → single-connection degrade, no bitmap
-//! (weak) ([`ProbeVerdict::NoRangeNoLength`]).
+//!   (weak) ([`ProbeVerdict::NoRangeNoLength`]).
 //! - 416 + `Content-Range: bytes */0` → empty file: create a 0-byte
-//! output, done ([`ProbeVerdict::EmptyFile`]).
+//!   output, done ([`ProbeVerdict::EmptyFile`]).
 //! - 416 + `Content-Range: bytes */N` (N>0) → length changed →
-//! `taiji.http.bad_range` ([`HttpError::BadRange`]).
+//!   `taiji.http.bad_range` ([`HttpError::BadRange`]).
 //! - Content-Encoding != identity → Range semantics unknowable →
-//! single-connection degrade + self-decompression; bitmap off
-//! ([`ProbeVerdict::Encoded`]).
+//!   single-connection degrade + self-decompression; bitmap off
+//!   ([`ProbeVerdict::Encoded`]).
 //!
 //! The Content-Encoding rule outranks status-shape classification
 //! inside the 200/206 arms: even a 206+TOTAL answer cannot map bytes

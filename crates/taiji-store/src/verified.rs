@@ -3,15 +3,15 @@
 //!
 //! Hard invariant: no byte reaches disk before verification passes.
 //! - A piece whose bytes are complete is verified at once: pass -> cells
-//! written in goff order; fail -> cells dropped, piece reset for
-//! refetch (`PieceFailed`).
+//!   written in goff order; fail -> cells dropped, piece reset for
+//!   refetch (`PieceFailed`).
 //! - Cache overflow evicting an unverified piece = destroy-and-refetch
-//! (`PieceAbortedUnverified`), never a disk write.
+//!   (`PieceAbortedUnverified`), never a disk write.
 //! - The unverified spill area ([`crate::spill`], present only when the
-//! switch attaches it) is the single sanctioned bypass: a cache-full
-//! victim is staged in the sidecar (the main data files still hold
-//! zero unverified bytes) and read back at assembly; outside the
-//! budget it falls back to destroy-and-refetch (same semantics).
+//!   switch attaches it) is the single sanctioned bypass: a cache-full
+//!   victim is staged in the sidecar (the main data files still hold
+//!   zero unverified bytes) and read back at assembly; outside the
+//!   budget it falls back to destroy-and-refetch (same semantics).
 //!
 //! Upstream anchor mapping: docs/design/store.md
 
@@ -84,29 +84,29 @@ pub fn write_coalesce_enabled() -> bool {
 /// splits the lock by domain:
 ///
 /// - **Positioned-write hot path** ([`Self::write_batch`]): the
-/// concurrent face (unix, switch on) executes under the **read lock**
-/// — `pwrite` at different offsets on one fd is safe (POSIX; see
-/// `PLATFORM_CONCURRENT_PWRITE`). Cross-validation: libtorrent's mmap
-/// backend writes are plain memcpy with no write-back queue, and its
-/// pread backend merges contiguous blocks into single pwritev calls —
-/// the same zero-global-write-serialization philosophy in equivalent
-/// form under verify-before-disk. Piece goff spans never overlap
-/// (pipeline invariant) and a piece's cells are written by one worker
-/// in goff order — per-piece write order is unchanged; interleaving
-/// happens only at piece boundaries.
+///   concurrent face (unix, switch on) executes under the **read lock**
+///   — `pwrite` at different offsets on one fd is safe (POSIX; see
+///   `PLATFORM_CONCURRENT_PWRITE`). Cross-validation: libtorrent's mmap
+///   backend writes are plain memcpy with no write-back queue, and its
+///   pread backend merges contiguous blocks into single pwritev calls —
+///   the same zero-global-write-serialization philosophy in equivalent
+///   form under verify-before-disk. Piece goff spans never overlap
+///   (pipeline invariant) and a piece's cells are written by one worker
+///   in goff order — per-piece write order is unchanged; interleaving
+///   happens only at piece boundaries.
 /// - **Non-write operations** ([`Self::with_exclusive`]):
-/// open/create/truncate/allocate/fsync/fence points keep the
-/// exclusive lock (red line: zero crash-recovery regression, fsync
-/// semantics unchanged).
+///   open/create/truncate/allocate/fsync/fence points keep the
+///   exclusive lock (red line: zero crash-recovery regression, fsync
+///   semantics unchanged).
 /// - **Platform domain**: the Windows write hot path always takes the
-/// write lock (`seek_write` is not thread-safe; same order as the old
-/// shape).
+///   write lock (`seek_write` is not thread-safe; same order as the old
+///   shape).
 /// - **Switch defaults off** (measured decision, see the
-/// [`parallel_writes_env`] note): `BH_PARALLEL_WRITES=1` opts into
-/// the concurrent face; default/explicit off -> writes take the
-/// write lock = the old global-mutex shape (bit-identical behavior;
-/// the explicit assembly point [`Self::with_parallel_writes`] serves
-/// tests/gating).
+///   [`parallel_writes_env`] note): `BH_PARALLEL_WRITES=1` opts into
+///   the concurrent face; default/explicit off -> writes take the
+///   write lock = the old global-mutex shape (bit-identical behavior;
+///   the explicit assembly point [`Self::with_parallel_writes`] serves
+///   tests/gating).
 ///
 /// All locks are synchronous std locks, never held across `await` (the
 /// workers are blocking threads).

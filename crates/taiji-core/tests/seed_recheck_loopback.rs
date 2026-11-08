@@ -5,18 +5,18 @@
 //!
 //! Scenario (loopback form of the real-swarm acceptance):
 //! 1. generate a payload directory (2 pieces x 16KiB of real content) +
-//! a real v1 metainfo (measured SHA-1 piece hashes);
+//!    a real v1 metainfo (measured SHA-1 piece hashes);
 //! 2. the taiji daemon (SessionActor + sqlite) runs `addTorrent`
-//! pointing at the **already-complete payload directory** — before
-//! the fix: status stayed active, completedLength stayed 0, the
-//! bitfield stayed zero (initial verification never ran); after the
-//! fix: an initial full verification -> `completedLength ==
+//!    pointing at the **already-complete payload directory** — before
+//!    the fix: status stayed active, completedLength stayed 0, the
+//!    bitfield stayed zero (initial verification never ran); after the
+//!    fix: an initial full verification -> `completedLength ==
 //! totalLength` -> seeding per `seed_after_complete`;
 //! 3. a mini-leecher (same shape as seed_ops `pull_all_blocks`:
-//! handshake -> interested -> unchoke -> real request/piece pulls)
-//! drains the full payload from the taiji seeding surface ->
-//! tellStatus `uploadLength > 0` (the upload counter growing with a
-//! peer is direct evidence of seeding).
+//!    handshake -> interested -> unchoke -> real request/piece pulls)
+//!    drains the full payload from the taiji seeding surface ->
+//!    tellStatus `uploadLength > 0` (the upload counter growing with a
+//!    peer is direct evidence of seeding).
 //!
 //! The forceRecheck surface is covered by the companion case in this
 //! file, `force_recheck_clears_corrupt_piece_and_restores_after_repair`

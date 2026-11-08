@@ -103,19 +103,19 @@ fn switch_on(env: &str) -> bool {
 /// certify itself:
 ///
 /// 1. On piece failure, record per-block `{block -> (peer, digest)}`
-/// (locally the verify worker produces per-block SHA-1 before the
-/// job's cell is destroyed — [`taiji_store::verified::
+///    (locally the verify worker produces per-block SHA-1 before the
+///    job's cell is destroyed — [`taiji_store::verified::
 /// PieceJob::failed_block_digests`]; the upstream reference reads back
-/// from disk — an intentional divergence: upstream persists data
-/// first so it reads disk, while here verification precedes writing
-/// and failed-piece data lives only in the in-memory cell; the
-/// evidence is equivalent with one less disk IO);
+///    from disk — an intentional divergence: upstream persists data
+///    first so it reads disk, while here verification precedes writing
+///    and failed-piece data lives only in the in-memory cell; the
+///    evidence is equivalent with one less disk IO);
 /// 2. The same peer giving two different digests for the same block
-/// (each failure records its own) => at least one is bad — ban +
-/// disconnect immediately (`smart_ban.cpp`);
+///    (each failure records its own) => at least one is bad — ban +
+///    disconnect immediately (`smart_ban.cpp`);
 /// 3. When the piece later passes, compare per block — a peer whose
-/// recorded digest mismatches the good data is the bad-data source;
-/// ban + disconnect.
+///    recorded digest mismatches the good data is the bad-data source;
+///    ban + disconnect.
 ///
 /// Division of labor with the sliding-window ban (coexisting, not
 /// alternatives): the window treats repeated failure (a count dimension,

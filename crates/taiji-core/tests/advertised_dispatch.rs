@@ -17,17 +17,17 @@
 //! Engine + a single controlled inbound peer (2 pieces x 16 KiB, one
 //! block per piece):
 //! - **silent peer** (no bitfield/HAVE) -> zero request frames within
-//! the window;
+//!   the window;
 //! - **bitfield advertising only piece 1** -> requests land only on
-//! piece 1; unadvertised piece 0 gets zero requests (old behavior:
-//! blind-picking piece 0 is the regression this test pins);
+//!   piece 1; unadvertised piece 0 gets zero requests (old behavior:
+//!   blind-picking piece 0 is the regression this test pins);
 //! - **HAVE advertising only piece 0** -> requests land only on piece 0
-//! (HAVE enters the candidate set immediately);
+//!   (HAVE enters the candidate set immediately);
 //! - **single-peer end to end**: bitfield {1} -> serve piece 1 -> after
-//! piece 1 settles send HAVE(0) -> engine requests piece 0
-//! immediately -> serve -> EngineEnd::Completed — every piece comes
-//! from that peer, and piece-0 requests are asserted to happen only
-//! after HAVE(0).
+//!   piece 1 settles send HAVE(0) -> engine requests piece 0
+//!   immediately -> serve -> EngineEnd::Completed — every piece comes
+//!   from that peer, and piece-0 requests are asserted to happen only
+//!   after HAVE(0).
 
 use std::sync::Arc;
 use std::time::Duration;

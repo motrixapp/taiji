@@ -165,13 +165,13 @@ const MAX_SO_ENTRIES: u64 = 1 << 20;
 /// # Validation (design tightening: ascending check + explicit rejection)
 ///
 /// - the expanded sequence must be **strictly ascending**: out of order
-/// (`2,1`), duplicates (`0,0`), and overlapping or touching ranges
-/// (`0-2,1-3`, `0-2,2-4`) are all rejected;
+///   (`2,1`), duplicates (`0,0`), and overlapping or touching ranges
+///   (`0-2,1-3`, `0-2,2-4`) are all rejected;
 /// - empty strings/items (`0,,2`, trailing comma), non-decimal characters,
-/// whitespace, signs, u32 overflow, and inverted ranges (`8-6`) are all
-/// explicit errors;
+///   whitespace, signs, u32 overflow, and inverted ranges (`8-6`) are all
+///   explicit errors;
 /// - expansion is capped at [`MAX_SO_ENTRIES`] entries: a range that would
-/// push the sequence past the cap is rejected **before** allocating.
+///   push the sequence past the cap is rejected **before** allocating.
 ///
 /// BEP53 defines no ordering or error surface; this function tightens it by
 /// design. The "append download to existing indices" behavior (BEP53 §3)
@@ -315,19 +315,19 @@ fn base32_decode_20(s: &[u8]) -> Option<[u8; 20]> {
 /// parse_endpoint`; see the module docs):
 ///
 /// - the value has already been percent-decoded (magnet.cc decodes all
-/// values); parsed here as UTF-8 text (non-UTF-8 = invalid, lenient
-/// None);
+///   values); parsed here as UTF-8 text (non-UTF-8 = invalid, lenient
+///   None);
 /// - leading/trailing ASCII whitespace is trimmed;
 /// - `[` prefix = IPv6: a `]` must close the bracket (missing = invalid),
-/// followed immediately by `:port`; the address is parsed strictly as an
-/// IPv6 literal;
+///   followed immediately by `:port`; the address is parsed strictly as an
+///   IPv6 literal;
 /// - otherwise IPv4: the first `:` splits host/port; the address is parsed
-/// strictly as an IPv4 literal — hosts are IP literals only, **no DNS**
-/// (direct-connect semantics, same as the reference);
+///   strictly as an IPv4 literal — hosts are IP literals only, **no DNS**
+///   (direct-connect semantics, same as the reference);
 /// - the port must be all-decimal and in 1..=65535. One deliberate
-/// tightening vs the reference: `atoi` accepts truncated trailing garbage
-/// (`6881x` -> 6881); here the whole string must be numeric (direct
-/// addresses do not tolerate dirty data).
+///   tightening vs the reference: `atoi` accepts truncated trailing garbage
+///   (`6881x` -> 6881); here the whole string must be numeric (direct
+///   addresses do not tolerate dirty data).
 fn parse_xpe(raw: &[u8]) -> Option<std::net::SocketAddr> {
     let s = std::str::from_utf8(raw).ok()?;
     let s = s.trim_matches(|c: char| c.is_ascii_whitespace());

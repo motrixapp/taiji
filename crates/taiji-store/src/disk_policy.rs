@@ -199,16 +199,16 @@ impl DiskPolicy {
 /// flushing (IO fairness).
 ///
 /// - Capacity = 1s of quota (a full bucket never accumulates across
-/// seconds — the burst ceiling is exactly `io_ops_per_sec`).
+///   seconds — the burst ceiling is exactly `io_ops_per_sec`).
 /// - `try_acquire` is deterministic under injected time;
-/// [`IoGate::acquire`] is the async wrapper (sleep-and-retry; no lock
-/// held across an await — the std Mutex only guards the state
-/// read/update).
+///   [`IoGate::acquire`] is the async wrapper (sleep-and-retry; no lock
+///   held across an await — the std Mutex only guards the state
+///   read/update).
 /// - Fairness = **quota** (reads and writes share one bucket; neither
-/// side can hold a burst larger than 1s of quota) + **staggered
-/// cadence** (flushes are periodic events, naturally offset from read
-/// requests). No per-request round-robin: BT read traffic is naturally
-/// bursty, and queueing buys less than its complexity costs.
+///   side can hold a burst larger than 1s of quota) + **staggered
+///   cadence** (flushes are periodic events, naturally offset from read
+///   requests). No per-request round-robin: BT read traffic is naturally
+///   bursty, and queueing buys less than its complexity costs.
 #[derive(Debug)]
 pub struct IoGate {
     /// None = unlimited (zero-overhead passthrough for the throughput

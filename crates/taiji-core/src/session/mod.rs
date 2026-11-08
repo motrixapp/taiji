@@ -3,42 +3,42 @@
 //!
 //! Module map:
 //! - [`command`]: the frozen SessionCommand/CommandReply (typed
-//! payloads) + re-exports of the method face [`RPC_METHODS`] (the
-//! vocabulary single point lives in taiji-domain);
+//!   payloads) + re-exports of the method face [`RPC_METHODS`] (the
+//!   vocabulary single point lives in taiji-domain);
 //! - [`view`]: task status views and DownloadResult table payloads;
 //! - [`options`]: global/per-task option subsets (the getGlobalOption
-//! echo; rpc-secret never appears) + changeUri tracker transforms;
+//!   echo; rpc-secret never appears) + changeUri tracker transforms;
 //! - [`limits`]: rate-limit execution face handles (shared global
-//! bucket + arc-swap snapshots + per-torrent chained-set assembly);
+//!   bucket + arc-swap snapshots + per-torrent chained-set assembly);
 //! - [`queue`]: the queue/DownloadResult bookkeeping state machine
-//! (pure data, a direct translation of RequestGroupMan, table-driven
-//! tests);
+//!   (pure data, a direct translation of RequestGroupMan, table-driven
+//!   tests);
 //! - [`events`]: SessionEvent/EventKind six events + the broadcast(256)
-//! bus (the event face);
+//!   bus (the event face);
 //! - [`persist`]: the persistence assembly face (torrent/torrent_file
-//! row construction, config_json, saveSession text export; pure
-//! functions);
+//!   row construction, config_json, saveSession text export; pure
+//!   functions);
 //! - [`backend_contract`]: the explicit per-family task-backend
-//! contract (live-read/row/control surfaces + the first-class
-//! verification-position field; the new-family onboarding
-//! checklist);
+//!   contract (live-read/row/control surfaces + the first-class
+//!   verification-position field; the new-family onboarding
+//!   checklist);
 //! - [`http`]: the HTTP task persistence face (recovery read path /
-//! snapshot pipeline / resume verdicts);
+//!   snapshot pipeline / resume verdicts);
 //! - [`actor`]: the SessionActor main loop (spawns engine/magnet/
-//! metadata fetch + lifecycle commands + the option face + the
-//! six-event publish points + bootstrap/persistence/saveSession).
+//!   metadata fetch + lifecycle commands + the option face + the
+//!   six-event publish points + bootstrap/persistence/saveSession).
 //!
 //! Concurrency discipline:
 //! - SessionActor exclusively owns the GID allocator, the queue, and
-//! the task table (lock-free);
+//!   the task table (lock-free);
 //! - command channel `mpsc::channel(64)` + internal event
-//! `mpsc::channel(64)`: a full channel backpressures the caller (the
-//! RPC layer awaits); unbounded is banned;
+//!   `mpsc::channel(64)`: a full channel backpressures the caller (the
+//!   RPC layer awaits); unbounded is banned;
 //! - replies go over oneshot (single-shot, bounded); shutdown
-//! propagates through the `CancellationToken` hierarchy;
+//!   propagates through the `CancellationToken` hierarchy;
 //! - the main loop does zero disk IO: metainfo parsing / EngineConfig
-//! assembly run in `spawn_blocking`; persistence belongs to
-//! PersistWriter.
+//!   assembly run in `spawn_blocking`; persistence belongs to
+//!   PersistWriter.
 
 mod actor;
 /// The explicit per-family task-backend contract: live-read / row-persistence / control

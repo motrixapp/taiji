@@ -3,15 +3,15 @@
 //! the faces **from one source** —
 //!
 //! 1. the declaration table (`DECLARED_OPTION_DIFFS`, the core single
-//! source — the keys are taiji capability extensions, not aria2
-//! names),
+//!    source — the keys are taiji capability extensions, not aria2
+//!    names),
 //! 2. the runtime name lists (the CLI `--max-concurrent-seeds` /
-//! `--max-concurrent-checks` / `--media-synthesis-concurrency` flag
-//! surface + the getGlobalOption echo; the conf/completions faces
-//! are pinned to the CLI surface by the in-crate key-surface lock
-//! tests),
+//!    `--max-concurrent-checks` / `--media-synthesis-concurrency` flag
+//!    surface + the getGlobalOption echo; the conf/completions faces
+//!    are pinned to the CLI surface by the in-crate key-surface lock
+//!    tests),
 //! 3. the diff declaration document (`docs/rpc-api-diff.md`, the §3
-//! four-pool budget trio entry).
+//!    four-pool budget trio entry).
 //!
 //! A name on one face but missing another turns red here (the drift
 //! the card's "three-face key-surface consistency" acceptance

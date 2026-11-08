@@ -364,16 +364,16 @@ const PROMISED_TAIJI_BARE_EXTENSIONS: &[&str] = &["forceRecheck"];
 /// are set-equal (53 names = 40 reference − 4 non-promised + 16 `taiji.*`
 /// named + 1 bare-name extension).
 /// - Promise = aria2 reference registry − the 4 non-promised names + 16
-/// `taiji.*` extensions (addTracker/removeTracker; addUriWithCookies/
-/// setTaskCookies are canonical-only, no aria2.* aliases) + the bare
-/// extension (forceRecheck); addMetalink joins with the `metalink`
-/// feature.
+///   `taiji.*` extensions (addTracker/removeTracker; addUriWithCookies/
+///   setTaskCookies are canonical-only, no aria2.* aliases) + the bare
+///   extension (forceRecheck); addMetalink joins with the `metalink`
+///   feature.
 /// - Compat face = `aria2.` prefix projection of bare names + verbatim
-/// entries (system.*/taiji.*); the 4 non-promised names never appear;
-/// the canonical face never leaks aria2 names.
+///   entries (system.*/taiji.*); the 4 non-promised names never appear;
+///   the canonical face never leaks aria2 names.
 /// - `canonical_method` alias normalization: bare/`taiji.X` always
-/// accepted, `aria2.X` only in compat mode (one face at a
-/// time).
+///   accepted, `aria2.X` only in compat mode (one face at a
+///   time).
 #[test]
 fn promise_table_matches_method_registry_exactly() {
     // Expected promise set (bare + system.* + taiji.*; feature gate added separately).

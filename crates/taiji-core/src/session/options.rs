@@ -1451,13 +1451,13 @@ pub const DECLARED_OPTION_DIFFS: &[(&str, &str)] = &[
 /// declarations and one of the whitelist-check bases for the full diff).
 /// `(name, declaration basis)`. Discipline:
 /// - before any name enters the acceptance face it must first migrate
-/// into [`ARIA2_OPTION_NAMES`]/[`DECLARED_OPTION_DIFFS`] with effect
-/// semantics — "declared non-accepted yet accepted" is pinned red by
-/// the diff tests (the two tables and the acceptance face are pairwise
-/// disjoint);
+///   into [`ARIA2_OPTION_NAMES`]/[`DECLARED_OPTION_DIFFS`] with effect
+///   semantics — "declared non-accepted yet accepted" is pinned red by
+///   the diff tests (the two tables and the acceptance face are pairwise
+///   disjoint);
 /// - the table only holds aria2 reference names (literal prefs.cc
-/// `makePref` names); taiji-named but unwired extensions live in
-/// [`DECLARED_UNWIRED_OPTION_NAMES`].
+///   `makePref` names); taiji-named but unwired extensions live in
+///   [`DECLARED_UNWIRED_OPTION_NAMES`].
 pub const DECLARED_NON_ACCEPTED_OPTION_NAMES: &[(&str, &str)] = &[
     // Fixed HTTP transport behavior (keys not accepted — behavior stance
     // declarations). The three domain-2 names (referer/https-proxy/
@@ -3152,12 +3152,12 @@ const WINDOWS_RESERVED_STEMS: &[&str] = &[
 /// out the `--out` domain):
 ///
 /// - Reserved device-name stems: `CON` and `CON.iso` both match (stem =
-/// the segment before the first `.`, case-insensitive) — the Win32
-/// desktop API compatibility layer rejects/rewrites the extension
-/// forms too;
+///   the segment before the first `.`, case-insensitive) — the Win32
+///   desktop API compatibility layer rejects/rewrites the extension
+///   forms too;
 /// - Trailing `.` or space: Win32 silently strips them on write -> an
-/// accidental rename + a collision face for multiple tasks on the same
-/// (dir,out).
+///   accidental rename + a collision face for multiple tasks on the same
+///   (dir,out).
 ///
 /// Cross-platform consistent check (not cfg(windows)): names produced on
 /// Linux/macOS and consumed on Windows are protected equally; the
@@ -3189,18 +3189,18 @@ pub const MAX_GLOBAL_TRACKERS: usize = 1024;
 ///
 /// Merge semantics (cross-checked against the read-only reference):
 /// - the per-torrent table is kept wholesale at the front, tier
-/// structure and order untouched — BEP12 tier order is priority order,
-/// and built-in/manual entries outrank global supplements;
+///   structure and order untouched — BEP12 tier order is priority order,
+///   and built-in/manual entries outrank global supplements;
 /// - global URLs each become an **independent tier** appended at the end
-/// (aria2 `addAnnounceUri`, a direct translation of
-/// `bittorrent_helper.cc`: each URI pushes back its own layer);
+///   (aria2 `addAnnounceUri`, a direct translation of
+///   `bittorrent_helper.cc`: each URI pushes back its own layer);
 /// - union dedup: a global URL already present in any existing tier is
-/// skipped (aria2 has no such step — its bt-tracker is not cumulative;
-/// this is an explicit extension required by the union-import
-/// semantics);
+///   skipped (aria2 has no such step — its bt-tracker is not cumulative;
+///   this is an explicit extension required by the union-import
+///   semantics);
 /// - an empty global set = the identity transform (returns a table
-/// equivalent to the input; zero behavior change for existing
-/// callers).
+///   equivalent to the input; zero behavior change for existing
+///   callers).
 pub fn merge_global_trackers(
     per_torrent: &[(usize, String)],
     global: &[String],
@@ -3230,18 +3230,18 @@ pub fn merge_global_trackers(
 /// **independent tier** (BEP12, one layer per URL; aligns with the
 /// global import semantics of [`merge_global_trackers`]):
 /// - dedup: empty URLs and URLs already in the table are skipped (not
-/// counted in added; same rule as union import — repeated adds are
-/// idempotent);
+///   counted in added; same rule as union import — repeated adds are
+///   idempotent);
 /// - with `position`: insert at tier index `position` (0-based, clamped
-/// to the table end; existing tiers shift down — BEP12 tier order is
-/// priority order, so the insertion point is the priority position);
-/// default = append at the end (tier numbers continue from max+1; an
-/// isomorphic translation of aria2 `addAnnounceUri`,
-/// `bittorrent_helper.cc`);
+///   to the table end; existing tiers shift down — BEP12 tier order is
+///   priority order, so the insertion point is the priority position);
+///   default = append at the end (tier numbers continue from max+1; an
+///   isomorphic translation of aria2 `addAnnounceUri`,
+///   `bittorrent_helper.cc`);
 /// - returns (new table, added = the number actually inserted). The new
-/// table's tier numbers are compacted (0..n), matching the magnet `tr`
-/// order semantics (existing table invariants: one URL per layer,
-/// tiers ascending).
+///   table's tier numbers are compacted (0..n), matching the magnet `tr`
+///   order semantics (existing table invariants: one URL per layer,
+///   tiers ascending).
 pub fn add_trackers(
     tiers: &[(usize, String)],
     urls: &[String],

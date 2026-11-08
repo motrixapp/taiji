@@ -12,15 +12,15 @@
 //! # Interpretation regimes (explains the two seeder-count readings)
 //!
 //! - **Narrow supply (4 seeders)**: aggregate in-flight demand ≈ the
-//! write-cache capacity, zero eviction — the reading is the download
-//! stack's end-to-end ceiling.
+//!   write-cache capacity, zero eviction — the reading is the download
+//!   stack's end-to-end ceiling.
 //! - **Wide supply (32+ seeders)**: aggregate in-flight demand (peers x
-//! adaptive request window) far exceeds the 16MiB write cache ->
-//! eviction churn; even with the cache enlarged until eviction is
-//! zero, the reading stays pinned — the bottleneck is **demand-side
-//! dispatch pacing** (engine dispatch / request window), not the
-//! storage segment. Do not quote this regime's numbers as a
-//! storage/verify ceiling.
+//!   adaptive request window) far exceeds the 16MiB write cache ->
+//!   eviction churn; even with the cache enlarged until eviction is
+//!   zero, the reading stays pinned — the bottleneck is **demand-side
+//!   dispatch pacing** (engine dispatch / request window), not the
+//!   storage segment. Do not quote this regime's numbers as a
+//!   storage/verify ceiling.
 //!
 //! # Reproduction (release required — debug-mode hashing is an order of
 //! magnitude slower and numbers are meaningless)

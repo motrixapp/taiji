@@ -3,18 +3,18 @@
 //! HLS source (the established fixture kit), asserting:
 //!
 //! * the full-phase run (addMedia → resolving → downloading →
-//! processing → verifying → done) with the media sub-dictionary's
-//! phase/track/staging/output projections and the media_format row;
+//!   processing → verifying → done) with the media sub-dictionary's
+//!   phase/track/staging/output projections and the media_format row;
 //! * pause phase memory (a Processing-phase pause lands
-//! `paused`+`phase_detail=processing`; unpause idempotently
-//! re-runs to done);
+//!   `paused`+`phase_detail=processing`; unpause idempotently
+//!   re-runs to done);
 //! * the Error→unpause re-resolve arm (a `not_media` entry errors;
-//! unpause reopens the row to `resolving`);
+//!   unpause reopens the row to `resolving`);
 //! * the recovery matrix (an actor killed mid-downloading resumes on
-//! the same DB and completes; paused/error rows restart intact);
+//!   the same DB and completes; paused/error rows restart intact);
 //! * the probe action face's governance (TTL expiry `probe_expired`,
-//! per-origin rate limit, token anti-forgery: a fabricated token or
-//! a URL-mismatched token never substitutes a snapshot);
+//!   per-origin rate limit, token anti-forgery: a fabricated token or
+//!   a URL-mismatched token never substitutes a snapshot);
 //! * getGlobalStat/numActive counting media tasks.
 //!
 //! Native-only synthesis path (the fixture is fMP4 with init

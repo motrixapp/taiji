@@ -2,24 +2,24 @@
 //! [`UtpStream`] handle surface.
 //!
 //! - Consumes the uTP inbound channel from [`crate::udp_demux`] (uTP
-//! packets are already classified by demux; this layer only does
-//! table-lookup dispatch + SYN creation);
+//!   packets are already classified by demux; this layer only does
+//!   table-lookup dispatch + SYN creation);
 //! - Route key = (peer address, header conn_id): BEP-29 "connection_id" —
-//! "Each socket has one connection ID for sending packets and a different
-//! connection ID for receiving packets". The peer's send ID is our
-//! receive ID, so looking up by the header conn_id hits our receive
-//! channel;
+//!   "Each socket has one connection ID for sending packets and a different
+//!   connection ID for receiving packets". The peer's send ID is our
+//!   receive ID, so looking up by the header conn_id hits our receive
+//!   channel;
 //! - SYN without a table entry => create an inbound connection (acceptor
-//! initial values in conn::Role::Acceptor, per BEP-29 "connection setup")
-//! and push it to the accept queue; core wiring pops (peer address,
-//! [`UtpStream`]) and feeds the bt::peer accept path, converging with
-//! TCP inbound;
+//!   initial values in conn::Role::Acceptor, per BEP-29 "connection setup")
+//!   and push it to the accept queue; core wiring pops (peer address,
+//!   [`UtpStream`]) and feeds the bt::peer accept path, converging with
+//!   TCP inbound;
 //! - SYN with a table entry => forward to the existing connection (the
-//! connection itself applies the BEP-29 "connection setup" collision
-//! semantics: ignore / resend SYN-ACK while in SynRecv);
+//!   connection itself applies the BEP-29 "connection setup" collision
+//!   semantics: ignore / resend SYN-ACK while in SynRecv);
 //! - Outbound connections ([`UtpListenerHandle::connect`]) register into
-//! the same route table, so inbound packets of a bidirectional
-//! connection always reach the local driver.
+//!   the same route table, so inbound packets of a bidirectional
+//!   connection always reach the local driver.
 //!
 //! Back-pressure: all channels bounded. Per-connection inbound mpsc(64)
 //! (frozen); full-queue drop + sampled logging (UDP best-effort,
@@ -236,7 +236,7 @@ impl Listener {
 ///
 /// - `rx`: uTP inbound packet stream (production = the demux utp channel);
 /// - `out`: outbound packet sink (production = pumped to
-/// [`UdpDemuxHandle::send_packet`]).
+///   [`UdpDemuxHandle::send_packet`]).
 pub fn spawn_with_sink(
     cfg: UtpConfig,
     rx: mpsc::Receiver<InboundPacket>,

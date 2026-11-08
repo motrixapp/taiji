@@ -76,11 +76,11 @@ pub const PEX_MESSAGE_LIMIT: u32 = 4;
 /// assembly check anchor).
 ///
 /// - `V1`: SHA-1(info) == btih (BEP-9 semantics,
-/// `UTMetadataDataExtensionMessage.cc`);
+///   `UTMetadataDataExtensionMessage.cc`);
 /// - `V2`: SHA-256(info) == btmh (BEP-52 multihash 1220; aria2 has no
-/// btmh magnet path — this check is a local BEP-52-aligned extension;
-/// the ut_metadata payload is the raw info dict bytes, hashed directly
-/// and compared against btmh).
+///   btmh magnet path — this check is a local BEP-52-aligned extension;
+///   the ut_metadata payload is the raw info dict bytes, hashed directly
+///   and compared against btmh).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpectedInfoHash {
     V1([u8; 20]),
@@ -295,37 +295,37 @@ pub(super) struct ExtendedCtx<'a, S: AsyncRead + AsyncWrite + Unpin> {
 
 /// BEP-10 extended frame handling:
 /// - `ext_id == 0`: ext handshake — register the ut_metadata id from
-/// the peer's m dict (unknown extension names are not registered, per
-/// ExtensionMessageRegistry name-table filtering); the requester
-/// creates a fetch session when `metadata_size` is present (8MiB
-/// acceptance domain, `HandshakeExtensionMessage.cc` — out of domain
-/// means Failed, the same orchestration outcome as aria2 silently not
-/// enabling metadata mode: this connection cannot fetch metadata).
-/// `m_ut_pex` is registered too, and the outbound cadence state
-/// machine is rebuilt from (peer advertised id, local gate) — the
-/// aria2 `DefaultBtInteractive` interaction object is likewise
-/// constructed after the handshake (`pexTimer_` starts then).
+///   the peer's m dict (unknown extension names are not registered, per
+///   ExtensionMessageRegistry name-table filtering); the requester
+///   creates a fetch session when `metadata_size` is present (8MiB
+///   acceptance domain, `HandshakeExtensionMessage.cc` — out of domain
+///   means Failed, the same orchestration outcome as aria2 silently not
+///   enabling metadata mode: this connection cannot fetch metadata).
+///   `m_ut_pex` is registered too, and the outbound cadence state
+///   machine is rebuilt from (peer advertised id, local gate) — the
+///   aria2 `DefaultBtInteractive` interaction object is likewise
+///   constructed after the handshake (`pexTimer_` starts then).
 /// - ut_metadata frames (request/data/reject): the inbound id routes on
-/// **our own advertised id** ([`OUTBOUND_UT_METADATA_ID`]) — BEP-10:
-/// the m dict value is the id other peers should use when sending to
-/// the advertiser; aria2's inbound demux likewise looks up the local
-/// registry (`DefaultExtensionMessageFactory.cc`; local ids
-/// initialized in `PeerInteractionCommand.cc`) while its outbound
-/// uses the peer's advertisement
-/// (`UTMetadataRequestExtensionMessage.cc`). Some peers (rqbit
-/// advertises ut_metadata=3) still send data on our id=2, so routing
-/// on the peer's advertisement alone would misfile them. Leniency: if
-/// the peer violates BEP-10 and sends on **its own** advertised id,
-/// we still route — aria2 raises and disconnects on unregistered ids
-/// (`DefaultExtensionMessageFactory.cc`), we keep the existing
-/// log-and-ignore interop face and only ignore when neither id
-/// matches.
+///   **our own advertised id** ([`OUTBOUND_UT_METADATA_ID`]) — BEP-10:
+///   the m dict value is the id other peers should use when sending to
+///   the advertiser; aria2's inbound demux likewise looks up the local
+///   registry (`DefaultExtensionMessageFactory.cc`; local ids
+///   initialized in `PeerInteractionCommand.cc`) while its outbound
+///   uses the peer's advertisement
+///   (`UTMetadataRequestExtensionMessage.cc`). Some peers (rqbit
+///   advertises ut_metadata=3) still send data on our id=2, so routing
+///   on the peer's advertisement alone would misfile them. Leniency: if
+///   the peer violates BEP-10 and sends on **its own** advertised id,
+///   we still route — aria2 raises and disconnects on unregistered ids
+///   (`DefaultExtensionMessageFactory.cc`), we keep the existing
+///   log-and-ignore interop face and only ignore when neither id
+///   matches.
 /// - ut_pex frames: the same routing (primary = our advertised id
-/// [`OUTBOUND_UT_PEX_ID`], secondary = the peer's); **when the local
-/// gate is off (private torrent / peer exchange disabled) neither
-/// route consumes** — aria2 `apply_pex_negotiation` registry removal:
-/// the inbound id no longer parses as ut_pex, so the frame is treated
-/// as unknown.
+///   [`OUTBOUND_UT_PEX_ID`], secondary = the peer's); **when the local
+///   gate is off (private torrent / peer exchange disabled) neither
+///   route consumes** — aria2 `apply_pex_negotiation` registry removal:
+///   the inbound id no longer parses as ut_pex, so the frame is treated
+///   as unknown.
 /// - any other id: logged and ignored (BEP-10 interop).
 pub(super) async fn handle_extended<S>(ext_id: u8, payload: &[u8], mut ctx: ExtendedCtx<'_, S>)
 where
@@ -528,11 +528,11 @@ where
 /// caller (relay and dial-out need a swarm-wide view; PeerTask decides
 /// nothing locally). Behavior authority and branch rules:
 /// - malformed / unknown sub-op / unknown address family: ignored (each
-/// libtorrent on_holepunch branch silently returns,
-/// bt_peer_connection.cpp), no disconnect;
+///   libtorrent on_holepunch branch silently returns,
+///   bt_peer_connection.cpp), no disconnect;
 /// - rendezvous/connect: raised within the limit (over limit = ignore,
-/// no disconnect — the local abuse guard; libtorrent has no
-/// counterpart, see the constant docs);
+///   no disconnect — the local abuse guard; libtorrent has no
+///   counterpart, see the constant docs);
 /// - failed: logged only (libtorrent treats it as informational too).
 async fn handle_ut_holepunch<S>(payload: &[u8], ctx: &mut ExtendedCtx<'_, S>)
 where

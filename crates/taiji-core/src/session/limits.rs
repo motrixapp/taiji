@@ -3,21 +3,21 @@
 //! hot-update publication) + per-torrent chained-set assembly.
 //!
 //! - Execution face: [`taiji_io::rate_limit`] (io-layer token buckets);
-//! this module is the session side's **assembly and hot-update
-//! handle**.
+//!   this module is the session side's **assembly and hot-update
+//!   handle**.
 //! - Hot-update chain: changeGlobalOption ->
-//! [`SpeedLimits::set_overall`] (snapshot arc-swap store + atomic
-//! bucket rate change — the direct translation of RpcMethodImpl.cc's
-//! setMaxOverallDownload/UploadSpeedLimit) -> takes effect
-//! immediately for all running engines' `Throttled` streams through
-//! the shared bucket; changeOption's per-task limits
-//! (max-download-limit/max-upload-limit) apply live via the
-//! `set_rate` of [`LimiterSet`]'s per_torrent bucket.
+//!   [`SpeedLimits::set_overall`] (snapshot arc-swap store + atomic
+//!   bucket rate change — the direct translation of RpcMethodImpl.cc's
+//!   setMaxOverallDownload/UploadSpeedLimit) -> takes effect
+//!   immediately for all running engines' `Throttled` streams through
+//!   the shared bucket; changeOption's per-task limits
+//!   (max-download-limit/max-upload-limit) apply live via the
+//!   `set_rate` of [`LimiterSet`]'s per_torrent bucket.
 //! - `0 = unlimited` (the SPEC §11 frozen default): a bucket-level
-//! short circuit; a session cold-starts with all-default limits of 0
-//! -> zero overhead.
+//!   short circuit; a session cold-starts with all-default limits of 0
+//!   -> zero overhead.
 //! - The snapshot read side is lock-free (arc-swap `load`); the write
-//! side is only the session actor (single writer).
+//!   side is only the session actor (single writer).
 
 use std::sync::Arc;
 

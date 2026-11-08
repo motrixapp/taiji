@@ -3,25 +3,25 @@
 //! Upstream anchor mapping: docs/design/store.md
 //!
 //! - v1: whole-piece SHA-1. This pool does no arrival-order digest
-//! accumulation (upstream anchor: aria2 `Piece.cc` `updateHash` gates
-//! on `begin == nextBegin_` — out-of-order blocks are not fed to the
-//! digest, and completion rereads via `getDigestWithWrCache`).
-//! Unordered accumulation would misalign, so it was removed from the
-//! `verify` path; authoritative v1 verification recomputes at
-//! completion from the cached cells in verified.rs `piece_matches`
-//! (see that module's docs).
+//!   accumulation (upstream anchor: aria2 `Piece.cc` `updateHash` gates
+//!   on `begin == nextBegin_` — out-of-order blocks are not fed to the
+//!   digest, and completion rereads via `getDigestWithWrCache`).
+//!   Unordered accumulation would misalign, so it was removed from the
+//!   `verify` path; authoritative v1 verification recomputes at
+//!   completion from the cached cells in verified.rs `piece_matches`
+//!   (see that module's docs).
 //! - v2: collect per-block SHA-256 hashes and recompute the piece root
-//! at piece completion against the metadata (piece-tree rules in
-//! [`crate::merkle`]; the creator's "sole piece padded to a power of
-//! two / other pieces padded to blocks_per_piece" branches are split
-//! between [`merkle::piece_root_from_block_hashes`] and the file-level
-//! [`merkle::file_root`]).
+//!   at piece completion against the metadata (piece-tree rules in
+//!   [`crate::merkle`]; the creator's "sole piece padded to a power of
+//!   two / other pieces padded to blocks_per_piece" branches are split
+//!   between [`merkle::piece_root_from_block_hashes`] and the file-level
+//!   [`merkle::file_root`]).
 //! - M0 scope (honesty note): block-level **incremental** verification
-//! needs base-layer (16KiB granularity) sibling hashes, which the
-//! metadata does not carry; lazy base-layer hash requests are later
-//! work (SPEC §4.3/§6.3). So M0's v2 verification granularity is "at
-//! piece completion", the same moment as v1; v2's payoff (a failure
-//! refetches only one block) lands once the base layer is available.
+//!   needs base-layer (16KiB granularity) sibling hashes, which the
+//!   metadata does not carry; lazy base-layer hash requests are later
+//!   work (SPEC §4.3/§6.3). So M0's v2 verification granularity is "at
+//!   piece completion", the same moment as v1; v2's payoff (a failure
+//!   refetches only one block) lands once the base layer is available.
 //!
 //! No byte reaches disk before verification passes — this type only
 //! computes hashes; the write decision lives in [`crate::verified`].

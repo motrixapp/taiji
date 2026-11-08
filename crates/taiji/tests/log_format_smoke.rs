@@ -1,10 +1,10 @@
 //! CLI log-format smoke: the real binary (CARGO_BIN_EXE_taiji) starts
 //! an idle daemon (piped stdout = the non-TTY state):
 //! - `--log-format json`: stdout is line-delimited valid JSON with the
-//! full field set (timestamp/level/target/fields.message — the
-//! tracing-subscriber json default);
+//!   full field set (timestamp/level/target/fields.message — the
+//!   tracing-subscriber json default);
 //! - default text + non-TTY: zero ANSI in the output (no `\x1b` at
-//! all — collectors reading redirected logs need no stripping).
+//!   all — collectors reading redirected logs need no stripping).
 //!
 //! Closeout mirrors rpc_smoke: token shutdown -> graceful exit 0, no
 //! daemon left behind. No new test dependencies (serde_json is already

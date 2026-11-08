@@ -3,12 +3,12 @@
 //!
 //! Reproduction shape aligned with a 12h real-swarm observation:
 //! - piece length 256KiB (same parameters as the Ubuntu 24.04.4 official
-//! torrent: 12991 pieces; a 16MiB write cache holds only 64 pieces);
+//!   torrent: 12991 pieces; a 16MiB write cache holds only 64 pieces);
 //! - many peers (under the spread-round semantics each peer claims
-//! different pieces) -> concurrent in-flight pieces far exceed the
-//! cache capacity -> cache pressure saturates;
+//!   different pieces) -> concurrent in-flight pieces far exceed the
+//!   cache capacity -> cache pressure saturates;
 //! - churning peers (fake seeders that periodically disconnect and
-//! reconnect) -> the connection population rotates.
+//!   reconnect) -> the connection population rotates.
 //!
 //! Observed failure shape: completed freezes (piece-verified logs stall)
 //! while downloading continues — root cause = write-cache eviction

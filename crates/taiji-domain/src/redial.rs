@@ -279,17 +279,17 @@ impl RedialPool {
     /// Redial result report (the pool-books fact; see [`RedialOutcome`]
     /// for what reaches this face):
     /// - `Connected`: connection rebuilt (registration arrives later);
-    /// entry removed;
+    ///   entry removed;
     /// - `Failed`: an unarmed fast-dial miss -> retry at [`REDIAL_BASE`]
-    /// 60s and **no failcount** (a silent departure is not a connection
-    /// failure: libtorrent only accumulates failcount on connection
-    /// failures, `src/peer_list.cpp` inc_failcount — a missed
-    /// restart-window probe is weaker evidence than a failed dial; at
-    /// most one extra probe per departure cycle, bounded); other
-    /// consecutive failures increment, and at [`REDIAL_MAX_FAILURES`]
-    /// the entry is evicted (failing peers do not squat forever, same as
-    /// libtorrent `peer_list.cpp`); otherwise the next redial follows
-    /// [`miss_wait`] (the (f+1) x 60 gradient).
+    ///   60s and **no failcount** (a silent departure is not a connection
+    ///   failure: libtorrent only accumulates failcount on connection
+    ///   failures, `src/peer_list.cpp` inc_failcount — a missed
+    ///   restart-window probe is weaker evidence than a failed dial; at
+    ///   most one extra probe per departure cycle, bounded); other
+    ///   consecutive failures increment, and at [`REDIAL_MAX_FAILURES`]
+    ///   the entry is evicted (failing peers do not squat forever, same as
+    ///   libtorrent `peer_list.cpp`); otherwise the next redial follows
+    ///   [`miss_wait`] (the (f+1) x 60 gradient).
     pub fn note_result(&mut self, addr: &SocketAddr, outcome: RedialOutcome, now: Instant) {
         let Some(entry) = self.entries.get_mut(addr) else {
             return;
@@ -503,16 +503,16 @@ mod tests {
     /// optimistic advance share the single source [`miss_wait`];
     /// same-value convergence asserted inline):
     /// - fast=1 had_data=1 (silent departure): 5s fast dial armed; a miss
-    /// waits 60s (no failure counted); then (f+1) x 60 (120/180) —
-    /// evicted at 3 counted failures (at most one extra probe per
-    /// departure cycle, bounded);
+    ///   waits 60s (no failure counted); then (f+1) x 60 (120/180) —
+    ///   evicted at 3 counted failures (at most one extra probe per
+    ///   departure cycle, bounded);
     /// - fast=1 had_data=0 / fast=0 rows: the regular 60/120/180 gradient
-    /// unchanged (the fallback rows, same source as
-    /// `failure_backoff_then_eviction`);
+    ///   unchanged (the fallback rows, same source as
+    ///   `failure_backoff_then_eviction`);
     /// - the silent-ledger branch is orthogonal to this pool and redial
-    /// dials are exempt from its gate — structurally locked by
-    /// `silent.rs::pool_independent_of_silent_cooldown`, not repeated
-    /// here.
+    ///   dials are exempt from its gate — structurally locked by
+    ///   `silent.rs::pool_independent_of_silent_cooldown`, not repeated
+    ///   here.
     #[test]
     fn miss_ladder_decision_table() {
         let t0 = Instant::now();

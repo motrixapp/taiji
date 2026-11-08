@@ -212,19 +212,19 @@ impl StreamGeo {
     /// (isomorphic to [`taiji_bt::piece_id::Addressing`]):
     ///
     /// - v1 face (`V1Padded`: v1-only and hybrid): flat piece k covers
-    /// layout-stream bytes `[k·stride, (k+1)·stride)` (`Addressing::Flat`
-    /// identity mapping) — file i maps to the pieces covering its byte
-    /// range `[offset_i, offset_i+len_i)` (pads count toward offsets).
-    /// Unaligned files (v1-only injects no pads; metainfo `plan_entries`
-    /// keeps the V1Only list verbatim) share first/last pieces with
-    /// neighbors. When pads are present the following file is always
-    /// aligned (BEP-47 check), and the mapping degenerates to exact
-    /// per-file piece counts.
+    ///   layout-stream bytes `[k·stride, (k+1)·stride)` (`Addressing::Flat`
+    ///   identity mapping) — file i maps to the pieces covering its byte
+    ///   range `[offset_i, offset_i+len_i)` (pads count toward offsets).
+    ///   Unaligned files (v1-only injects no pads; metainfo `plan_entries`
+    ///   keeps the V1Only list verbatim) share first/last pieces with
+    ///   neighbors. When pads are present the following file is always
+    ///   aligned (BEP-47 check), and the mapping degenerates to exact
+    ///   per-file piece counts.
     /// - v2 face (`V2Compact`: v2-only): flat piece space is a per-file
-    /// aligned synthetic view (`Addressing::PerFile` base model) — file i's
-    /// base = the sum of preceding files' piece counts; in-file piece p
-    /// covers file bytes `[p·stride, (p+1)·stride)`. Compact disk layout
-    /// does not affect piece addressing.
+    ///   aligned synthetic view (`Addressing::PerFile` base model) — file i's
+    ///   base = the sum of preceding files' piece counts; in-file piece p
+    ///   covers file bytes `[p·stride, (p+1)·stride)`. Compact disk layout
+    ///   does not affect piece addressing.
     ///
     /// For aligned files (v2/hybrid/v1-padded) the two formulas coincide and
     /// the behavior matches the original implementation byte for byte; this
@@ -435,25 +435,25 @@ pub(super) struct StreamPlan {
 /// fields, source-compatible for implementors). Fields are per-peer per-round
 /// decision input snapshots:
 /// - `advertised`: the peer's advertised bitmap (None = no bitmap evidence;
-/// BEP-3 treats this as have_none, so regular policies request nothing);
+///   BEP-3 treats this as have_none, so regular policies request nothing);
 /// - `done`: the local incomplete mask (already includes the BEP-53
-/// select-file projection — only selected pieces are dispatched);
+///   select-file projection — only selected pieces are dispatched);
 /// - `stats`: rarity statistics (rarest-first counts, driven live by
-/// Have/bitfield);
+///   Have/bitfield);
 /// - `claimed`: pieces claimed in the spread round (in flight at other
-/// peers, refetch window not yet expired); a dense [`ClaimedSet`] bitmap
-/// with the same semantics as `HashSet<u64>` (see that type's docs);
+///   peers, refetch window not yet expired); a dense [`ClaimedSet`] bitmap
+///   with the same semantics as `HashSet<u64>` (see that type's docs);
 /// - `preferred`: the partials table for the partial hard-gate round
-/// (libtorrent `piece_picker.cpp` `prioritize_partials`); always empty
-/// outside gate rounds — an empty table means zero selection change;
+///   (libtorrent `piece_picker.cpp` `prioritize_partials`); always empty
+///   outside gate rounds — an empty table means zero selection change;
 /// - `stream`: the streaming context (playhead priority map; None = no
-/// playhead);
+///   playhead);
 /// - `priority`: per-piece multi-level file priorities (None = an all-zero
-/// default face, zero selection change). Consumption is per strategy:
-/// rarest_first uses it as the primary key ahead of rarity
-/// (higher-priority files download first); streaming consumes it only in
-/// the outside-window rarity layer (the playhead window always outranks
-/// file priority, so higher-priority files accelerate outside the window).
+///   default face, zero selection change). Consumption is per strategy:
+///   rarest_first uses it as the primary key ahead of rarity
+///   (higher-priority files download first); streaming consumes it only in
+///   the outside-window rarity layer (the playhead window always outranks
+///   file priority, so higher-priority files accelerate outside the window).
 ///
 /// `advertised` is a compacted bitmap: an out-of-range `get` returns false,
 /// matching the old slice's `unwrap_or(false)` verdict.
@@ -637,32 +637,32 @@ impl PieceSelectionStrategy for SequentialStrategy {
 /// selection are never chosen, cooperating with `SetFileSelection`/`so=`):
 ///
 /// 1. In-window spread round: in priority-map order (head/tail pieces class
-/// 0 first, then forward-window class 1 by ascending byte distance from
-/// the playhead = an EDF approximation), take the first unclaimed piece
-/// (skips pieces in flight at other peers — the spread semantics);
+///    0 first, then forward-window class 1 by ascending byte distance from
+///    the playhead = an EDF approximation), take the first unclaimed piece
+///    (skips pieces in flight at other peers — the spread semantics);
 /// 2. Outside-window rarity mix: when every in-window piece is claimed, fall
-/// through to the global rarest-first spread round (the same verdict as
-/// [`RarestFirstStrategy`]'s first phase) — the key difference from pure
-/// sequential: during playback the peer keeps contributing rare-piece
-/// collection to the swarm, so reciprocity is not harmed (see the
-/// `streaming_reciprocity_not_harmed` test);
+///    through to the global rarest-first spread round (the same verdict as
+///    [`RarestFirstStrategy`]'s first phase) — the key difference from pure
+///    sequential: during playback the peer keeps contributing rare-piece
+///    collection to the swarm, so reciprocity is not harmed (see the
+///    `streaming_reciprocity_not_harmed` test);
 /// 3. In-window duplicate fallback: when the outside window also has no
-/// unclaimed piece, duplicates in flight are allowed within the window
-/// (the "few pieces, many peers / keep peers busy" fallback; duplicate
-/// blocks are caught by the dispatch loop's InFlight filter and refetch
-/// window);
+///    unclaimed piece, duplicates in flight are allowed within the window
+///    (the "few pieces, many peers / keep peers busy" fallback; duplicate
+///    blocks are caught by the dispatch loop's InFlight filter and refetch
+///    window);
 /// 4. Global fallback: the rarest-first original selection (the second phase
-/// of the two-phase form).
+///    of the two-phase form).
 ///
 /// # Degenerate cases and bounds
 ///
 /// - No playhead (`ctx.stream = None`) → exactly the rarest-first two-phase:
-/// no pure-sequential guessing without playback information (a pure
-/// sequential full download is explicitly disallowed);
+///   no pure-sequential guessing without playback information (a pure
+///   sequential full download is explicitly disallowed);
 /// - Priority-map entries are bounded (see [`STREAM_WINDOW_MAX_BYTES`]);
 /// - The head/tail 2 MiB first-window is the generic moov dual-position
-/// approximation, with no container parser (see
-/// [`STREAM_HEAD_TAIL_BYTES`]).
+///   approximation, with no container parser (see
+///   [`STREAM_HEAD_TAIL_BYTES`]).
 pub(super) struct StreamingStrategy;
 
 impl PieceSelectionStrategy for StreamingStrategy {

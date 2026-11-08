@@ -252,12 +252,12 @@ pub fn seed_only_detached(option: DetachSeedOnly, phase: DownloadPhase) -> bool 
 /// bt-stop-timeout observer (BtStopDownloadCommand).
 ///
 /// - Mount condition: timeout > 0 (`BtSetup.cc`); `new` returning None =
-/// not mounted.
+///   not mounted.
 /// - tick: download speed > 0 -> checkpoint reset (`BtStopDownloadCommand.cc`,
-/// `calculateDownloadSpeed()` accounting = the SpeedCalc 10s window,
-/// `SpeedCalc.cc`); checkpoint older than the timeout -> forced stop.
+///   `calculateDownloadSpeed()` accounting = the SpeedCalc 10s window,
+///   `SpeedCalc.cc`); checkpoint older than the timeout -> forced stop.
 /// - No more ticks after download completion (enableExit — active only
-/// during download).
+///   during download).
 pub struct BtStopTimeoutWatch {
     timeout: Duration,
     checkpoint: Instant,

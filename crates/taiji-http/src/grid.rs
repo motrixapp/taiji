@@ -16,20 +16,20 @@
 //! change:
 //!
 //! - bit `i` = block `i` complete; **LSB-first** within a byte
-//! (bitfield convention);
+//!   (bitfield convention);
 //! - tail bits beyond `block_count` are invalid (ignored when
-//! encoding/validating);
+//!   encoding/validating);
 //! - the last block is truncated by the authoritative total length
-//! (a `total_len % block_size` partial block counts only its real
-//! bytes — the progress-accounting domain);
+//!   (a `total_len % block_size` partial block counts only its real
+//!   bytes — the progress-accounting domain);
 //! - **block completion is first-report-wins, late reports dropped**
-//! (serial single-point decision; [`BlockGrid::record`] carries the
-//! semantics with its idempotent `false` return; the decision point
-//! lives in [`crate::coordinator::ExtentCoordinator`]);
+//!   (serial single-point decision; [`BlockGrid::record`] carries the
+//!   semantics with its idempotent `false` return; the decision point
+//!   lives in [`crate::coordinator::ExtentCoordinator`]);
 //! - **`block_size` is task-level immutable**: frozen after
-//! construction-time validation; this type offers no mutation face
-//! (runtime option changes are rejected outright with
-//! `taiji.option.invalid`).
+//!   construction-time validation; this type offers no mutation face
+//!   (runtime option changes are rejected outright with
+//!   `taiji.option.invalid`).
 //!
 //! Block completion does not mean the bytes are contiguously
 //! trustworthy: same-block double writes under steal races are legal

@@ -28,21 +28,21 @@ pub const DEFAULT_CACHE_LIMIT: usize = 16 * 1024 * 1024;
 /// buffer, or a fallback heap Vec.
 ///
 /// - [`CellBuf::Pooled`]: a face-level [`BlockArena`] lease (16KiB main
-/// bucket); a Drop guard returns the block to the pool — every
-/// ownership endpoint (write-out/eviction/refetch) converges on lease
-/// destruction, eliminating per-block malloc/mmap churn (upstream
-/// anchor: libtorrent's disk-buffer malloc+free reuse with watermark
-/// accounting, `src/disk_buffer_pool.cpp`; uTP size-bucketed free
-/// lists, `packet_pool.hpp`).
+///   bucket); a Drop guard returns the block to the pool — every
+///   ownership endpoint (write-out/eviction/refetch) converges on lease
+///   destruction, eliminating per-block malloc/mmap churn (upstream
+///   anchor: libtorrent's disk-buffer malloc+free reuse with watermark
+///   accounting, `src/disk_buffer_pool.cpp`; uTP size-bucketed free
+///   lists, `packet_pool.hpp`).
 /// - [`CellBuf::Shared`]: an adopted `Bytes` (the wire decode slice
-/// itself — reference-counted, immutable). Built only by
-/// [`DataCell::with_shared`] at exact capacity, so the append face
-/// never reaches its storage (zero room by construction). When the
-/// adopted `Bytes` is an arena-owner view, the pool return rides its
-/// reference count — the same Drop-guard convergence as `Pooled`.
+///   itself — reference-counted, immutable). Built only by
+///   [`DataCell::with_shared`] at exact capacity, so the append face
+///   never reaches its storage (zero room by construction). When the
+///   adopted `Bytes` is an arena-owner view, the pool return rides its
+///   reference count — the same Drop-guard convergence as `Pooled`.
 /// - [`CellBuf::Heap`]: the `with_data` form (test/assembly surfaces and
-/// the over-main-bucket capacity fallback), byte-identical semantics
-/// to pre-pool.
+///   the over-main-bucket capacity fallback), byte-identical semantics
+///   to pre-pool.
 #[derive(Debug)]
 pub enum CellBuf {
     Heap(Vec<u8>),
@@ -464,21 +464,21 @@ impl<K: Copy + Ord + Eq + std::hash::Hash + Debug> WrDiskCache<K> {
     /// the evicted pieces. Eviction policy (intentional divergence):
     ///
     /// - **Victim order = smallest size first (oldest on ties)** — the
-    /// opposite of aria2's largest-first (`WrDiskCacheEntry.h`) and
-    /// deliberate: aria2's eviction **writes the cells to disk**
-    /// (flush), where largest-first maximizes the bytes freed per
-    /// flush (a flush-efficiency goal). Here, under
-    /// verify-before-write, eviction = **destruction**, so the
-    /// flush-efficiency goal does not exist and the goal becomes
-    /// minimizing received bytes discarded per eviction. largest-first
-    /// under destroy semantics systematically kills near-complete
-    /// pieces (near-complete pieces are always the largest entries, so
-    /// at saturation completion self-destructs) = the main loop of the
-    /// long-run progress-stall pathology.
+    ///   opposite of aria2's largest-first (`WrDiskCacheEntry.h`) and
+    ///   deliberate: aria2's eviction **writes the cells to disk**
+    ///   (flush), where largest-first maximizes the bytes freed per
+    ///   flush (a flush-efficiency goal). Here, under
+    ///   verify-before-write, eviction = **destruction**, so the
+    ///   flush-efficiency goal does not exist and the goal becomes
+    ///   minimizing received bytes discarded per eviction. largest-first
+    ///   under destroy semantics systematically kills near-complete
+    ///   pieces (near-complete pieces are always the largest entries, so
+    ///   at saturation completion self-destructs) = the main loop of the
+    ///   long-run progress-stall pathology.
     /// - **Protect `key`** (the piece this delta just credited):
-    /// self-eviction would destroy just-received bytes outright, and
-    /// the upstream `received` bitmap/in-flight bookkeeping would
-    /// afterwards swallow re-delivered blocks as silent duplicates.
+    ///   self-eviction would destroy just-received bytes outright, and
+    ///   the upstream `received` bitmap/in-flight bookkeeping would
+    ///   afterwards swallow re-delivered blocks as silent duplicates.
     ///
     /// Termination: stops when no size>0 unprotected entry remains
     /// (total may transiently stay above limit; the next update

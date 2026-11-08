@@ -4,11 +4,11 @@
 //! `abort()` calls inside `run` — every other exit leaked the poller:
 //!
 //! * the `?` early returns between the spawn and those sites
-//! (manifest-URL parse, `save_track` ledger writes, …);
+//!   (manifest-URL parse, `save_track` ledger writes, …);
 //! * the outer cancel (the session drives `run` inside a
-//! `tokio::select!`; a stop tears the future down without running
-//! any of its code) — a detached spawn is never aborted by a
-//! future drop.
+//!   `tokio::select!`; a stop tears the future down without running
+//!   any of its code) — a detached spawn is never aborted by a
+//!   future drop.
 //!
 //! Long sessions accumulated one 30s poller per task. The fix = the
 //! RAII `WatchdogGuard` (drop aborts). Both leak paths are pinned

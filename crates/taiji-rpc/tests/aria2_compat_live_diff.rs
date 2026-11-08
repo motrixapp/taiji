@@ -203,19 +203,19 @@ const WHITELIST: &[(&str, &str)] = &[
 /// (a doc edit that drops the anchor turns the test red — the same
 /// governance as [`WHITELIST`]). Two families, both ruled legitimate:
 /// - declared extension names (Phase A pairs / hook family / session keys /
-/// the tracker import / the HTTP cap): the fork has no such option at
-/// all (upstream `prefs.cc` has no such `makePref`, or the name is a
-/// declared rename);
+///   the tracker import / the HTTP cap): the fork has no such option at
+///   all (upstream `prefs.cc` has no such `makePref`, or the name is a
+///   declared rename);
 /// - accepted aria2-name value faces (`all-proxy`, `https-proxy`,
-/// `async-dns`, `enable-async-dns6`, `bt-exclude-tracker`, `pause`,
-/// `dht-entry-point`, `load-cookies`): the fork's `getGlobalOption`
-/// returns defined prefs only (`RpcMethodImpl.cc` skips entries not
-/// present in the global option table — verified live 2026-10-28: a
-/// default startup echoes 132 defined keys, and a NO_DEFAULT pref such
-/// as `all-proxy` appears only once set on the command line), while
-/// taiji echoes the accepted value face always (empty string = unset)
-/// — the Motrix-alignment round-trip; convergence when the fork side is
-/// explicitly set is by design, not drift.
+///   `async-dns`, `enable-async-dns6`, `bt-exclude-tracker`, `pause`,
+///   `dht-entry-point`, `load-cookies`): the fork's `getGlobalOption`
+///   returns defined prefs only (`RpcMethodImpl.cc` skips entries not
+///   present in the global option table — verified live 2026-10-28: a
+///   default startup echoes 132 defined keys, and a NO_DEFAULT pref such
+///   as `all-proxy` appears only once set on the command line), while
+///   taiji echoes the accepted value face always (empty string = unset)
+///   — the Motrix-alignment round-trip; convergence when the fork side is
+///   explicitly set is by design, not drift.
 ///
 /// The table IS the budget (audited count 25 + the media family 10 —
 /// the 8 unified-registration keys plus media-archive/media-info-json — +
@@ -313,13 +313,13 @@ const TAIJI_ONLY_ECHO_AUDIT: &[(&str, &str)] = &[
 /// inputs — `(key, anchor substring in docs/rpc-api-diff.md)`. Two
 /// families, both ruled declared divergences:
 /// - the three Phase A declarations (`listen-port` range vs single value,
-/// the `peer-id-prefix` namespacing, the `seed-ratio` minimal numeric
-/// form — §3 "Shared-key value differences");
+///   the `peer-id-prefix` namespacing, the `seed-ratio` minimal numeric
+///   form — §3 "Shared-key value differences");
 /// - the Motrix-alignment no-op value faces shared with the fork's echo:
-/// unset records no override (the empty-string echo), while the fork
-/// echoes its **defined defaults** for the same keys (defaults are
-/// defined prefs there — the declared divergence direction, the same
-/// accepted-value-face family as [`TAIJI_ONLY_ECHO_AUDIT`]).
+///   unset records no override (the empty-string echo), while the fork
+///   echoes its **defined defaults** for the same keys (defaults are
+///   defined prefs there — the declared divergence direction, the same
+///   accepted-value-face family as [`TAIJI_ONLY_ECHO_AUDIT`]).
 ///
 /// Rows stay sorted; a value drift outside this table is red, and a
 /// converged row is red until reclaimed (same governance as WHITELIST).

@@ -6,16 +6,16 @@
 //! drift in any single gate turns this file red:
 //!
 //! * **fail-closed** — `probeMedia`'s `read_only=false` row (the bit
-//! the RPC write gate consumes; the gate's e2e consumption is
-//! `taiji-rpc`'s `media_methods_write_gate_adjudication`: with no
-//! secret the method fails closed like every write face);
+//!   the RPC write gate consumes; the gate's e2e consumption is
+//!   `taiji-rpc`'s `media_methods_write_gate_adjudication`: with no
+//!   secret the method fails closed like every write face);
 //! * **in-flight cap 2** (`PROBE_INFLIGHT_CAP`) — a third probe over
-//! two live ones answers the honest busy face;
+//!   two live ones answers the honest busy face;
 //! * **per-origin rate limit** (`PROBE_ORIGIN_INTERVAL` = 1s, the
-//! module-documented implementation anchor) — same-origin
-//! back-to-back is throttled, distinct origins are not;
+//!   module-documented implementation anchor) — same-origin
+//!   back-to-back is throttled, distinct origins are not;
 //! * **opaque token TTL 10min** (`PROBE_TTL` = 600s, the §4 spec
-//! number) — unknown/fabricated tokens present `probe_expired`.
+//!   number) — unknown/fabricated tokens present `probe_expired`.
 //!
 //! The rate/busy rejections deliberately keep the **generic text**
 //! form (no `taiji.media.*` code — §14 has no row for them; the

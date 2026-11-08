@@ -67,10 +67,10 @@ pub struct ForkProgress {
 ///
 /// - `SQLITE_OPEN_READ_ONLY`: sqlite rejects every write;
 /// - `user_version != 1` or missing task/task_progress tables ->
-/// [`StoreError::ForkSchema`] (unknown schemas are rejected
-/// explicitly; this also catches this engine's own taiji.sqlite3
-/// passed in by mistake — both are user_version 1 with different
-/// table sets).
+///   [`StoreError::ForkSchema`] (unknown schemas are rejected
+///   explicitly; this also catches this engine's own taiji.sqlite3
+///   passed in by mistake — both are user_version 1 with different
+///   table sets).
 ///
 /// Disk IO: callers must run this inside `spawn_blocking`.
 pub fn open_fork_readonly(path: &Path) -> Result<Connection, StoreError> {
@@ -532,7 +532,7 @@ pub enum Aria2CtrlError {
     NotBitTorrent,
     /// A BT control file reached the HTTP parse face (extension bit0 =
     /// 1) — it belongs to the BT migration face; the caller routes it,
-    /// never mixed reads.
+    ///    never mixed reads.
     #[error("BitTorrent control file (extension bit0 set): belongs to the BitTorrent import face")]
     IsBitTorrent,
     /// infoHashLength != 20 (BT requires the full length; reference

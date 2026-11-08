@@ -377,11 +377,11 @@ impl EngineHandle {
     /// # Errors
     ///
     /// - [`EngineError::EngineClosed`]: the engine main loop has exited (the
-    /// command channel is closed), or the command arm dropped the reply
-    /// before answering.
+    ///   command channel is closed), or the command arm dropped the reply
+    ///   before answering.
     /// - [`EngineError::Failed`]: engine-side validation rejected the
-    /// selection (an out-of-range file index or an empty selection); the
-    /// message is the rejection reason verbatim.
+    ///   selection (an out-of-range file index or an empty selection); the
+    ///   message is the rejection reason verbatim.
     pub async fn set_file_selection(&self, files: Arc<[u32]>) -> Result<(), EngineError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -402,11 +402,11 @@ impl EngineHandle {
     /// # Errors
     ///
     /// - [`EngineError::EngineClosed`]: the engine main loop has exited (the
-    /// command channel is closed), or the command arm dropped the reply
-    /// before answering.
+    ///   command channel is closed), or the command arm dropped the reply
+    ///   before answering.
     /// - [`EngineError::Failed`]: engine-side validation rejected the table
-    /// (an out-of-range file index, an empty table, or a level outside
-    /// -1..=7); the message is the rejection reason verbatim.
+    ///   (an out-of-range file index, an empty table, or a level outside
+    ///   -1..=7); the message is the rejection reason verbatim.
     pub async fn set_file_priority(&self, priority: Arc<[(u32, i8)]>) -> Result<(), EngineError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -494,12 +494,12 @@ impl EngineHandle {
     /// # Errors
     ///
     /// - [`EngineError::EngineClosed`]: the engine main loop has exited (the
-    /// command channel is closed), or the command arm dropped the reply
-    /// before answering.
+    ///   command channel is closed), or the command arm dropped the reply
+    ///   before answering.
     /// - [`EngineError::Failed`]: the engine rejected the policy as
-    /// unsupported / unimplemented ([`SchedulerPolicy::is_supported`] is
-    /// false, e.g. the Sequential face); the message is the rejection
-    /// reason verbatim.
+    ///   unsupported / unimplemented ([`SchedulerPolicy::is_supported`] is
+    ///   false, e.g. the Sequential face); the message is the rejection
+    ///   reason verbatim.
     pub async fn set_scheduler_policy(&self, policy: SchedulerPolicy) -> Result<(), EngineError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -519,11 +519,11 @@ impl EngineHandle {
     /// # Errors
     ///
     /// - [`EngineError::EngineClosed`]: the engine main loop has exited (the
-    /// command channel is closed), or the command arm dropped the reply
-    /// before answering.
+    ///   command channel is closed), or the command arm dropped the reply
+    ///   before answering.
     /// - [`EngineError::Failed`]: engine-side validation rejected the
-    /// playhead (an out-of-range file index or a position past the file's
-    /// length); the message is the rejection reason verbatim.
+    ///   playhead (an out-of-range file index or a position past the file's
+    ///   length); the message is the rejection reason verbatim.
     pub async fn set_streaming_playhead(
         &self,
         file: u32,
@@ -594,11 +594,11 @@ impl EngineHandle {
     /// # Errors
     ///
     /// - [`EngineError::EngineClosed`]: the engine main loop has exited (the
-    /// command channel is closed), or the command arm dropped the reply
-    /// before answering.
+    ///   command channel is closed), or the command arm dropped the reply
+    ///   before answering.
     /// - [`EngineError::Failed`]: enabling DHT on a private (BEP 27) engine
-    /// — the hard gate cannot be overridden; the message is the rejection
-    /// reason verbatim.
+    ///   — the hard gate cannot be overridden; the message is the rejection
+    ///   reason verbatim.
     pub async fn enable_dht(&self) -> Result<(), EngineError> {
         self.set_dht_switch(true).await
     }

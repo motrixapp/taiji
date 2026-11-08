@@ -421,12 +421,12 @@ pub fn note_http_error(err: &HttpError) {
 /// RST/interruption signatures (inside the transport-failure payload
 /// text, case-insensitive substrings):
 /// - the ECONNRESET family: "connection reset (by peer)" — kernel
-/// errno text (macOS 54 / Linux 104) matching the ErrorKind text;
+///   errno text (macOS 54 / Linux 104) matching the ErrorKind text;
 /// - EPIPE: "broken pipe" — the interrupted shape of writing on after
-/// the peer stopped;
+///   the peer stopped;
 /// - hyper's mid-stream close signature: "connection closed before
-/// message completed" — the response body cut short (the transport
-/// face of a peer interruption/drop).
+///   message completed" — the response body cut short (the transport
+///   face of a peer interruption/drop).
 ///
 /// The signature set is deliberately conservative: only
 /// peer-interruption signatures, never failures attributable to local

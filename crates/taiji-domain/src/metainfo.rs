@@ -3,15 +3,15 @@
 //! # Model
 //!
 //! - [`TorrentIdentity`]: dual infohash (v1 = SHA-1, v2 = SHA-256), both
-//! computed over the **raw info byte slice** (BEP52);
+//!   computed over the **raw info byte slice** (BEP52);
 //! - [`TorrentMeta`]: kind + piece_length + [`MetaFile`] list + layout
-//! planning (dispatched by kind);
+//!   planning (dispatched by kind);
 //! - hybrid dual-representation join: the v2 file tree (DFS order) is the
-//! primary view; the v1 `files` list joins by sanitized relative path
-//! with `v1_offset`. The two views must agree on file order and lengths,
-//! otherwise the torrent is rejected (both views come from the same
-//! bytes, so agreement is inherent — a mismatch means corrupted
-//! metadata).
+//!   primary view; the v1 `files` list joins by sanitized relative path
+//!   with `v1_offset`. The two views must agree on file order and lengths,
+//!   otherwise the torrent is rejected (both views come from the same
+//!   bytes, so agreement is inherent — a mismatch means corrupted
+//!   metadata).
 //!
 //! # Engine-side assembly (host side)
 //!
@@ -27,24 +27,24 @@
 //! # Scope (honesty)
 //!
 //! - The parse and data faces of all three swarm kinds are fully
-//! supported; hash-exchange requesting (lazy base-layer fetch plus
-//! block-level verification) is part 2 — v2 verification granularity
-//! here is the whole piece.
+//!   supported; hash-exchange requesting (lazy base-layer fetch plus
+//!   block-level verification) is part 2 — v2 verification granularity
+//!   here is the whole piece.
 //! - announce: the top-level `announce` or the first usable URL of
-//! `announce-list` (compatibility surface), plus the full tier table
-//! [`Metainfo::announce_tiers`] (BEP12 "a list of tiers of announces";
-//! order preserved within a tier, entry-level tolerance — only a fully
-//! broken table is Malformed). With no announce at all the parse face
-//! accepts an empty string (structure parsing and intake policy are
-//! separate — the parse layer does not know the DHT switch); the stall
-//! hint is conditional in the intake gate [`Metainfo::check_intake`]
-//! (no tracker and DHT off = accept + WARN guidance).
+//!   `announce-list` (compatibility surface), plus the full tier table
+//!   [`Metainfo::announce_tiers`] (BEP12 "a list of tiers of announces";
+//!   order preserved within a tier, entry-level tolerance — only a fully
+//!   broken table is Malformed). With no announce at all the parse face
+//!   accepts an empty string (structure parsing and intake policy are
+//!   separate — the parse layer does not know the DHT switch); the stall
+//!   hint is conditional in the intake gate [`Metainfo::check_intake`]
+//!   (no tracker and DHT off = accept + WARN guidance).
 //! - BEP19 webseed: the top-level `url-list` is parsed in both shapes
-//! (single string / list; http(s) only, entries leniently skipped) into
-//! [`Metainfo::url_list`], projected onto the engine config's webseeds
-//! field (the `--enable-http-seeding` / `enable-http-seeding` switch
-//! clears it on the assembly/activation chain; this layer always
-//! projects the original values).
+//!   (single string / list; http(s) only, entries leniently skipped) into
+//!   [`Metainfo::url_list`], projected onto the engine config's webseeds
+//!   field (the `--enable-http-seeding` / `enable-http-seeding` switch
+//!   clears it on the assembly/activation chain; this layer always
+//!   projects the original values).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -194,8 +194,8 @@ impl TorrentMeta {
     /// Layout planning input (dispatched by kind):
     /// - v1-only: the list as-is (pad entries are pads);
     /// - hybrid: DFS files placed at their `v1_offset`, inter-file pads
-    /// derived from offset deltas (BEP47 path `[".pad", "N"]`);
-    /// alignment legality is checked by `Layout::plan_v1_padded`;
+    ///   derived from offset deltas (BEP47 path `[".pad", "N"]`);
+    ///   alignment legality is checked by `Layout::plan_v1_padded`;
     /// - v2-only: compact contiguous (no pads).
     pub fn plan_entries(&self) -> Result<Vec<PlanEntry>, MetainfoError> {
         match self.kind {
@@ -698,24 +698,24 @@ fn parse_files(top: &Value, kind: SwarmKind) -> Result<ParsedFiles, MetainfoErro
 /// both products from one pass, always consistent.
 ///
 /// - `announce` key present and Bytes -> `([announce], [[announce]])`
-/// (BEP3 single-tracker semantics); non-UTF-8 ->
-/// [`MetainfoError::InvalidAnnounceEncoding`] (an encoding defect of
-/// the announce key itself = hard reject, DHT-switch independent);
-/// empty-string sentinel (key present but empty bytes) -> both products
-/// empty (no tracker, no fabricated tier; no fallback to announce-list
-/// — announce-key priority preserved).
+///   (BEP3 single-tracker semantics); non-UTF-8 ->
+///   [`MetainfoError::InvalidAnnounceEncoding`] (an encoding defect of
+///   the announce key itself = hard reject, DHT-switch independent);
+///   empty-string sentinel (key present but empty bytes) -> both products
+///   empty (no tracker, no fabricated tier; no fallback to announce-list
+///   — announce-key priority preserved).
 /// - Otherwise `announce-list` (BEP12 "a list of tiers of announces"):
-/// whole field not a List -> [`MetainfoError::MalformedAnnounceList`];
-/// per tier, Bytes and UTF-8 entries are collected (order preserved
-/// within a tier; non-list tiers, non-Bytes / non-UTF-8 entries skipped
-/// one by one, empty tiers dropped — matching AnnounceList reconfigure
-/// skipping empty groups); no usable URL in the whole table ->
-/// `MalformedAnnounceList` (reject only on total corruption). The
-/// single-URL surface = the first URL of the first usable tier (legacy
-/// `announce` first-URL fallback).
+///   whole field not a List -> [`MetainfoError::MalformedAnnounceList`];
+///   per tier, Bytes and UTF-8 entries are collected (order preserved
+///   within a tier; non-list tiers, non-Bytes / non-UTF-8 entries skipped
+///   one by one, empty tiers dropped — matching AnnounceList reconfigure
+///   skipping empty groups); no usable URL in the whole table ->
+///   `MalformedAnnounceList` (reject only on total corruption). The
+///   single-URL surface = the first URL of the first usable tier (legacy
+///   `announce` first-URL fallback).
 /// - Both keys missing -> `("", [])` (empty string = no-tracker sentinel;
-/// the parse face makes no intake policy decision, the DHT switch is
-/// not this layer).
+///   the parse face makes no intake policy decision, the DHT switch is
+///   not this layer).
 fn extract_announce_tables(top: &Value) -> Result<(String, Vec<Vec<String>>), MetainfoError> {
     if let Some(Value::Bytes(url)) = top.get(b"announce") {
         let announce =

@@ -1547,13 +1547,13 @@ mod tests {
     /// downcast first + text fallback; the attribution core is
     /// single-sourced in taiji-io, this locks the bt-side wiring):
     /// - A type-preserved `ResolveError` hits by downcast: the chain
-    /// Display carries **no** dns wording, so only the source-chain
-    /// downcast can find it (direct proof the adapter layer must not
-    /// `to_string()` and break the chain);
+    ///   Display carries **no** dns wording, so only the source-chain
+    ///   downcast can find it (direct proof the adapter layer must not
+    ///   `to_string()` and break the chain);
     /// - A pure io error is not misjudged (connect refusal classifies as
-    /// connect, not dns);
+    ///   connect, not dns);
     /// - Broken-chain case: the payload is only "dns error: ..." text
-    /// (nothing to downcast) -> the text fallback path still catches it;
+    ///   (nothing to downcast) -> the text fallback path still catches it;
     /// - DNS attribution outranks the connect predicate (priority kept).
     #[test]
     fn classify_error_dyn_dns_arm_downcast_and_fallback() {

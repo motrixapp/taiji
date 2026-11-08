@@ -24,28 +24,28 @@
 //! Pinned playlist semantics (the media spec's errata):
 //!
 //! * **BYTERANGE omitted offset** accumulates **per URI in appearance
-//! order** (`HashMap<uri, next_offset>`); a sub-range with an
-//! explicit offset (re)seats that URI's cursor, a **whole-resource
-//! segment forgets it** (its length is unknowable at manifest-parse
-//! time, so the chain is broken), and all seat/accumulate arithmetic
-//! is `checked_*` — overflow is a parse error, never a wrap.
-//! EXT-X-MAP `BYTERANGE` sub-ranges join the same per-URI chain.
+//!   order** (`HashMap<uri, next_offset>`); a sub-range with an
+//!   explicit offset (re)seats that URI's cursor, a **whole-resource
+//!   segment forgets it** (its length is unknowable at manifest-parse
+//!   time, so the chain is broken), and all seat/accumulate arithmetic
+//!   is `checked_*` — overflow is a parse error, never a wrap.
+//!   EXT-X-MAP `BYTERANGE` sub-ranges join the same per-URI chain.
 //! * **METHOD=NONE is an explicit reset**: the ambient key becomes
-//! plaintext and no later segment inherits the retired key — the
-//! model materializes the effective key per segment, so the
-//! m3u8-rs "plaintext segment reuses the stale key" degradation
-//! cannot occur by construction.
+//!   plaintext and no later segment inherits the retired key — the
+//!   model materializes the effective key per segment, so the
+//!   m3u8-rs "plaintext segment reuses the stale key" degradation
+//!   cannot occur by construction.
 //! * **MAP-after-KEY boundary**: the init section's key is the
-//! `KEY=` attribute on the EXT-X-MAP when present (a taiji custom
-//! extension, an erratum of record: not an RFC 8216 / rfc8216bis
-//! clause), else the ambient EXT-X-KEY at the MAP's position (a KEY
-//! declared after the MAP never covers it). An encrypted init
-//! section's IV resolves at decrypt time: the key's explicit IV,
-//! else the first following segment's sequence — a practical taiji
-//! relaxation (the original parse-time explicit-IV rejection was
-//! relaxed by the decrypt line), not a spec clause; RFC 8216
-//! §4.3.2.5's spec-correct behavior
-//! on a missing init IV is to reject.
+//!   `KEY=` attribute on the EXT-X-MAP when present (a taiji custom
+//!   extension, an erratum of record: not an RFC 8216 / rfc8216bis
+//!   clause), else the ambient EXT-X-KEY at the MAP's position (a KEY
+//!   declared after the MAP never covers it). An encrypted init
+//!   section's IV resolves at decrypt time: the key's explicit IV,
+//!   else the first following segment's sequence — a practical taiji
+//!   relaxation (the original parse-time explicit-IV rejection was
+//!   relaxed by the decrypt line), not a spec clause; RFC 8216
+//!   §4.3.2.5's spec-correct behavior
+//!   on a missing init IV is to reject.
 
 use std::collections::HashMap;
 

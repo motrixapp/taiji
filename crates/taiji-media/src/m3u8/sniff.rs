@@ -7,13 +7,13 @@
 //! Consequences of the order, as the spec intends:
 //!
 //! * content that opens with `#EXTM3U` classifies HLS even when the
-//! extension/content-type say DASH;
+//!   extension/content-type say DASH;
 //! * content that carries a `<MPD` root classifies DASH likewise;
 //! * content with **no** recognizable signature (an HTML error page,
-//! a binary blob) falls through to the weaker signals — an `.m3u8`
-//! extension still classifies HLS and the **parser** then rejects a
-//! page without an `#EXTM3U` header with `manifest_parse`. The
-//! sniffer never guesses a flavor from non-signature bytes.
+//!   a binary blob) falls through to the weaker signals — an `.m3u8`
+//!   extension still classifies HLS and the **parser** then rejects a
+//!   page without an `#EXTM3U` header with `manifest_parse`. The
+//!   sniffer never guesses a flavor from non-signature bytes.
 //!
 //! Signature bounds: `#EXTM3U` must be the playlist's first
 //! non-BOM line (RFC 8216 §4.3.1.1); `<MPD` is searched within the
@@ -49,9 +49,9 @@ const CONTENT_PROBE_LIMIT: usize = 1024;
 /// Classify by the media spec's precedence order.
 ///
 /// * `content` — manifest bytes when already fetched (`None` = not
-/// available yet, e.g. a filename-only entry);
+///   available yet, e.g. a filename-only entry);
 /// * `extension` — file extension or a filename (`m3u8`, `.mpd`,
-/// `index.m3u8` all work; compared case-insensitively);
+///   `index.m3u8` all work; compared case-insensitively);
 /// * `content_type` — raw Content-Type header value.
 pub fn sniff(
     content: Option<&[u8]>,

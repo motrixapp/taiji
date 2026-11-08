@@ -122,13 +122,13 @@ pub(super) fn choke_round(face: &mut FaceState) {
 /// via [`taiji_bt::choke::LeecherChoke::select`]. Dual mode:
 ///
 /// - libtorrent (default): 8 total slots (optimistic 1 included) = 7
-/// regular + 1 optimistic; optimism reselected every 30s (2-round
-/// phase) by `last_optimistically_unchoked` ascending (waits longest
-/// first, fed across rounds by the `peer_state` row's
-/// `last_opt_unchoke`); regular keys follow the aria2 port
-/// (divergences below).
+///   regular + 1 optimistic; optimism reselected every 30s (2-round
+///   phase) by `last_optimistically_unchoked` ascending (waits longest
+///   first, fed across rounds by the `peer_state` row's
+///   `last_opt_unchoke`); regular keys follow the aria2 port
+///   (divergences below).
 /// - aria2 fallback (`BH_CHOKE_ARIA2=1`): 3 regular + planned optimistic
-/// shuffle + fast handoff (`BtLeecherStateChoke` port, unchanged).
+///   shuffle + fast handoff (`BtLeecherStateChoke` port, unchanged).
 ///
 /// Input stats: interested/snubbed (lock-free PeerTaskHandle mirror),
 /// regular_unchoker (last round's regular slots; keep-position key),
@@ -280,17 +280,17 @@ pub(super) fn leecher_choke_round(
 /// send SendUnchoke immediately — saving one round of latency.
 ///
 /// - Free-slot check = current unchoke count < [`UNCHOKE_SLOTS`] (8;
-/// optimistic counts against the total — leecher 7+1 and seeder 8
-/// share the same cap; fixed slots is the only choke mode here,
-/// `rate_based_choker` is not modeled, so the gate is always open).
+///   optimistic counts against the total — leecher 7+1 and seeder 8
+///   share the same cap; fixed slots is the only choke mode here,
+///   `rate_based_choker` is not modeled, so the gate is always open).
 /// - A pass does not enter `regular_unchoked` (the keep-position key
-/// belongs to the round decision); the next round converges normally —
-/// same shape as libtorrent's momentary overshoot reined in by the
-/// regular round (`torrent.cpp` comment).
+///   belongs to the round decision); the next round converges normally —
+///   same shape as libtorrent's momentary overshoot reined in by the
+///   regular round (`torrent.cpp` comment).
 /// - aria2 fallback mode returns immediately (aria2 has no such
-/// semantics; the fallback keeps the existing round cadence).
+///   semantics; the fallback keeps the existing round cadence).
 /// - Lossy events (avail channel full, dropped) degrade to waiting for
-/// the next round (consistent with round semantics).
+///   the next round (consistent with round semantics).
 pub(super) fn preemptive_unchoke(face: &mut FaceState, cuid: u64) {
     let mode = if face.completed {
         face.choke.mode()

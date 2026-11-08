@@ -288,12 +288,12 @@ pub const RENDEZVOUS_ASK_BACKOFF: Duration = Duration::from_secs(60);
 /// Hole-punch trigger bookkeeping (owned by the engine main loop, no shared
 /// locks; time is injected throughout, tests never sleep):
 /// - `failed`: outbound addresses that **actually exhausted their dial
-/// plan** (the trigger gate — bookkeeping for "only addresses with a
-/// real handshake failure"; removed on successful connect);
+///   plan** (the trigger gate — bookkeeping for "only addresses with a
+///   real handshake failure"; removed on successful connect);
 /// - `introduced`: ut_pex-delivered address -> delivering connection cuid
-/// (same bookkeeping as libtorrent's `find_introducer`, `torrent.cpp`);
+///   (same bookkeeping as libtorrent's `find_introducer`, `torrent.cpp`);
 /// - `next_ask`: per-target rendezvous backoff (window not elapsed =
-/// the trigger is ignored).
+///   the trigger is ignored).
 #[derive(Debug, Default)]
 pub struct HolepunchBook {
     failed: HashMap<SocketAddr, Instant>,

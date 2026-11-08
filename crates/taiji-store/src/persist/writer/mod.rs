@@ -15,22 +15,22 @@
 //! # Module layout
 //!
 //! - `job`: the [`PersistJob`] single-writer command set + [`PersistOutcome`]
-//! write results;
+//!   write results;
 //! - `rows`: business-row payload types (the persistence tables field by
-//! field, including [`TORRENT_ACTIVE_STATES`]);
+//!   field, including [`TORRENT_ACTIVE_STATES`]);
 //! - `handle`: the [`PersistHandle`] async API face (bounded mpsc submit +
-//! oneshot reply);
+//!   oneshot reply);
 //! - `runner`: the [`PersistWriter`] entry (open + migrate via
-//! `spawn_blocking`) and the dedicated blocking thread's main loop
-//! (dispatching each job to its `write_*` row face);
+//!   `spawn_blocking`) and the dedicated blocking thread's main loop
+//!   (dispatching each job to its `write_*` row face);
 //! - `write_progress`/`write_tracker`/`write_ipguard`/`write_dht`/
-//! `write_torrent`/`write_kv`/`write_recovery`: per-table row write
-//! faces (digest dedup / row-comparison skip-write semantics preserved
-//! as-is; recovery = the recovery-layer derived table);
-//! `write_cookie` = the unified task_cookie faces (paired
-//! delete + terminal clear + the startup GC);
+//!   `write_torrent`/`write_kv`/`write_recovery`: per-table row write
+//!   faces (digest dedup / row-comparison skip-write semantics preserved
+//!   as-is; recovery = the recovery-layer derived table);
+//!   `write_cookie` = the unified task_cookie faces (paired
+//!   delete + terminal clear + the startup GC);
 //! - `tests`: the former inline `#[cfg(test)]` code, moved over byte for
-//! byte.
+//!   byte.
 
 #[cfg(test)]
 use crate::error::StoreError;

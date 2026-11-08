@@ -89,15 +89,15 @@ pub struct RecheckOutcome {
 /// Predicate structure mirrors the persisted-row routing dual
 /// (`lifecycle::progress_row_complete`, the routing dual):
 /// - v2-only (`v2_file_bits` present): every non-padding file's piece
-/// range fully set in its stored segment (a missing segment or a
-/// stored count below the expected piece count = incomplete);
+///   range fully set in its stored segment (a missing segment or a
+///   stored count below the expected piece count = incomplete);
 /// - else v1/hybrid (`v1_bitfield` present): every global piece index
-/// set (a short/absent bitfield = incomplete — the same conservative
-/// read as `bit_set`'s out-of-bounds face);
+///   set (a short/absent bitfield = incomplete — the same conservative
+///   read as `bit_set`'s out-of-bounds face);
 /// - neither present = incomplete;
 /// - any suspended file = incomplete (its bits are all-zero
-/// placeholders — unmeasured content must not route to the seed
-/// side).
+///   placeholders — unmeasured content must not route to the seed
+///   side).
 ///
 /// The `verified`/`total` counters are log faces, not the predicate:
 /// the bitmap is authoritative (the counters exclude suspended pieces,
@@ -610,14 +610,14 @@ mod tests {
     /// Three-file vector face (DFS order = dict key byte order: empty
     /// < multi < single):
     /// - `data/empty.bin`: 0 pieces (the plan_file_lengths cursor
-    /// skips naturally);
+    ///   skips naturally);
     /// - `data/multi.bin`: 2 pieces — piece 0 = a full 8-block piece
-    /// (n == bpp); piece 1 = a 2-block short tail (n = 2 < bpp/2,
-    /// the two tree shapes must differ);
+    ///   (n == bpp); piece 1 = a 2-block short tail (n = 2 < bpp/2,
+    ///   the two tree shapes must differ);
     /// - `data/single.bin`: 1 piece of 3 blocks (a non-power-of-two
-    /// block count; a file of <= 1 piece is independent of the piece
-    /// boundary — BEP52 "padded to the next power of two instead of
-    /// the next piece boundary").
+    ///   block count; a file of <= 1 piece is independent of the piece
+    ///   boundary — BEP52 "padded to the next power of two instead of
+    ///   the next piece boundary").
     fn fixture_files() -> Vec<(&'static str, Vec<u8>)> {
         vec![
             ("empty.bin", Vec::new()),

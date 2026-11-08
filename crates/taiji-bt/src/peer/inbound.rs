@@ -69,12 +69,12 @@ fn validate_request_length(length: u32) -> Result<(), String> {
 ///
 /// - `begin` is a multiple of 16KiB;
 /// - `length ∈ (0, 16KiB]` (wire decoding tolerates empty/oversized
-/// frame bodies; this closes it at request granularity);
+///   frame bodies; this closes it at request granularity);
 /// - when the `piece_bytes` table is non-empty: index in bounds and
-/// `begin + length <= the piece's expected bytes` (table length = piece
-/// count, entries = expected bytes after last-piece truncation; the
-/// wire index equals the flat piece order for v1 and v2). An empty
-/// table = unknown piece geometry (degenerate; geometry checks only).
+///   `begin + length <= the piece's expected bytes` (table length = piece
+///   count, entries = expected bytes after last-piece truncation; the
+///   wire index equals the flat piece order for v1 and v2). An empty
+///   table = unknown piece geometry (degenerate; geometry checks only).
 ///
 /// The slot-matching path needs no check: its begin/length equal our
 /// dispatched slot exactly, guaranteed by the dispatch face (the engine

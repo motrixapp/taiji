@@ -28,63 +28,63 @@
 //! # tracker wiring
 //!
 //! - One [`taiji_bt::tracker::actor::spawn_tracker_actor`] per face:
-//! the actor drives the announce cycle (started -> downloading ->
-//! completed -> stopped, the aria2 event order), tier fallback and
-//! reset, interval/min-interval, scrape; the engine only consumes
-//! events (Peers -> dial; IntervalUpdated/AnnounceFailed/
-//! ScrapeResult -> tracker table rows). The old "single URL announce
-//! per tick" face is removed; `EngineConfig::announce` degraded to
-//! the tiers default source (the call sites unchanged).
+//!   the actor drives the announce cycle (started -> downloading ->
+//!   completed -> stopped, the aria2 event order), tier fallback and
+//!   reset, interval/min-interval, scrape; the engine only consumes
+//!   events (Peers -> dial; IntervalUpdated/AnnounceFailed/
+//!   ScrapeResult -> tracker table rows). The old "single URL announce
+//!   per tick" face is removed; `EngineConfig::announce` degraded to
+//!   the tiers default source (the call sites unchanged).
 //! - Event -> row attribution: actor events carry no tier/success URL
-//! (a frozen protocol face), so the engine holds a **mirror
-//! instance** of the same frozen state machine
-//! (`bt::tracker::AnnounceList`) for attribution
-//! ([`tracker::TrackerMirror`]) — failure events carry the url,
-//! success events are IntervalUpdated (HTTP always sends; UDP with
-//! interval=0 sends none), Stop/completed are flipped by the engine's
-//! own actions/snapshot, in lockstep with the actor; attribution =
-//! the mirror's `get_announce()`, scrape attributes to the most
-//! recent successful row.
+//!   (a frozen protocol face), so the engine holds a **mirror
+//!   instance** of the same frozen state machine
+//!   (`bt::tracker::AnnounceList`) for attribution
+//!   ([`tracker::TrackerMirror`]) — failure events carry the url,
+//!   success events are IntervalUpdated (HTTP always sends; UDP with
+//!   interval=0 sends none), Stop/completed are flipped by the engine's
+//!   own actions/snapshot, in lockstep with the actor; attribution =
+//!   the mirror's `get_announce()`, scrape attributes to the most
+//!   recent successful row.
 //! - Shutdown sequence (token-stop paths only): Stop -> the actor
-//! drives the stopped event sequence -> noMoreAnnounce -> Halted
-//! (`TrackerWatcherCommand.cc`); peers/store are torn down only
-//! after every face reports Halted (budget
-//! [`tracker::STOPPED_ANNOUNCE_BUDGET`], timed-out faces exit
-//! degraded). Completed/Failed paths do not drive the stopped
-//! sequence (TorrentTask takes over the RPC pause/remove semantics;
-//! the actor ends when the command channel drops at engine exit).
+//!   drives the stopped event sequence -> noMoreAnnounce -> Halted
+//!   (`TrackerWatcherCommand.cc`); peers/store are torn down only
+//!   after every face reports Halted (budget
+//!   [`tracker::STOPPED_ANNOUNCE_BUDGET`], timed-out faces exit
+//!   degraded). Completed/Failed paths do not drive the stopped
+//!   sequence (TorrentTask takes over the RPC pause/remove semantics;
+//!   the actor ends when the command channel drops at engine exit).
 //!
 //! # MSE/DHT/UDP wiring
 //!
 //! - **MSE**: inbound listener streams -> [`taiji_bt::mse::accept_any`]
-//! (first-byte sniffing splits legacy/MSE,
-//! `ReceiverMSEHandshakeCommand.cc`; require-crypto rejects legacy);
-//! outbound follows [`taiji_bt::mse::CryptoPolicy`] three ways (see
-//! `transit::outbound_crypto_shape`) — require-crypto MUST MSE
-//! (`bt::mse::connect`, no silent plaintext fallback);
-//! min-crypto-level=arc4 is MSE-first with a fresh-connection legacy
-//! fallback (`InitiatorMSEHandshakeCommand.cc`); the default plain
-//! dials a legacy handshake directly. Announce crypto parameter bits
-//! via `mse::announce_crypto_param` (`DefaultBtAnnounce.cc`).
+//!   (first-byte sniffing splits legacy/MSE,
+//!   `ReceiverMSEHandshakeCommand.cc`; require-crypto rejects legacy);
+//!   outbound follows [`taiji_bt::mse::CryptoPolicy`] three ways (see
+//!   `transit::outbound_crypto_shape`) — require-crypto MUST MSE
+//!   (`bt::mse::connect`, no silent plaintext fallback);
+//!   min-crypto-level=arc4 is MSE-first with a fresh-connection legacy
+//!   fallback (`InitiatorMSEHandshakeCommand.cc`); the default plain
+//!   dials a legacy handshake directly. Announce crypto parameter bits
+//!   via `mse::announce_crypto_param` (`DefaultBtAnnounce.cc`).
 //! - **UDP**: [`taiji_io::udp_demux::spawn`] both families (v4 main;
-//! v6 best-effort bind) takes over the listen-port UDP face on a
-//! shared socket — DHT consumes the dht channel, the tracker actor's
-//! router/dispatcher tasks carry the tracker channel; the µTP
-//! channel -> the `io::utp` listener (accept merged into the main
-//! loop on the same path as TCP inbound; outbound dials follow the
-//! `--bt-peer-connection-type` four-state plan).
+//!   v6 best-effort bind) takes over the listen-port UDP face on a
+//!   shared socket — DHT consumes the dht channel, the tracker actor's
+//!   router/dispatcher tasks carry the tracker channel; the µTP
+//!   channel -> the `io::utp` listener (accept merged into the main
+//!   loop on the same path as TCP inbound; outbound dials follow the
+//!   `--bt-peer-connection-type` four-state plan).
 //! - **DHT** (`EngineConfig::dht`; the default constructor is disabled
-//! — existing tests unchanged. Production injection: the CLI download
-//! mode `--enable-dht` (default true) or the idle-mode session option
-//! `enable_dht`): one `spawn_dht_engine` per family; the restored
-//! state = `dht_state` rows ([`load_dht_restore_state`]); bootstrap =
-//! `--dht-entry-point[-6]` + the router fallback (v4); TorrentTask
-//! announce via `DhtHandle::announce` (target = sha1 | truncated
-//! sha256, private torrents BEP27 disabled); `PeersFound` -> dedup
-//! then dial; PORT after the handshake (the peer reserved DHT bit &&
-//! local enabled) + on receiving PORT -> `AddPortNode`
-//! (BtPortMessage.cc); `Persist` -> UpsertDhtState (autosave 30min +
-//! halt-save).
+//!   — existing tests unchanged. Production injection: the CLI download
+//!   mode `--enable-dht` (default true) or the idle-mode session option
+//!   `enable_dht`): one `spawn_dht_engine` per family; the restored
+//!   state = `dht_state` rows ([`load_dht_restore_state`]); bootstrap =
+//!   `--dht-entry-point[-6]` + the router fallback (v4); TorrentTask
+//!   announce via `DhtHandle::announce` (target = sha1 | truncated
+//!   sha256, private torrents BEP27 disabled); `PeersFound` -> dedup
+//!   then dial; PORT after the handshake (the peer reserved DHT bit &&
+//!   local enabled) + on receiving PORT -> `AddPortNode`
+//!   (BtPortMessage.cc); `Persist` -> UpsertDhtState (autosave 30min +
+//!   halt-save).
 //!
 //! # swarm faces (BEP52 "Upgrade Path")
 //!
@@ -97,82 +97,82 @@
 //!
 //! - **v1-only**: a single v1 face (Flat addressing);
 //! - **v2-only**: a single v2 face
-//! ([`taiji_bt::piece_id::Addressing::PerFile`], wire index =
-//! file-aligned base + in-piece offset, the BEP52 `piece length`
-//! section; the on-disk layout is compact with file-boundary gaps
-//! between pieces -> each piece's disk offset is precomputed by
-//! `Layout::v2_piece_offset`);
+//!   ([`taiji_bt::piece_id::Addressing::PerFile`], wire index =
+//!   file-aligned base + in-piece offset, the BEP52 `piece length`
+//!   section; the on-disk layout is compact with file-boundary gaps
+//!   between pieces -> each piece's disk offset is precomputed by
+//!   `Layout::v2_piece_offset`);
 //! - **hybrid**: two faces in parallel — v1 (the v1 sha1 identity) +
-//! v2 (the truncated sha256 identity). The BEP52 alignment makes the
-//! **v1 piece index and the v2 wire index identical** (pad only
-//! fills the real last-piece remainder, never a whole piece), so both
-//! faces share one piece space: independent verification (v1 =
-//! whole-piece SHA-1 including the pad zeros; v2 = content-prefix
-//! merkle recompute of the piece root), independent persistence (the
-//! same bytes write the same file ranges; pad is never written),
-//! completion propagated across faces (one face verifying piece k
-//! marks it complete on the other, avoiding duplicate downloads).
-//! BEP52: "they must also verify that pieces match both piece hash
-//! formats" — both faces attach a
-//! [`taiji_store::verified::CrossRule`] dual check; a mismatch =
-//! metadata contradiction -> torrent-level failure (BEP52 allows
-//! "abort or fall back"; this implementation aborts).
+//!   v2 (the truncated sha256 identity). The BEP52 alignment makes the
+//!   **v1 piece index and the v2 wire index identical** (pad only
+//!   fills the real last-piece remainder, never a whole piece), so both
+//!   faces share one piece space: independent verification (v1 =
+//!   whole-piece SHA-1 including the pad zeros; v2 = content-prefix
+//!   merkle recompute of the piece root), independent persistence (the
+//!   same bytes write the same file ranges; pad is never written),
+//!   completion propagated across faces (one face verifying piece k
+//!   marks it complete on the other, avoiding duplicate downloads).
+//!   BEP52: "they must also verify that pieces match both piece hash
+//!   formats" — both faces attach a
+//!   [`taiji_store::verified::CrossRule`] dual check; a mismatch =
+//!   metadata contradiction -> torrent-level failure (BEP52 allows
+//!   "abort or fall back"; this implementation aborts).
 //!
 //! # seeding operation
 //!
 //! - **Stop conditions** (`taiji_domain::seed`): seed-ratio
-//! (ShareRatioSeedCriteria), seed-time (TimeSeedCriteria, timed from
-//! the download-complete moment); either stops seeding (Union);
-//! assembly cross-checked against BtSetup.cc. A satisfied criterion
-//! ends seeding and returns [`EngineEnd::SeedStopped`].
+//!   (ShareRatioSeedCriteria), seed-time (TimeSeedCriteria, timed from
+//!   the download-complete moment); either stops seeding (Union);
+//!   assembly cross-checked against BtSetup.cc. A satisfied criterion
+//!   ends seeding and returns [`EngineEnd::SeedStopped`].
 //! - **bt-stop-timeout** (BtStopDownloadCommand): a 1s tick (the
-//! dedicated [`seed_ticker`] cadence); a download speed > 0 (the
-//! SpeedCalc 10s sliding window) resets the checkpoint, on timeout
-//! the engine force-stops (`EngineEnd::Failed` with the
-//! `--bt-stop-timeout` message); download period only.
+//!   dedicated [`seed_ticker`] cadence); a download speed > 0 (the
+//!   SpeedCalc 10s sliding window) resets the checkpoint, on timeout
+//!   the engine force-stops (`EngineEnd::Failed` with the
+//!   `--bt-stop-timeout` message); download period only.
 //! - **Counter persistence**: session up/down = PeerConfig-injected
-//! counters (piece-payload scope, counted at BtPieceMessage.cc),
-//! autosaved via `UpsertTorrentProgress` (60s, the
-//! --auto-save-interval default) + final values at teardown; the
-//! `upload_at_startup` base is read back at engine start via
-//! `LoadTorrentProgress` (the .aria2 control-file uploadLength
-//! semantics).
+//!   counters (piece-payload scope, counted at BtPieceMessage.cc),
+//!   autosaved via `UpsertTorrentProgress` (60s, the
+//!   --auto-save-interval default) + final values at teardown; the
+//!   `upload_at_startup` base is read back at engine start via
+//!   `LoadTorrentProgress` (the .aria2 control-file uploadLength
+//!   semantics).
 //! - **bt-detach-seed-only**: the complete-to-seed-only decision
-//! (RequestGroup.cc) + distinct return paths (Detached vs
-//! SeedStopped).
+//!   (RequestGroup.cc) + distinct return paths (Detached vs
+//!   SeedStopped).
 //!
 //! # scope (honesty)
 //!
 //! - TorrentTask/SessionActor RPC integration lives outside this
-//! crate; this module is the bare CLI shape.
+//!   crate; this module is the bare CLI shape.
 //! - hash exchange **requester**: the v2 face lazily fetches the base
-//! layer covering a file before requesting its blocks (the
-//! [`taiji_domain::hash_fetch`] planner, a length<=512 cap), verifies
-//! the response up to the piece root into the HashTreeCache; the
-//! store pipeline compares leaf hashes per block directly (a failure
-//! refetches only that 16KiB). Exhausted lazy retries -> a
-//! whole-piece buffering fallback (an explicit warn, not a silent
-//! default). The responder side (hash request replies) is delivered.
+//!   layer covering a file before requesting its blocks (the
+//!   [`taiji_domain::hash_fetch`] planner, a length<=512 cap), verifies
+//!   the response up to the piece root into the HashTreeCache; the
+//!   store pipeline compares leaf hashes per block directly (a failure
+//!   refetches only that 16KiB). Exhausted lazy retries -> a
+//!   whole-piece buffering fallback (an explicit warn, not a silent
+//!   default). The responder side (hash request replies) is delivered.
 //! - Inbound connections are served already-written pieces before full
-//! completion (unwritten pieces are rejected — the gate checks the
-//! written bits; hash-pass advertising and serving stay distinct).
+//!   completion (unwritten pieces are rejected — the gate checks the
+//!   written bits; hash-pass advertising and serving stay distinct).
 //! - Choking: completed faces use the seeder path, unchoking
-//! interested peers; the download face uses the leecher path:
-//! LeecherChoke decides every 10s round (3 regular slots + a planned
-//! optimistic rotation), tit-for-tat upload served via
-//! PartialFaceSource.
+//!   interested peers; the download face uses the leecher path:
+//!   LeecherChoke decides every 10s round (3 regular slots + a planned
+//!   optimistic rotation), tit-for-tat upload served via
+//!   PartialFaceSource.
 //! - Client-identity bans: identity rules are judged on
-//! session-activated engines (download/seed) at handshake completion
-//! (`ban::client_violation`, outbound TCP/µTP + inbound TCP/µTP, four
-//! points); re-judged once when the ext handshake `v` field arrives
-//! (`ban::client_v_deny_check` injected into PeerTask; a hit is a
-//! `ClientBanned` violation disconnect — both dimensions share the
-//! same persistence/disconnect face). Known gaps (stated honestly):
-//! magnet metadata-phase direct dials (taiji_core::magnet's
-//! dial_metadata_peer — assembled core-side, with no ledger/snapshot
-//! wiring across crates); and the bare CLI shape (no session) has no
-//! ban-list feed point, so the empty-list semantics (ban no clients)
-//! holds naturally.
+//!   session-activated engines (download/seed) at handshake completion
+//!   (`ban::client_violation`, outbound TCP/µTP + inbound TCP/µTP, four
+//!   points); re-judged once when the ext handshake `v` field arrives
+//!   (`ban::client_v_deny_check` injected into PeerTask; a hit is a
+//!   `ClientBanned` violation disconnect — both dimensions share the
+//!   same persistence/disconnect face). Known gaps (stated honestly):
+//!   magnet metadata-phase direct dials (taiji_core::magnet's
+//!   dial_metadata_peer — assembled core-side, with no ledger/snapshot
+//!   wiring across crates); and the bare CLI shape (no session) has no
+//!   ban-list feed point, so the empty-list semantics (ban no clients)
+//!   holds naturally.
 //!
 //! Concurrency discipline: the main loop does zero disk IO / zero
 //! hashing — each face has its own store pipeline task with blocking
@@ -357,20 +357,20 @@ pub use taiji_store::disk_policy::{DiskTier, LivePolicy};
 /// Engine boundary governance sweep. Three invariants:
 ///
 /// 1. The engine subtree (doc comments and test code included) must
-/// not contain crate paths pointing at session — the engine never
-/// referencing the session namespace back is the hard prerequisite
-/// of the crate split; a regression breaks the split's feasibility.
+///    not contain crate paths pointing at session — the engine never
+///    referencing the session namespace back is the hard prerequisite
+///    of the crate split; a regression breaks the split's feasibility.
 /// 2. The engine's companion-crate coupling is capped by the
-/// COMPANION_WHITELIST registry: a `taiji_*` reference outside the
-/// list would be a reference back to core/rpc/cli, which is already
-/// a Cargo-level dependency-cycle error (the compiler owns
-/// cross-crate boundaries after the split); the source scan keeps
-/// the registry honest as belt-and-braces — violations turn red in
-/// `cargo test -p taiji-engine`.
+///    COMPANION_WHITELIST registry: a `taiji_*` reference outside the
+///    list would be a reference back to core/rpc/cli, which is already
+///    a Cargo-level dependency-cycle error (the compiler owns
+///    cross-crate boundaries after the split); the source scan keeps
+///    the registry honest as belt-and-braces — violations turn red in
+///    `cargo test -p taiji-engine`.
 /// 3. This crate's manifest must not declare a dependency on
-/// taiji-core — the compile-level boundary pinned explicitly at the
-/// manifest layer (a dependency-table regression surfaces before
-/// compilation).
+///    taiji-core — the compile-level boundary pinned explicitly at the
+///    manifest layer (a dependency-table regression surfaces before
+///    compilation).
 ///
 /// Scan scope: source text + assertions (the same convention as the
 /// taiji-core lib.rs allow_lint_sweep); the scanned face = every .rs

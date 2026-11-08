@@ -4,35 +4,35 @@
 //! bittorrent.org/beps/bep_0052.html)
 //!
 //! - "Clients must be able to service requests for hash blocks covering
-//! pieces which they have announced" — this source is installed only for
-//! fully seeded data (the engine mounts it after whole-piece validation
-//! passes, same timing as ReaderSource);
+//!   pieces which they have announced" — this source is installed only for
+//!   fully seeded data (the engine mounts it after whole-piece validation
+//!   passes, same timing as ReaderSource);
 //! - Only the leaf (0) and piece base layers must be supported ("Clients
-//! are only required to support setting the base layer to the leaf and
-//! piece layers"); other layers explicitly Err (turned into a hash
-//! reject by peer.rs — a legal answer);
+//!   are only required to support setting the base layer to the leaf and
+//!   piece layers"); other layers explicitly Err (turned into a hash
+//!   reject by peer.rs — a legal answer);
 //! - Proof layer: derived upward from the base layer data; once the range
-//! folds to a single node, each level takes the sibling uncle ("at most
-//! one uncle hash is needed per proof layer"); the omission rule (the
-//! first log2(length)-1 proof layers) and peer_wire::hashes_count_for
-//! are two sides of the same spec;
+//!   folds to a single node, each level takes the sibling uncle ("at most
+//!   one uncle hash is needed per proof layer"); the omission rule (the
+//!   first log2(length)-1 proof layers) and peer_wire::hashes_count_for
+//!   are two sides of the same spec;
 //! - Self-check: rebuilding the file root from the base layer data must
-//! equal the requested pieces root; a mismatch = corrupted data or
-//! metadata -> Err (never emit wrong hashes).
+//!   equal the requested pieces root; a mismatch = corrupted data or
+//!   metadata -> Err (never emit wrong hashes).
 //! - Short count (the file shallower than the requested proof) -> Err
-//! reject: sending a malformed count frame gets the peer to disconnect
-//! per spec; reject is the only legal exit (BEP52 allows any request to
-//! be answered with a reject).
+//!   reject: sending a malformed count frame gets the peer to disconnect
+//!   per spec; reject is the only legal exit (BEP52 allows any request to
+//!   be answered with a reject).
 //! - Tree shape (corrected): files whose leaf count is not a power of two
-//! are balanced by BEP52 **zero-leaf padding** — "The remaining leaf
-//! hashes beyond the end of the file required to construct upper layers
-//! of the merkle tree are set to zero" (the piece layer completes to a
-//! zero-leaf tree root, matching the creator reference implementation).
-//! The earlier "odd last node self-pairs" folding was a misreading of
-//! an early draft: the current text has no such rule, and it disagreed
-//! with the metadata validation side (`store::merkle`), so base=0
-//! requests on non-power-of-two files failed the rebuilt-root
-//! self-check and were wrongly rejected.
+//!   are balanced by BEP52 **zero-leaf padding** — "The remaining leaf
+//!   hashes beyond the end of the file required to construct upper layers
+//!   of the merkle tree are set to zero" (the piece layer completes to a
+//!   zero-leaf tree root, matching the creator reference implementation).
+//!   The earlier "odd last node self-pairs" folding was a misreading of
+//!   an early draft: the current text has no such rule, and it disagreed
+//!   with the metadata validation side (`store::merkle`), so base=0
+//!   requests on non-power-of-two files failed the rebuilt-root
+//!   self-check and were wrongly rejected.
 //!
 //! # Cost containment (honesty) -> budgeting
 //!
@@ -44,17 +44,17 @@
 //! seeding state. Now budgeted (trade-offs in the const docs):
 //!
 //! - **Layer cache**: whole-file leaf layers for base=0 are LRU-cached by
-//! root (resident cap [`HASH_LEAF_CACHE_CAP_BYTES`]) — completed
-//! seeding data is immutable (the write path closes with whole-piece
-//! validation), so a cache hit is always O(1) and repeated requests for
-//! the same file no longer amplify;
+//!   root (resident cap [`HASH_LEAF_CACHE_CAP_BYTES`]) — completed
+//!   seeding data is immutable (the write path closes with whole-piece
+//!   validation), so a cache hit is always O(1) and repeated requests for
+//!   the same file no longer amplify;
 //! - **Compute budget**: cache misses (first touch / re-touch after
-//! eviction) account compute as file-byte equivalents into a rolling
-//! window ledger ([`HASH_SERVE_WINDOW`] /
-//! [`HASH_SERVE_WINDOW_BUDGET_BYTES`]). Over budget **we still answer
-//! and only count** (a BEP52 mandatory obligation cannot be refused —
-//! "add budget, never refuse the obligation"); the over-limit count is
-//! the observable surface (`LeafLayerCache::over_budget_serves`).
+//!   eviction) account compute as file-byte equivalents into a rolling
+//!   window ledger ([`HASH_SERVE_WINDOW`] /
+//!   [`HASH_SERVE_WINDOW_BUDGET_BYTES`]). Over budget **we still answer
+//!   and only count** (a BEP52 mandatory obligation cannot be refused —
+//!   "add budget, never refuse the obligation"); the over-limit count is
+//!   the observable surface (`LeafLayerCache::over_budget_serves`).
 //!
 //! The requester-side HashTreeCache ships with the v2 data face.
 

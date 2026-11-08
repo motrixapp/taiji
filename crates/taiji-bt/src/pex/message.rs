@@ -9,20 +9,20 @@
 //!
 //! - dict key order `added < added.f < added6 < added6.f < dropped <
 //! dropped6` matches the reference output bytes (its Dict is an ordered
-//! map; see the `UTPexExtensionMessageTest.cc` vectors).
+//!   map; see the `UTPexExtensionMessageTest.cc` vectors).
 //! - Keys for empty lists are not written; flags appear only alongside
-//! their address string.
+//!   their address string.
 //! - Decode leniency (interop surface): a non-dict top level -> 0 peers,
-//! no error (the `if (dict)` guard); an address string whose length is
-//! not a multiple of the family unit size is skipped
-//! (`bittorrent_helper.h`); `added.f`/`added6.f` **are read per the
-//! BEP11 text** (bit0 encrypted / bit1 upload_only, paired per unit,
-//! missing/short treated as 0) — an explicit divergence from the
-//! reference's "never reads flags"; the BEP text wins. See
-//! [`PexMessage::decode`].
+//!   no error (the `if (dict)` guard); an address string whose length is
+//!   not a multiple of the family unit size is skipped
+//!   (`bittorrent_helper.h`); `added.f`/`added6.f` **are read per the
+//!   BEP11 text** (bit0 encrypted / bit1 upload_only, paired per unit,
+//!   missing/short treated as 0) — an explicit divergence from the
+//!   reference's "never reads flags"; the BEP text wins. See
+//!   [`PexMessage::decode`].
 //! - Deliberate tightening: `encode` returns `Result` (the canonical
-//! encoder rejects out-of-order keys); the reference gets that
-//! implicitly from its C++ ordered map.
+//!   encoder rejects out-of-order keys); the reference gets that
+//!   implicitly from its C++ ordered map.
 
 use std::time::{Duration, Instant};
 

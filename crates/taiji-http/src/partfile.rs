@@ -252,14 +252,14 @@ pub fn release_part_claim(path: &Path) {
 /// the close->rename window and renamePending polling. Holder-key
 /// semantics:
 /// - same-key re-claim is idempotent: task reactivation (pause->resume
-/// reruns plan_output) and cross-round poll re-claims do not
-/// self-reject;
+///   reruns plan_output) and cross-round poll re-claims do not
+///   self-reject;
 /// - a different holder gets `taiji.http.path_conflict` — the final
-/// path is a task's exclusive output domain, and per-task incomplete
-/// suffixes do not isolate (tasks A `.a` and B `.b` with the same
-/// dir/out would both pass, and finalize's posix rename would
-/// atomically overwrite, the later finisher silently swallowing the
-/// earlier final file).
+///   path is a task's exclusive output domain, and per-task incomplete
+///   suffixes do not isolate (tasks A `.a` and B `.b` with the same
+///   dir/out would both pass, and finalize's posix rename would
+///   atomically overwrite, the later finisher silently swallowing the
+///   earlier final file).
 ///
 /// Hostile cross-process writers remain the registered existing
 /// boundary (the session model is one process, one writer).
@@ -529,15 +529,15 @@ impl PartFile {
     /// `createFile` mkdirs semantics, `AbstractDiskWriter.cc`).
     ///
     /// - claim: the in-process per-path table claims atomically — a
-    /// second open of the same path while the first task is in flight
-    /// gets `taiji.http.path_conflict` (the co-write/truncate race on
-    /// one `.part` closes at the open face); released when the rename
-    /// settles (close transfers -> finalize close-out) or on last-handle
-    /// drop / credential discard;
+    ///   second open of the same path while the first task is in flight
+    ///   gets `taiji.http.path_conflict` (the co-write/truncate race on
+    ///   one `.part` closes at the open face); released when the rename
+    ///   settles (close transfers -> finalize close-out) or on last-handle
+    ///   drop / credential discard;
     /// - `Restart`: truncate to 0, then place per [`FileAllocation`];
     /// - `Resume`: keep existing bytes; grow to `total_len` when short
-    /// (grow-only, never shrink — shrinking belongs to the `Restart`
-    /// decision; the resume path never truncates existing progress).
+    ///   (grow-only, never shrink — shrinking belongs to the `Restart`
+    ///   decision; the resume path never truncates existing progress).
     ///
     /// Blocking: internal `spawn_blocking`; errors are
     /// `taiji.http.disk` (claim conflicts excepted).

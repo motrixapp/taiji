@@ -5,24 +5,24 @@
 //! real download pipeline.
 //!
 //! * ① **METHOD=NONE explicit reset** (`aes-rotation`): after the
-//! AES-128 rotation, the METHOD=NONE tail decrypts to plaintext and
-//! never inherits the retired key — the whole archive equals the
-//! ffmpeg plaintext concatenation, by bytes **and** sha256, and the
-//! plaintext segments carry no key id in the ledger;
+//!   AES-128 rotation, the METHOD=NONE tail decrypts to plaintext and
+//!   never inherits the retired key — the whole archive equals the
+//!   ffmpeg plaintext concatenation, by bytes **and** sha256, and the
+//!   plaintext segments carry no key id in the ledger;
 //! * ② **BYTERANGE omitted offset** (`byterange/omitted`): the
-//! omitted-offset form (per-URI appearance-order accumulation,
-//! RFC 8216 §4.3.2.2) produces a byte-identical archive to the
-//! explicit form, equal to the blob's per-range slices, and the
-//! wire side shows the merged Range GET interval covering exactly
-//! the segment span (one merged GET for the ≤8 adjacent
-//! sub-segments);
+//!   omitted-offset form (per-URI appearance-order accumulation,
+//!   RFC 8216 §4.3.2.2) produces a byte-identical archive to the
+//!   explicit form, equal to the blob's per-range slices, and the
+//!   wire side shows the merged Range GET interval covering exactly
+//!   the segment span (one merged GET for the ≤8 adjacent
+//!   sub-segments);
 //! * ③ **MAP-after-KEY** (`multimap-v8`): the KEY declared before the
-//! second MAP covers that encrypted init — the staged init files
-//! are byte-equal to the expected plaintext inits (decrypted init
-//! archive), the archive equals the expected plaintext segment
-//! concatenation, and the synthesis product probe runs (on the
-//! known-defect branch while the pinned tfhd anchor defect
-//! stands — see `fixture_matrix`).
+//!   second MAP covers that encrypted init — the staged init files
+//!   are byte-equal to the expected plaintext inits (decrypted init
+//!   archive), the archive equals the expected plaintext segment
+//!   concatenation, and the synthesis product probe runs (on the
+//!   known-defect branch while the pinned tfhd anchor defect
+//!   stands — see `fixture_matrix`).
 //!
 //! ffmpeg-gated: the whole carrier is the generated-matrix face (the
 //! synthetic decrypt-layer vectors already live in `media_crypto_e2e`).

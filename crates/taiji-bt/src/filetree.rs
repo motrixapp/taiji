@@ -522,18 +522,18 @@ const MAX_COMPONENT_BYTES: usize = 255;
 ///
 /// Missing vs corrupt split (SPEC §4.2 missing-layer degradation):
 /// - entry **missing** (length > piece length, root intact) -> flag
-/// `layer_missing` and keep loading (recoverable via hash recovery;
-/// libtorrent `torrent.cpp` does the same with `valid = false; continue`).
-/// The root inside `info` is the trust anchor, so SHA-256 convergence
-/// guarantees a recovered layer is verifiable;
+///   `layer_missing` and keep loading (recoverable via hash recovery;
+///   libtorrent `torrent.cpp` does the same with `valid = false; continue`).
+///   The root inside `info` is the trust anchor, so SHA-256 convergence
+///   guarantees a recovered layer is verifiable;
 /// - entry **present but invalid** (count or root mismatch) -> hard reject
-/// (corrupt metadata, not missing; libtorrent
-/// `torrent_invalid_piece_layer`);
+///   (corrupt metadata, not missing; libtorrent
+///   `torrent_invalid_piece_layer`);
 /// - root missing was already rejected in [`parse_file_props`]
-/// (`MissingPiecesRoot`) — no trust anchor, mathematically unrecoverable,
-/// never enters recovery;
+///   (`MissingPiecesRoot`) — no trust anchor, mathematically unrecoverable,
+///   never enters recovery;
 /// - a file <= piece size with no entry is spec behavior (BEP-52 piece
-/// layers section).
+///   layers section).
 fn join_piece_layers(
     meta: &Value,
     piece_length: u32,
@@ -1252,14 +1252,14 @@ mod tests {
     /// degradation; the two libtorrent torrent.cpp
     /// `initialize_merkle_trees` boundaries):
     /// - multi-piece file with the whole entry missing -> load proceeds
-    /// with the `layer_missing` flag (libtorrent `valid = false; continue`);
+    ///   with the `layer_missing` flag (libtorrent `valid = false; continue`);
     /// - some files missing their layer -> only those are flagged, fully
-    /// equipped files keep their layers;
+    ///   equipped files keep their layers;
     /// - file <= piece size with no entry -> spec behavior, no flag;
     /// - entry present but corrupt -> hard reject (see
-    /// [`piece_layers_rejections`]);
+    ///   [`piece_layers_rejections`]);
     /// - root missing -> hard reject (`MissingPiecesRoot` — no trust
-    /// anchor, never enters recovery).
+    ///   anchor, never enters recovery).
     #[test]
     fn missing_layer_degrades_to_marker() {
         let content = pattern(40000); // 3 pieces (16 KiB piece)
@@ -1446,24 +1446,24 @@ pub fn detect_swarm_kind(meta: &Value) -> Result<SwarmKind, FileTreeError> {
 /// with padding flags and v1 offsets (SPEC §4.2 v1 layout; BEP-47).
 ///
 /// - `.pad` entries (attr 'p') are never written to disk or requested per
-/// BEP-47, but they still advance the offset accumulation;
+///   BEP-47, but they still advance the offset accumulation;
 /// - `v1_offset` = accumulated byte offset in list order (pads included;
-/// BEP-47: pads align the following file to a piece boundary);
+///   BEP-47: pads align the following file to a piece boundary);
 /// - non-pad entries must have unique sanitized full paths: a duplicate
-/// means two layout ranges point at the same physical file and the later
-/// entry would rewrite the earlier one's verified bytes (data corruption +
-/// spreading bad blocks to the swarm) -> `DuplicateFilePath` reject. Pad
-/// entries are exempt: BEP-47 recommends `[".pad", "<length>"]` paths, so
-/// equal-length pads legally share a path, and pads are never written to
-/// disk (TorrentWriter/Layout::find skips them), so there is no overwrite
-/// surface. The v2 file tree is unique by key (strict decode rejects
-/// duplicate dict keys) and needs no such check;
+///   means two layout ranges point at the same physical file and the later
+///   entry would rewrite the earlier one's verified bytes (data corruption +
+///   spreading bad blocks to the swarm) -> `DuplicateFilePath` reject. Pad
+///   entries are exempt: BEP-47 recommends `[".pad", "<length>"]` paths, so
+///   equal-length pads legally share a path, and pads are never written to
+///   disk (TorrentWriter/Layout::find skips them), so there is no overwrite
+///   surface. The v2 file tree is unique by key (strict decode rejects
+///   duplicate dict keys) and needs no such check;
 /// - v2 roots/layers are not part of this view (hybrid v2 validation
-/// combines the file tree view with this view's offsets);
+///   combines the file tree view with this view's offsets);
 /// - piece length constraints are per face (BEP-3 vs BEP-52): v1-only
-/// takes any positive integer; a hybrid (`file tree` present) still
-/// follows the BEP-52 power-of-two >= 16 KiB rule — rationale and decision
-/// point in the function body comments.
+///   takes any positive integer; a hybrid (`file tree` present) still
+///   follows the BEP-52 power-of-two >= 16 KiB rule — rationale and decision
+///   point in the function body comments.
 pub fn parse_v1_files(meta: &Value) -> Result<TorrentFiles, FileTreeError> {
     if !matches!(meta, Value::Dict(_)) {
         return Err(FileTreeError::NotADict);

@@ -5,34 +5,34 @@
 //! # Faces
 //!
 //! * [`collect_key_specs`] — pre-expand the distinct key tags of one
-//! playlist (segments **and** init sections, first-appearance order;
-//! rotation = several specs, `METHOD=NONE` never enters — the parser
-//! already materialized the reset as plaintext segments).
+//!   playlist (segments **and** init sections, first-appearance order;
+//!   rotation = several specs, `METHOD=NONE` never enters — the parser
+//!   already materialized the reset as plaintext segments).
 //! * [`KeyTable`] — the task-wide key cache: seeded from the
-//! `media_key` rows at run start (a restarted task never re-fetches
-//! a key already in the DB — the recovery face), grown by
-//! [`expand_track_keys`]. Material caches by resolved URI; row
-//! identity = (resolved URI, IV) — one `media_key` row per KEY tag
-//! identity ("multiple key_id rows + IV sequence semantics").
+//!   `media_key` rows at run start (a restarted task never re-fetches
+//!   a key already in the DB — the recovery face), grown by
+//!   [`expand_track_keys`]. Material caches by resolved URI; row
+//!   identity = (resolved URI, IV) — one `media_key` row per KEY tag
+//!   identity ("multiple key_id rows + IV sequence semantics").
 //! * [`expand_track_keys`] — fetch the misses: `data:` inline
-//! (64KiB/16B discipline, zero outbound) or `http(s)` through the
-//! task's `RequestCtx` on the base `HttpClient`, behind the
-//! SSRF line, with the per-attempt retry budget of the track fetch
-//! config (key-fetch failures close through the existing HTTP
-//! retry/failure face). KEYFORMAT is
-//! gated to `identity`/absent (RFC 8216 §4.3.2.4: unrecognized
-//! formats MUST NOT be used).
+//!   (64KiB/16B discipline, zero outbound) or `http(s)` through the
+//!   task's `RequestCtx` on the base `HttpClient`, behind the
+//!   SSRF line, with the per-attempt retry budget of the track fetch
+//!   config (key-fetch failures close through the existing HTTP
+//!   retry/failure face). KEYFORMAT is
+//!   gated to `identity`/absent (RFC 8216 §4.3.2.4: unrecognized
+//!   formats MUST NOT be used).
 //! * [`build_track_crypto`] — the per-segment/per-init decryption
-//! descriptors with **resolved** IVs: explicit IV first; missing →
-//! big-endian absolute media sequence of the segment; an init
-//! section walks the chain MAP/KEY@IV → the **first following
-//! segment's** sequence. An attribution erratum of record
-//! (comment-only): the MAP-level `KEY=` attribute and the
-//! missing-IV sequence fallback for an init section are **taiji
-//! custom extensions/relaxations, not clauses of RFC 8216 or any
-//! rfc8216bis revision** — RFC 8216 §4.3.2.5's spec-correct behavior on a
-//! missing init IV is to reject; taiji attempts the derivation and
-//! fails honestly (a decrypt error) when it cannot resolve one.
+//!   descriptors with **resolved** IVs: explicit IV first; missing →
+//!   big-endian absolute media sequence of the segment; an init
+//!   section walks the chain MAP/KEY@IV → the **first following
+//!   segment's** sequence. An attribution erratum of record
+//!   (comment-only): the MAP-level `KEY=` attribute and the
+//!   missing-IV sequence fallback for an init section are **taiji
+//!   custom extensions/relaxations, not clauses of RFC 8216 or any
+//!   rfc8216bis revision** — RFC 8216 §4.3.2.5's spec-correct behavior on a
+//!   missing init IV is to reject; taiji attempts the derivation and
+//!   fails honestly (a decrypt error) when it cannot resolve one.
 //!
 //! # At-rest (pre-release posture)
 //!

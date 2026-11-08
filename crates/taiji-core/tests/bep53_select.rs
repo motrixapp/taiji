@@ -12,15 +12,15 @@
 //! End-to-end assertions (selecting 1 of 2 files lands only the selected
 //! one):
 //! 1. S receives requests only for piece 0 (zero network traffic for
-//! unselected pieces — the BEP 53 selection face);
+//!    unselected pieces — the BEP 53 selection face);
 //! 2. `part0.bin` on disk matches the source;
 //! 3. `part1.bin` stays at preallocated zero bytes (the engine's trunc
-//! allocation semantics — unselected piece content never lands; aria2
-//! instead does not allocate; the difference is deliberate and noted);
+//!    allocation semantics — unselected piece content never lands; aria2
+//!    instead does not allocate; the difference is deliberate and noted);
 //! 4. **the completion criterion is the selected piece count**:
-//! `EngineEnd::Completed` with only 1/2 pieces done (the previous
-//! criterion is all pieces; selection narrows it to the masked piece
-//! count).
+//!    `EngineEnd::Completed` with only 1/2 pieces done (the previous
+//!    criterion is all pieces; selection narrows it to the masked piece
+//!    count).
 //!
 //! Added v2-only face: `bep53_select_file_v2_only_downloads_only_
 //! selection` — multiple files (file lengths with non-piece-multiple

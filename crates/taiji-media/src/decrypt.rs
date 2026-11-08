@@ -7,25 +7,25 @@
 //! Pure functions, no I/O, platform-independent:
 //!
 //! * **Segment-whole CBC** ([`decrypt_segment`]): the cipher chain is
-//! opened and closed inside one media segment — a segment is the
-//! decryption unit, never a transport merge run ("transport merge is
-//! not decryption merge": the ≤8-sub-segment wire merge is a transport optimization;
-//! decryption splits strictly at segment boundaries, each sub-segment
-//! with its own IV).
+//!   opened and closed inside one media segment — a segment is the
+//!   decryption unit, never a transport merge run ("transport merge is
+//!   not decryption merge": the ≤8-sub-segment wire merge is a transport optimization;
+//!   decryption splits strictly at segment boundaries, each sub-segment
+//!   with its own IV).
 //! * **PKCS7 unpad** on every segment; a pad value of exactly 16 (a
-//! whole pad block) is legal and yields an empty plaintext.
+//!   whole pad block) is legal and yields an empty plaintext.
 //! * **IV derivation** ([`iv_from_sequence`]): explicit IV wins; when
-//! the EXT-X-KEY omits it, the IV is the big-endian 128-bit form of
-//! the segment's **absolute media sequence** (the product spec's
-//! segment identity = absolute media sequence — the bitmap and the
-//! IV key on
-//! the same value; non-zero starting sequences are golden vectors).
+//!   the EXT-X-KEY omits it, the IV is the big-endian 128-bit form of
+//!   the segment's **absolute media sequence** (the product spec's
+//!   segment identity = absolute media sequence — the bitmap and the
+//!   IV key on
+//!   the same value; non-zero starting sequences are golden vectors).
 //! * **Length discipline**: a ciphertext whose length is not a
-//! non-zero multiple of the 16-byte block size cannot be valid
-//! AES-CBC — the error names `segment_decrypt_failed` (the driver's
-//! retry-once-then-fail face lives above this core; a truncated fetch
-//! can produce such a length, which is why the driver retries the
-//! fetch once before surfacing the error).
+//!   non-zero multiple of the 16-byte block size cannot be valid
+//!   AES-CBC — the error names `segment_decrypt_failed` (the driver's
+//!   retry-once-then-fail face lives above this core; a truncated fetch
+//!   can produce such a length, which is why the driver retries the
+//!   fetch once before surfacing the error).
 //!
 //! Errors are [`MediaError::SegmentDecryptFailed`] (the inherited
 //! `taiji.media.segment_decrypt_failed` code wired here — no

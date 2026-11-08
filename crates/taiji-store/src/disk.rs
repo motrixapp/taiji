@@ -156,10 +156,10 @@ pub trait DiskWriter: Send + Sync {
     /// Default implementation = a per-segment `write_at` loop (the
     /// conservative, semantics-equivalent base):
     /// - Windows keeps per-segment writes: `WriteFileGather` needs
-    /// page-aligned buffers + Win32 FFI (blocked by the workspace's
-    /// `unsafe_code = forbid`; a safe wrapper crate would be a new
-    /// dependency) — stubbed for the same reason as the
-    /// [`FileDiskWriter`] falloc fast path, no fake vectorization;
+    ///   page-aligned buffers + Win32 FFI (blocked by the workspace's
+    ///   `unsafe_code = forbid`; a safe wrapper crate would be a new
+    ///   dependency) — stubbed for the same reason as the
+    ///   [`FileDiskWriter`] falloc fast path, no fake vectorization;
     /// - test-stub writers inherit unchanged.
     ///
     /// The unix [`FileDiskWriter`] overrides this with a `pwritev`
@@ -372,15 +372,15 @@ mod unix_impl {
         /// three platform branches):
         /// - Trunc: sparse ftruncate;
         /// - Falloc: the fast path (macOS fcntl F_PREALLOCATE / Linux
-        /// fallocate(2)) is stubbed to a trunc fallback — the libc
-        /// calls are unsafe, forbidden workspace-wide, and a safe
-        /// wrapper crate would be a new dependency (same reason as
-        /// F_NOCACHE). The fallback is logged by the caller; success is
-        /// never faked;
+        ///   fallocate(2)) is stubbed to a trunc fallback — the libc
+        ///   calls are unsafe, forbidden workspace-wide, and a safe
+        ///   wrapper crate would be a new dependency (same reason as
+        ///   F_NOCACHE). The fallback is logged by the caller; success is
+        ///   never faked;
         /// - Prealloc: segment-wise zero fill (direct translation of
-        /// aria2 `SingleFileAllocationIterator.cc`, 256KiB buffer) —
-        /// real allocation on every platform (not sparse), protects
-        /// HDDs from fragmentation.
+        ///   aria2 `SingleFileAllocationIterator.cc`, 256KiB buffer) —
+        ///   real allocation on every platform (not sparse), protects
+        ///   HDDs from fragmentation.
         fn allocate(
             &mut self,
             len: u64,
@@ -878,9 +878,9 @@ mod windows_impl {
 /// across platforms:
 /// - unix: `ENOSPC` = 28 (same value on linux/macOS);
 /// - Windows (winerror.h): `ERROR_DISK_FULL` = 112,
-/// `ERROR_HANDLE_DISK_FULL` = 39 (Win16 legacy alias, still possible
-/// from filter-driver stacks); raw 28 on Windows is
-/// `ERROR_NOT_A_REPARSE_POINT`, unrelated to disk full.
+///   `ERROR_HANDLE_DISK_FULL` = 39 (Win16 legacy alias, still possible
+///   from filter-driver stacks); raw 28 on Windows is
+///   `ERROR_NOT_A_REPARSE_POINT`, unrelated to disk full.
 pub(crate) fn classify_io(path: &Path, e: io::Error) -> StoreError {
     #[cfg(windows)]
     let disk_full = matches!(e.raw_os_error(), Some(112) | Some(39));

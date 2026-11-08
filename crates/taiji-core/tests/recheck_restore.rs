@@ -5,13 +5,13 @@
 //! the bitmap claims both pieces present, on disk piece 0 is correct and
 //! piece 1 is corrupt. After the session bootstrap rechecks:
 //! 1. the progress-row bitmap = measured reality (piece 0 kept, piece 1
-//! cleared) — the bitmap never over-claims;
+//!    cleared) — the bitmap never over-claims;
 //! 2. the row state advances to queued (the active set is re-enterable);
 //! 3. counter history (upload_at_startup / downloaded_total) is
-//! preserved untouched;
+//!    preserved untouched;
 //! 4. the engine restores from the bitmap and fetches only piece 1 (the
-//! seeder asserts piece 0 is never requested) -> the file is
-//! complete, downloaded_total = base + one piece.
+//!    seeder asserts piece 0 is never requested) -> the file is
+//!    complete, downloaded_total = base + one piece.
 //!
 //! The executing half of SPEC §10 "tasks that fail bitmap verification
 //! degrade to re-Checking" + SPEC §5.4 checking behavior; process-level

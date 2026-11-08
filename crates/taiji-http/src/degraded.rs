@@ -119,9 +119,9 @@ impl DegradedJob {
 /// resume always from zero; the function body is the execution order).
 ///
 /// - Precondition: the caller has run the creation-time checks
-/// ([`plan_output`]) — this function re-runs the `.part` reuse
-/// decision to pin "resume from zero" (degraded always maps to
-/// `Restart`; a non-degraded input decides by length);
+///   ([`plan_output`]) — this function re-runs the `.part` reuse
+///   decision to pin "resume from zero" (degraded always maps to
+///   `Restart`; a non-degraded input decides by length);
 /// - `job.total_len`: see [`DegradedJob::total_len`].
 ///
 /// Returns the rename finalization outcome; `Err` = a task-level

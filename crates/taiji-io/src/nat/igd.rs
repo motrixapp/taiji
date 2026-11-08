@@ -16,43 +16,43 @@
 //! owned on this side):
 //!
 //! - **SSDP protocol face untouched**: discovery still goes through
-//! `rupnp::ssdp` (same search arguments as rupnp's discovery); this
-//! module only takes over the HTTP/XML carrier of a hit Location.
+//!   `rupnp::ssdp` (same search arguments as rupnp's discovery); this
+//!   module only takes over the HTTP/XML carrier of a hit Location.
 //! - **Timeouts**: the device-description GET and every SOAP POST are
-//! wrapped in the [`HTTP_REQUEST_TIMEOUT`] total budget (connect +
-//! response headers + body read, capped as one, via
-//! `tokio::time::timeout`), plus a discovery-round budget (SSDP window +
-//! the per-request cap) so any number of fake devices inside the
-//! window cannot stretch the round.
+//!   wrapped in the [`HTTP_REQUEST_TIMEOUT`] total budget (connect +
+//!   response headers + body read, capped as one, via
+//!   `tokio::time::timeout`), plus a discovery-round budget (SSDP window +
+//!   the per-request cap) so any number of fake devices inside the
+//!   window cannot stretch the round.
 //! - **Body caps**: a Content-Length precheck rejects fast (not trusted
-//! — a lying or missing length is still caught by the
-//! [`http_body_util::Limited`] streaming backstop); over-limit aborts
-//! as [`SoapError::BodyTooLarge`].
+//!   — a lying or missing length is still caught by the
+//!   [`http_body_util::Limited`] streaming backstop); over-limit aborts
+//!   as [`SoapError::BodyTooLarge`].
 //! - **Parsing isolation**: XML parsing runs inside
-//! [`tokio::task::spawn_blocking`] (a pathological input costs one
-//! blocking-pool task); the depth precheck ([`precheck_xml_depth`], a
-//! flat byte scan) runs **before** roxmltree, whose parse itself
-//! recursively aborts on deep nesting; the device tree is walked with
-//! an explicit stack (the tag_stack shape of libtorrent
-//! `find_control_url`, `upnp.cpp` — no recursive parsing) and rejected
-//! per size/depth caps ([`MAX_XML_DEPTH`]).
+//!   [`tokio::task::spawn_blocking`] (a pathological input costs one
+//!   blocking-pool task); the depth precheck ([`precheck_xml_depth`], a
+//!   flat byte scan) runs **before** roxmltree, whose parse itself
+//!   recursively aborts on deep nesting; the device tree is walked with
+//!   an explicit stack (the tag_stack shape of libtorrent
+//!   `find_control_url`, `upnp.cpp` — no recursive parsing) and rejected
+//!   per size/depth caps ([`MAX_XML_DEPTH`]).
 //! - **Error-string truncation**: attacker-controlled strings (SOAP
-//! fault text, raw port values, URLs, ...) are truncated to
-//! [`ERROR_STRING_MAX_BYTES`] before entering errors/logs (bounding
-//! the second-order amplification of e.g. `InvalidPort(String)`
-//! carrying a full attacker string).
+//!   fault text, raw port values, URLs, ...) are truncated to
+//!   [`ERROR_STRING_MAX_BYTES`] before entering errors/logs (bounding
+//!   the second-order amplification of e.g. `InvalidPort(String)`
+//!   carrying a full attacker string).
 //! - **Location host validation** ([`validate_location_host`]): an SSDP
-//! Location must point at an RFC 1918 / RFC 3927 link-local IPv4
-//! literal (loopback / public / domain names rejected — the SSRF and
-//! gateway-hijack face); when the description carries `<URLBase>` its
-//! authority passes the same validation. With an explicit gateway
-//! configured, the host must also match it.
+//!   Location must point at an RFC 1918 / RFC 3927 link-local IPv4
+//!   literal (loopback / public / domain names rejected — the SSRF and
+//!   gateway-hijack face); when the description carries `<URLBase>` its
+//!   authority passes the same validation. With an explicit gateway
+//!   configured, the host must also match it.
 //! - **Single-error continuation**: one malformed SSDP response or one
-//! failed device is logged, counted, and the round continues
-//! ([`for_each_ssdp_response`]); AddAnyPortMapping's NewReservedPort
-//! of 0 is rejected on read-back.
+//!   failed device is logged, counted, and the round continues
+//!   ([`for_each_ssdp_response`]); AddAnyPortMapping's NewReservedPort
+//!   of 0 is rejected on read-back.
 //! - **fuzz entry points**: `*_for_fuzz` shims expose both parsers to
-//! the cross-crate fuzz workspace.
+//!   the cross-crate fuzz workspace.
 //!
 //! SOAP envelope, response parsing, and device required-field semantics
 //! are verbatim ports of rupnp 3.0 (sources noted inline); the mapping
@@ -762,34 +762,34 @@ async fn handle_ssdp_response(
 /// Rules and basis:
 ///
 /// - **The host must be a private/link-local IPv4 literal**: RFC 1918
-/// §3 private space (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or
-/// RFC 3927 §2.1 link-local (169.254.0.0/16). Basis: SSDP discovery
-/// is link-local multicast (UPnP DA §1 — M-SEARCH to
-/// 239.255.255.250:1900, ssdp-client default TTL=2), so a legitimate
-/// responder's description URL necessarily points at a host reachable
-/// on this link; the IGD is itself the LAN-side router
-/// (WANIPConnection/WANPPPConnection device definitions). Reference:
-/// libtorrent's `upnp_ignore_nonrouters` subnet-matches the SSDP
-/// response **source address** with
-/// `match_addr_mask(listen, from, netmask)` (upnp.cpp); ssdp-client
-/// 2.x's `SearchResponse` does not expose the response source address
-/// (search.rs field set), so per-packet source comparison is
-/// unreachable and this side uses the Location-host equivalent.
+///   §3 private space (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) or
+///   RFC 3927 §2.1 link-local (169.254.0.0/16). Basis: SSDP discovery
+///   is link-local multicast (UPnP DA §1 — M-SEARCH to
+///   239.255.255.250:1900, ssdp-client default TTL=2), so a legitimate
+///   responder's description URL necessarily points at a host reachable
+///   on this link; the IGD is itself the LAN-side router
+///   (WANIPConnection/WANPPPConnection device definitions). Reference:
+///   libtorrent's `upnp_ignore_nonrouters` subnet-matches the SSDP
+///   response **source address** with
+///   `match_addr_mask(listen, from, netmask)` (upnp.cpp); ssdp-client
+///   2.x's `SearchResponse` does not expose the response source address
+///   (search.rs field set), so per-packet source comparison is
+///   unreachable and this side uses the Location-host equivalent.
 /// - **Rejected**: loopback (127/8 — the localhost SSRF face), public
-/// literals, domain names (pointing the description URL at
-/// attacker-controlled DNS introduces an off-link trust step), IPv6
-/// literals (discovery is v4 multicast; v6 description URLs are out
-/// of scope), and unspecified/multicast/reserved ranges (RFC 1112 §4,
-/// 224/4, etc.).
+///   literals, domain names (pointing the description URL at
+///   attacker-controlled DNS introduces an off-link trust step), IPv6
+///   literals (discovery is v4 multicast; v6 description URLs are out
+///   of scope), and unspecified/multicast/reserved ranges (RFC 1112 §4,
+///   224/4, etc.).
 /// - **Known trade-off**: the rare topology of a public address hung
-/// directly on the LAN is falsely rejected (the review guidance
-/// explicitly says "reject ... public"; recorded as-is); an explicit
-/// `igd_device_url` deployment override bypasses this check
-/// (operator-supplied input, not an SSDP attack surface).
+///   directly on the LAN is falsely rejected (the review guidance
+///   explicitly says "reject ... public"; recorded as-is); an explicit
+///   `igd_device_url` deployment override bypasses this check
+///   (operator-supplied input, not an SSDP attack surface).
 /// - With `gateway` (the explicitly configured NAT-PMP gateway)
-/// present, the host must also match it — the configuration already
-/// anchors the router's identity, so self-advertisements from other
-/// devices on the link are out of the candidate set.
+///   present, the host must also match it — the configuration already
+///   anchors the router's identity, so self-advertisements from other
+///   devices on the link are out of the candidate set.
 pub(crate) fn validate_location_host(url: &Uri, gateway: Option<Ipv4Addr>) -> Result<(), IgdError> {
     let host = url
         .host()
@@ -1155,22 +1155,22 @@ fn scan_service<'a>(
 /// URL, status quo).
 ///
 /// - Absolute-path reference (`/control`, RFC 3986 §4.2 path-absolute):
-/// the base path yields entirely — the scan layer passes it as-is and
-/// authority merging is left to the call layer;
+///   the base path yields entirely — the scan layer passes it as-is and
+///   authority merging is left to the call layer;
 /// - Relative-path reference (`control`): RFC 3986 §5.2.3 merge — the
-/// base path up to and including the last `/`, then the reference
-/// appended. A trailing slash on URLBase (`/root/`) preserves the
-/// prefix (→ `/root/control`); without it (`/root`) the last segment
-/// yields (→ `/control`) — the merge difference between the two real
-/// UDA §2.3 shapes; a URLBase with no path (authority only) defaults
-/// the base path to `/`;
+///   base path up to and including the last `/`, then the reference
+///   appended. A trailing slash on URLBase (`/root/`) preserves the
+///   prefix (→ `/root/control`); without it (`/root`) the last segment
+///   yields (→ `/control`) — the merge difference between the two real
+///   UDA §2.3 shapes; a URLBase with no path (authority only) defaults
+///   the base path to `/`;
 /// - dot-segments (`./x`, `../x`) get no §5.2.4 normalization: the
-/// device ecosystem does not produce them, and prefix-merge already
-/// covers the real shapes;
+///   device ecosystem does not produce them, and prefix-merge already
+///   covers the real shapes;
 /// - an empty URL / a relative path with no URLBase: rejected by
-/// `PathAndQuery` parsing (the http crate rejects any path not
-/// starting with `/` as `PathDoesNotStartWithSlash` — rupnp's
-/// required-field validation shape is preserved).
+///   `PathAndQuery` parsing (the http crate rejects any path not
+///   starting with `/` as `PathDoesNotStartWithSlash` — rupnp's
+///   required-field validation shape is preserved).
 fn resolve_url_text(url_base: Option<&Uri>, raw: &str) -> Result<PathAndQuery, String> {
     if raw.is_empty() {
         return Err("empty url".into());

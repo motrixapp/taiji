@@ -19,17 +19,17 @@ use crate::piece_id::{Addressing, PieceId};
 /// keepalive idle send interval, default 120s.
 ///
 /// - Value: aria2 `--bt-keep-alive-interval` default "120"
-/// (`OptionHandlerFactory.cc`, domain 1..=120 seconds; the constructor
-/// default is the same, `DefaultBtInteractive.cc`
-/// `keepAliveInterval_(120)`).
+///   (`OptionHandlerFactory.cc`, domain 1..=120 seconds; the constructor
+///   default is the same, `DefaultBtInteractive.cc`
+///   `keepAliveInterval_(120)`).
 /// - Semantics (idle-gated, zero redundant frames on active connections):
-/// BEP3 keepalive = the zero-length message (`<len=0>`); BEP does not
-/// specify when to send. Aligned with libtorrent `keep_alive()`
-/// (`peer_connection.cpp` — returns early when less than the threshold
-/// has passed since `m_last_sent`; its threshold is half the connection
-/// timeout, not numerically aligned) and aria2 `sendKeepAlive()`
-/// (`DefaultBtInteractive.cc`, purely periodic); this side gates on
-/// idleness to suppress redundant frames.
+///   BEP3 keepalive = the zero-length message (`<len=0>`); BEP does not
+///   specify when to send. Aligned with libtorrent `keep_alive()`
+///   (`peer_connection.cpp` — returns early when less than the threshold
+///   has passed since `m_last_sent`; its threshold is half the connection
+///   timeout, not numerically aligned) and aria2 `sendKeepAlive()`
+///   (`DefaultBtInteractive.cc`, purely periodic); this side gates on
+///   idleness to suppress redundant frames.
 ///
 /// Compatibility surface frozen: no session/RPC option is exposed; tests
 /// inject short values (precedent:

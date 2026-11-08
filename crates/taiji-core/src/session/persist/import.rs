@@ -424,16 +424,16 @@ pub struct AssembleInput {
 /// Failure order:
 /// 1. unparseable metadata -> failure;
 /// 2. candidate infohash mismatch: fork source (task_progress.info_hash
-/// is authoritative) -> failure; ctrl source (the paired metadata is
-/// the identity anchor) -> **degrade to checking**
-/// (EX_INFOHASH_MISMATCH_IN_SEGFILE, message.h), bitmap and upload
-/// count dropped together (history belonging to a different
-/// torrent);
+///    is authoritative) -> failure; ctrl source (the paired metadata is
+///    the identity anchor) -> **degrade to checking**
+///    (EX_INFOHASH_MISMATCH_IN_SEGFILE, message.h), bitmap and upload
+///    count dropped together (history belonging to a different
+///    torrent);
 /// 3. bitmap validation failure (piece_length / total_length /
-/// bitfield length inconsistent with the metadata) -> degrade to
-/// checking, bitmap dropped, upload count kept (trusted history of
-/// the same torrent — "tasks that fail bitmap validation degrade to
-/// re-Checking").
+///    bitfield length inconsistent with the metadata) -> degrade to
+///    checking, bitmap dropped, upload count kept (trusted history of
+///    the same torrent — "tasks that fail bitmap validation degrade to
+///    re-Checking").
 pub fn assemble(input: AssembleInput) -> Result<PlannedImport, String> {
     let meta = crate::metainfo::Metainfo::parse(&input.meta.bytes)
         .map_err(|e| format!("metadata unparseable at {}: {e}", input.meta.path.display()))?;

@@ -3,17 +3,17 @@
 //!
 //! Mirrors the reference:
 //! - piece count = `metadata_size` rounded up to 16KiB units
-//! (`BtConstants.h`);
+//!   (`BtConstants.h`);
 //! - request scheduling = `UTMetadataRequestFactory.cc` (fill missing
-//! pieces within the avail() budget + `tracker.add`; aria2 leaves the
-//! missing-piece selection order unspecified — this implementation picks
-//! the ascending minimum);
+//!   pieces within the avail() budget + `tracker.add`; aria2 leaves the
+//!   missing-piece selection order unspecified — this implementation picks
+//!   the ascending minimum);
 //! - data handling = `UTMetadataDataExtensionMessage.cc`: untracked ->
-//! ignore; tracked -> remove from the bookkeeping + store the piece;
-//! complete -> assemble + SHA-1 vs infohash; mismatch -> **reset all
-//! pieces** + explicit error;
+//!   ignore; tracked -> remove from the bookkeeping + store the piece;
+//!   complete -> assemble + SHA-1 vs infohash; mismatch -> **reset all
+//!   pieces** + explicit error;
 //! - reject handling = `UTMetadataRejectExtensionMessage.cc`: an
-//! unconditional disconnect-level error ("peer didn't offer metadata").
+//!   unconditional disconnect-level error ("peer didn't offer metadata").
 //!
 //! Resource limits: the metadata_size acceptance domain is
 //! `0 < size <= 8MiB` (aria2 `HandshakeExtensionMessage.cc` — beyond that
@@ -64,18 +64,18 @@ pub enum MetadataError {
 /// claim_budget).
 ///
 /// - The default 16MiB = 2 x [`MAX_METADATA_SIZE`] — the byte form of the
-/// spec's "global max 2 concurrent" clamp (more precise than counting
-/// connections: residency only grows with pieces actually delivered; a
-/// peer lying about a large metadata_size without sending data occupies
-/// nothing, since the 8MiB domain clamp already gates
-/// `MetadataAssembler::new`).
+///   spec's "global max 2 concurrent" clamp (more precise than counting
+///   connections: residency only grows with pieces actually delivered; a
+///   peer lying about a large metadata_size without sending data occupies
+///   nothing, since the 8MiB domain clamp already gates
+///   `MetadataAssembler::new`).
 /// - Rejection semantics = the piece insert fails -> `on_data` reports
-/// [`MetadataError::AssemblyLedgerExhausted`] -> session-error
-/// disconnect; the magnet orchestration switches peers / retries later
-/// (the 20s sweep surface already exists), and the global account refills
-/// naturally once Drop/reset releases it.
+///   [`MetadataError::AssemblyLedgerExhausted`] -> session-error
+///   disconnect; the magnet orchestration switches peers / retries later
+///   (the 20s sweep surface already exists), and the global account refills
+///   naturally once Drop/reset releases it.
 /// - The normal shape (a single magnet, metadata on the order of <= 2MiB)
-/// behaves identically.
+///   behaves identically.
 pub(crate) struct AssemblyLedger {
     used: std::sync::atomic::AtomicI64,
     cap: i64,

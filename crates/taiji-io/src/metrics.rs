@@ -193,18 +193,18 @@ pub struct HistogramSnapshot {
 ///
 /// Value domain (Prometheus naming, all labels fixed enums):
 /// - `taiji_dns_lookups_total{result=hit|miss|error|timeout}` —
-/// hit/miss count **cache behavior**, error/timeout count
-/// **resolution outcome**; a resolution failure after a miss is
-/// **double-counted** (miss + error|timeout, one each); that is the
-/// defined caliber, not a defect;
+///   hit/miss count **cache behavior**, error/timeout count
+///   **resolution outcome**; a resolution failure after a miss is
+///   **double-counted** (miss + error|timeout, one each); that is the
+///   defined caliber, not a defect;
 /// - `taiji_dns_resolve_seconds` (histogram) — resolution egress
-/// latency (cache hits contribute near-zero samples);
+///   latency (cache hits contribute near-zero samples);
 /// - `taiji_dns_family_mix_total{mix=v4_only|v6_only|dual}` — the
-/// address-family composition at the resolver-list production point
-/// (cache hits do not recount);
+///   address-family composition at the resolver-list production point
+///   (cache hits do not recount);
 /// - `taiji_dns_events_total{kind=evict_ttl|evict_capacity}` — the two
-/// HostCache eviction points (TTL expiry / capacity evicts the
-/// oldest).
+///   HostCache eviction points (TTL expiry / capacity evicts the
+///   oldest).
 #[derive(Debug)]
 pub struct DnsMetrics {
     lookups_hit: Counter,
@@ -451,22 +451,22 @@ pub enum RequestPhase {
 /// face).
 ///
 /// - `conn_establish_seconds` = **DNS+TCP+TLS combined timing** (the
-/// data-plane/probe-plane transport instances share the layer;
-/// includes tunnel establishment under proxy config). Phase splits
-/// are not available: connect+TLS ≈ combined latency -
-/// `dns_resolve_seconds` (an analysis-side **mean-caliber component
-/// subtraction** — the two families have no per-sample
-/// reconciliation seam, so no per-sample differences); the caliber
-/// notes land in SPEC §12 with the value-domain tables;
+///   data-plane/probe-plane transport instances share the layer;
+///   includes tunnel establishment under proxy config). Phase splits
+///   are not available: connect+TLS ≈ combined latency -
+///   `dns_resolve_seconds` (an analysis-side **mean-caliber component
+///   subtraction** — the two families have no per-sample
+///   reconciliation seam, so no per-sample differences); the caliber
+///   notes land in SPEC §12 with the value-domain tables;
 /// - pinned-host (DNS override) connections produce no DNS component
-/// and no `taiji_dns_lookups_*` counts (the override layer
-/// short-circuits ahead of the shared resolver) — combined latency ≈
-/// the raw connect+TLS value;
+///   and no `taiji_dns_lookups_*` counts (the override layer
+///   short-circuits ahead of the shared resolver) — combined latency ≈
+///   the raw connect+TLS value;
 /// - `establishments_total` and `establish_seconds.count` are always
-/// equal (one success event, two bookkeeping slots); **failed
-/// attempts are not counted** (failures are classified through the
-/// `errors{class=connect|refused|...}` seam; the latency profile
-/// accepts successful samples only).
+///   equal (one success event, two bookkeeping slots); **failed
+///   attempts are not counted** (failures are classified through the
+///   `errors{class=connect|refused|...}` seam; the latency profile
+///   accepts successful samples only).
 #[derive(Debug)]
 pub struct HttpMetrics {
     errors_dns_permanent: Counter,
@@ -730,14 +730,14 @@ impl Drop for SinkWriteGuard {
 ///
 /// Caliber notes (honest face):
 /// - `sink_inflight` semantics = **the concurrent in-flight write_at
-/// count** (paired enter/exit counting) — the production write path
-/// is direct positioned writes with no queue structure, so a "queue
-/// depth" is neither measurable nor invented;
+///   count** (paired enter/exit counting) — the production write path
+///   is direct positioned writes with no queue structure, so a "queue
+///   depth" is neither measurable nor invented;
 /// - the merged caliber of `finalize_seconds{op=file_fsync}` is
-/// documented at [`FinalizeOp::FileFsync`] (2s snapshot-beat samples
-/// mix in, disclosed there; given fsync is itself the slow operation
-/// on SMB, the long-tail observation stays valid with both phases in
-/// the same bucket domain).
+///   documented at [`FinalizeOp::FileFsync`] (2s snapshot-beat samples
+///   mix in, disclosed there; given fsync is itself the slow operation
+///   on SMB, the long-tail observation stays valid with both phases in
+///   the same bucket domain).
 #[derive(Debug)]
 pub struct DiskMetrics {
     sink_writes_total: Counter,
@@ -841,14 +841,14 @@ pub struct DiskMetricsSnapshot {
 ///
 /// Caliber notes (honest face):
 /// - `commit_seconds` = the execution time inside the write thread for
-/// one job (from job dispatch to row-write completion), **not
-/// including** channel-queueing wait (the queue face is covered by
-/// `queue_depth`);
+///   one job (from job dispatch to row-write completion), **not
+///   including** channel-queueing wait (the queue face is covered by
+///   `queue_depth`);
 /// - `queue_depth` = write-thread-side sampling: the number of
-/// messages still parked in the job channel after the most recent
-/// job completed (a gauge = the last observed value, not the
-/// real-time length at read time — the reading can go stale at low
-/// traffic).
+///   messages still parked in the job channel after the most recent
+///   job completed (a gauge = the last observed value, not the
+///   real-time length at read time — the reading can go stale at low
+///   traffic).
 #[derive(Debug)]
 pub struct PersistMetrics {
     queue_depth: std::sync::atomic::AtomicU64,

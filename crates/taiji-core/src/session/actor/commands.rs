@@ -2162,23 +2162,23 @@ impl SessionActor {
     /// move_waiting`]) ->
     ///
     /// - **reserved segment** (the aria2 face, semantics unchanged):
-    /// the [`QueueMan::move_reserved`] three-mode reorder
-    /// (IndexedList.h direct translation); an in-place reorder
-    /// (dest == current, e.g. POS_CUR clamped to 0 or a single
-    /// element) leaves the order unchanged and skips the queue_pos
-    /// rewrite; an actual move renumbers the whole segment and
-    /// persists it ([`Self::persist_queue_renumber`]).
+    ///   the [`QueueMan::move_reserved`] three-mode reorder
+    ///   (IndexedList.h direct translation); an in-place reorder
+    ///   (dest == current, e.g. POS_CUR clamped to 0 or a single
+    ///   element) leaves the order unchanged and skips the queue_pos
+    ///   rewrite; an actual move renumbers the whole segment and
+    ///   persists it ([`Self::persist_queue_renumber`]).
     /// - **three phase FIFO segments** (check_pending / seed_wait /
-    /// proc_wait — the §5 revision): POS_SET / POS_CUR / POS_END are
-    /// interpreted **inside the owning segment** (a phase segment is
-    /// a resource domain — the move never crosses the segment
-    /// boundary, the raw destination clamps into the segment's own
-    /// head/tail); the reply position is in the same segment-local
-    /// space (request space = reply space). Paused/flag payloads
-    /// ride untouched (the reserved segment's move-paused precedent).
-    /// **Zero persistence** — segment positions are runtime ordering
-    /// (proc_wait is never persisted §4.3; check_pending / seed_wait
-    /// rebuild from the batch-restore/restart order), zero schema.
+    ///   proc_wait — the §5 revision): POS_SET / POS_CUR / POS_END are
+    ///   interpreted **inside the owning segment** (a phase segment is
+    ///   a resource domain — the move never crosses the segment
+    ///   boundary, the raw destination clamps into the segment's own
+    ///   head/tail); the reply position is in the same segment-local
+    ///   space (request space = reply space). Paused/flag payloads
+    ///   ride untouched (the reserved segment's move-paused precedent).
+    ///   **Zero persistence** — segment positions are runtime ordering
+    ///   (proc_wait is never persisted §4.3; check_pending / seed_wait
+    ///   rebuild from the batch-restore/restart order), zero schema.
     ///
     /// Anything outside the four waiting segments (active, seeding
     /// residence, in-flight recheck, synthesis in flight, results,
@@ -2777,25 +2777,25 @@ impl SessionActor {
     /// setTaskCookies actor arm (direct translation of the fork
     /// SetTaskCookiesRpcMethod, RpcMethodImpl.cc):
     /// - State gate (one fork text): only **waiting/paused** tasks
-    /// accept cookies — active tasks and misses both answer verbatim
-    /// "Task cookies can only be set on waiting or paused cookie
-    /// tasks.". Declared authorization diff: the fork also requires
-    /// the `require-task-cookies` task preference bit (set by
-    /// AddUriWithCookies, which mounts the store selectively); taiji
-    /// HTTP tasks always mount a store (spawn_http_task), so the
-    /// equivalent gate relaxes to the cookie-bearing task shapes.
-    /// The cookie design widens the accepted domain to the **media**
-    /// family too (`Job::Http | Job::Media` — addMedia's structured
-    /// pass made media a cookie task; a declared taiji extension),
-    /// while torrent/magnet/metadata tasks stay refused.
+    ///   accept cookies — active tasks and misses both answer verbatim
+    ///   "Task cookies can only be set on waiting or paused cookie
+    ///   tasks.". Declared authorization diff: the fork also requires
+    ///   the `require-task-cookies` task preference bit (set by
+    ///   AddUriWithCookies, which mounts the store selectively); taiji
+    ///   HTTP tasks always mount a store (spawn_http_task), so the
+    ///   equivalent gate relaxes to the cookie-bearing task shapes.
+    ///   The cookie design widens the accepted domain to the **media**
+    ///   family too (`Job::Http | Job::Media` — addMedia's structured
+    ///   pass made media a cookie task; a declared taiji extension),
+    ///   while torrent/magnet/metadata tasks stay refused.
     /// - Whole-set replacement: seed conversion drops expired entries
-    /// ([`cookies_from_specs`]) -> persist first (fork "Persist
-    /// first... report the RPC failure" — here via the unified
-    /// task_cookie row upsert (http|media kind), a failure
-    /// fails whole and the in-memory face never mutates) ->
-    /// overwrite the in-memory seed (the next activation seeds from
-    /// the unified table read-back — same semantics for both
-    /// families; waiting tasks hold no live store).
+    ///   ([`cookies_from_specs`]) -> persist first (fork "Persist
+    ///   first... report the RPC failure" — here via the unified
+    ///   task_cookie row upsert (http|media kind), a failure
+    ///   fails whole and the in-memory face never mutates) ->
+    ///   overwrite the in-memory seed (the next activation seeds from
+    ///   the unified table read-back — same semantics for both
+    ///   families; waiting tasks hold no live store).
     pub(super) async fn set_task_cookies(
         &mut self,
         gid: Gid,
@@ -2882,19 +2882,19 @@ impl SessionActor {
     /// hangs off an engine constant seam), so it is honestly omitted.
     ///
     /// - active/reserved: assembled from the task payload
-    /// (changeOption's merge rewrites the row, so a read sees the
-    /// merged values); active rate limits are echoed with the live
-    /// bucket values (the set_rate effect read back, same family as
-    /// getGlobalOption's `http-max-per-host` cap overwrite — echo
-    /// face = effect face; restart-restored/waiting tasks have no
-    /// bucket and fall back to the payload fields).
+    ///   (changeOption's merge rewrites the row, so a read sees the
+    ///   merged values); active rate limits are echoed with the live
+    ///   bucket values (the set_rate effect read back, same family as
+    ///   getGlobalOption's `http-max-per-host` cap overwrite — echo
+    ///   face = effect face; restart-restored/waiting tasks have no
+    ///   bucket and fall back to the payload fields).
     /// - result: read back from the result row's config_json (torrent
-    /// rows in `download_result`; HTTP rows in `http_task` — the
-    /// torrent/http two-table split). No persistence or a missing row = an
-    /// empty table, honestly: the reference keeps `dr->option` in
-    /// memory while the local result table carries no option
-    /// snapshot — the store row is the only persistent truth ("no
-    /// store = no history", as in list_bans).
+    ///   rows in `download_result`; HTTP rows in `http_task` — the
+    ///   torrent/http two-table split). No persistence or a missing row = an
+    ///   empty table, honestly: the reference keeps `dr->option` in
+    ///   memory while the local result table carries no option
+    ///   snapshot — the store row is the only persistent truth ("no
+    ///   store = no history", as in list_bans).
     pub(super) async fn get_option(&self, raw_gid: &str) -> Result<CommandReply, SessionError> {
         let gid = self.resolve_gid(raw_gid)?;
         let echo = match self.queue.find(gid) {
@@ -3153,16 +3153,16 @@ impl SessionActor {
 /// removeTracker): routed by job shape (`None` = torrent passes; a
 /// rejected call mutates nothing). Messages:
 /// - magnet/.torrent URL = metadata-phase task — no tracker face
-/// exists before upgrade; keeps the pre-existing wording ("metadata
-/// tasks are not editable before upgrade") under the new method
-/// names;
+///   exists before upgrade; keeps the pre-existing wording ("metadata
+///   tasks are not editable before upgrade") under the new method
+///   names;
 /// - HTTP = no tracker face ("requires a torrent task", the
-/// taiji.setSchedulerPolicy/setDiskTier style);
+///   taiji.setSchedulerPolicy/setDiskTier style);
 /// - terminal (result domain) = the payload was dropped at teardown
-/// and the result row is never rebuilt (not restored on restart),
-/// so an edit could never take effect — accepting would be a
-/// disguise (the same direction as aria2 changeUri's findGroup
-/// excluding the result domain, RpcMethodImpl.cc).
+///   and the result row is never rebuilt (not restored on restart),
+///   so an edit could never take effect — accepting would be a
+///   disguise (the same direction as aria2 changeUri's findGroup
+///   excluding the result domain, RpcMethodImpl.cc).
 fn tracker_edit_reject_message(method: &str, gid: Gid, job: Option<&Job>) -> Option<String> {
     match job {
         Some(Job::Torrent(_)) => None,

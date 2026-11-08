@@ -1,20 +1,20 @@
 //! Acceptance: DHT engine wiring (SPEC section 6.7).
 //!
 //! 1. `in_process_dht_swarm_announce_peers_found_dial`: full in-process
-//! DHT swarm chain — an independent DHT node B (real UDP/demux) plus a
-//! third-party announce injection -> engine bootstrap(entry=B) ->
-//! `DhtHandle::announce` -> get_peers iteration hits the values ->
-//! `DhtEvent::PeersFound` -> dial the seeder after dedup -> BT
-//! handshake + PORT message -> single-piece download Completed
-//! (announce -> PeersFound -> connection);
+//!    DHT swarm chain — an independent DHT node B (real UDP/demux) plus a
+//!    third-party announce injection -> engine bootstrap(entry=B) ->
+//!    `DhtHandle::announce` -> get_peers iteration hits the values ->
+//!    `DhtEvent::PeersFound` -> dial the seeder after dedup -> BT
+//!    handshake + PORT message -> single-piece download Completed
+//!    (announce -> PeersFound -> connection);
 //! 2. `udp_tracker_announce_via_demux`: regression for the udp carrier
-//! swap — a UDP tracker announce (BEP 15 connect -> announce) rides
-//! both directions through the UdpDemux tracker channel (literal-IP
-//! udp:// URL), and the peer from the tracker reply is dialed;
+//!    swap — a UDP tracker announce (BEP 15 connect -> announce) rides
+//!    both directions through the UdpDemux tracker channel (literal-IP
+//!    udp:// URL), and the peer from the tracker reply is dialed;
 //! 3. `dht_state_roundtrip`: `DhtEvent::Persist` -> UpsertDhtState ->
-//! restart `LoadDhtState` -> `load_dht_restore_state` ->
-//! `DhtRestoreState` -> node ID continuous across restarts
-//! (DHTSetup.cc keeps the persisted ID).
+//!    restart `LoadDhtState` -> `load_dht_restore_state` ->
+//!    `DhtRestoreState` -> node ID continuous across restarts
+//!    (DHTSetup.cc keeps the persisted ID).
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

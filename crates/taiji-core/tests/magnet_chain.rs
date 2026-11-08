@@ -7,19 +7,19 @@
 //! serving; cross-checked against BEP 9/BEP 52). Covered criteria:
 //!
 //! 1. v1 magnet cold start to download completion. The metadata phase
-//! uses DHT-only discovery (the hub records the seeder, get_peers
-//! values hit); after the upgrade the engine's discovery face is the
-//! tracker — engine-level DHT wiring is out of scope here (see the
-//! magnet.rs module docs).
+//!    uses DHT-only discovery (the hub records the seeder, get_peers
+//!    values hit); after the upgrade the engine's discovery face is the
+//!    tracker — engine-level DHT wiring is out of scope here (see the
+//!    magnet.rs module docs).
 //! 2. hybrid magnet cold start to download completion (btih+btmh dual
-//! identity + piece layers prefetch: magnet metadata carries no
-//! top-level `piece layers`, BEP 52).
+//!    identity + piece layers prefetch: magnet metadata carries no
+//!    top-level `piece layers`, BEP 52).
 //! 3. infohash mismatch / corrupt metadata are rejected explicitly.
 //! 4. bt-save-metadata output can be reloaded by this engine;
-//! bt-metadata-only, follow-torrent, pause-metadata,
-//! bt-load-saved-metadata option behavior.
+//!    bt-metadata-only, follow-torrent, pause-metadata,
+//!    bt-load-saved-metadata option behavior.
 //! 5. Metadata timeout fails honestly (no peers never masquerades as
-//! completion).
+//!    completion).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

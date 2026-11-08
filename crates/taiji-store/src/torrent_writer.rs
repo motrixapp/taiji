@@ -70,13 +70,13 @@ impl MergedRead {
 /// surface behind libtorrent's "coalesce the small bittorrent requests",
 /// `docs/manual.rst`):
 /// - `max_bytes` caps a merged span's bytes; `max_ranges` caps the
-/// absorbed spans per merged span; either 0 → no merging (1:1 identity
-/// mapping; the default throughput profile is unchanged).
+///   absorbed spans per merged span; either 0 → no merging (1:1 identity
+///   mapping; the default throughput profile is unchanged).
 /// - Only adjacent spans merge (`prev.goff + prev.len == next.goff`);
-/// gaps split spans; overlapping spans are tolerated (the merged span
-/// is the union and each span reads back its own bytes).
+///   gaps split spans; overlapping spans are tolerated (the merged span
+///   is the union and each span reads back its own bytes).
 /// - Input order is arbitrary (sorted stably by goff internally; parts
-/// records the original indices).
+///   records the original indices).
 pub fn coalesce_reads(specs: &[ReadSpec], max_bytes: usize, max_ranges: usize) -> Vec<MergedRead> {
     if specs.is_empty() {
         return Vec::new();
@@ -148,11 +148,11 @@ pub fn coalesce_reads(specs: &[ReadSpec], max_bytes: usize, max_ranges: usize) -
 ///
 /// Handle policy:
 /// - [`TorrentReader::new`] = no pool; handles open/close temporarily per
-/// file span (existing behavior — short-lived callers such as recheck
-/// and TorrentWriter delegated reads keep it);
+///   file span (existing behavior — short-lived callers such as recheck
+///   and TorrentWriter delegated reads keep it);
 /// - [`TorrentReader::with_handle_pool`] = a shared LRU handle pool (the
-/// caller holds it for the data source's lifetime); `open` drops from
-/// O(requests) to O(active files) (see [`READER_MAX_OPEN_HANDLES`]).
+///   caller holds it for the data source's lifetime); `open` drops from
+///   O(requests) to O(active files) (see [`READER_MAX_OPEN_HANDLES`]).
 pub struct TorrentReader {
     layout: Layout,
     root: PathBuf,
@@ -542,25 +542,25 @@ impl TorrentWriter {
     /// Allocate per mode, each non-pad file in turn (pads never created):
     ///
     /// - Already on disk → open only, no allocation, no truncation
-    /// (truncating first would destroy preloaded payloads in the
-    /// "re-seed existing payload" scenario; the upstream anchor is
-    /// aria2 `AbstractDiskWriter::openFile`: try `openExistingFile`
-    /// (O_RDWR without O_TRUNC) first and only create via
-    /// `initAndOpenFile` → `createFile` on ENOENT; `MultiDiskAdaptor.cc`
-    /// applies the same policy per file). Trade-off: aria2 refuses the
-    /// task by default when files already exist on disk without a
-    /// control file (`RequestGroup.cc` FILE_ALREADY_EXISTS; only
-    /// `--check-integrity`/`--allow-overwrite`/`--bt-seed-unverified`
-    /// let it through); the add path here has no startup recheck flow
-    /// yet, so it takes the `--allow-overwrite` open semantics —
-    /// existing bytes are preserved and the bitmap downloads from
-    /// zero. falloc/prealloc run only for newly created files (the
-    /// allocation contract is only ever valid for new empty files, see
-    /// [`DiskWriter::allocate`]).
+    ///   (truncating first would destroy preloaded payloads in the
+    ///   "re-seed existing payload" scenario; the upstream anchor is
+    ///   aria2 `AbstractDiskWriter::openFile`: try `openExistingFile`
+    ///   (O_RDWR without O_TRUNC) first and only create via
+    ///   `initAndOpenFile` → `createFile` on ENOENT; `MultiDiskAdaptor.cc`
+    ///   applies the same policy per file). Trade-off: aria2 refuses the
+    ///   task by default when files already exist on disk without a
+    ///   control file (`RequestGroup.cc` FILE_ALREADY_EXISTS; only
+    ///   `--check-integrity`/`--allow-overwrite`/`--bt-seed-unverified`
+    ///   let it through); the add path here has no startup recheck flow
+    ///   yet, so it takes the `--allow-overwrite` open semantics —
+    ///   existing bytes are preserved and the bitmap downloads from
+    ///   zero. falloc/prealloc run only for newly created files (the
+    ///   allocation contract is only ever valid for new empty files, see
+    ///   [`DiskWriter::allocate`]).
     /// - Missing → create + allocate to the layout length per mode;
-    /// zero-length files are created too (aria2 MultiDiskAdaptor.cc);
-    /// handles close right after creation (allocation is a side
-    /// operation and does not consume the steady-open budget).
+    ///   zero-length files are created too (aria2 MultiDiskAdaptor.cc);
+    ///   handles close right after creation (allocation is a side
+    ///   operation and does not consume the steady-open budget).
     pub fn allocate_with(&mut self, mode: AllocationMode) -> Result<(), StoreError> {
         for f in self.layout.files() {
             if f.padding {

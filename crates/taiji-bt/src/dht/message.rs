@@ -8,17 +8,17 @@
 //!
 //! Mechanism summary:
 //! - Encoding emits canonical bencode (keys sorted ascending by [`dict`]);
-//! strict decoding rejects out-of-order keys, so `encode(decode(x)) == x`
-//! does not hold (unknown fields are projected away); the roundtrip
-//! invariant is `decode(encode(m)) == m`.
+//!   strict decoding rejects out-of-order keys, so `encode(decode(x)) == x`
+//!   does not hold (unknown fields are projected away); the roundtrip
+//!   invariant is `decode(encode(m)) == m`.
 //! - find_node replies always carry a nodes-family key (possibly empty);
-//! get_peers replies write `nodes`/`nodes6`/`values` only when non-empty.
+//!   get_peers replies write `nodes`/`nodes6`/`values` only when non-empty.
 //! - `values` is always a single key of single-family compact units (BEP32);
-//! hybrid lists are forbidden on send, mandatory to parse on receive.
+//!   hybrid lists are forbidden on send, mandatory to parse on receive.
 //! - Mixed-family node lists split into `nodes` (v4) + `nodes6` (v6) per the
-//! BEP32 want reply shape; decoding merges both keys, v4 entries first.
+//!   BEP32 want reply shape; decoding merges both keys, v4 entries first.
 //! - Strict field validation: 20-byte ids, `0 < port < 65535`, known-field
-//! types enforced; unknown `want` entries silently ignored (BEP32).
+//!   types enforced; unknown `want` entries silently ignored (BEP32).
 //!
 //! Upstream anchor mapping: docs/design/dht.md
 
@@ -826,15 +826,15 @@ fn parse_values(r: &[(Vec<u8>, Value)]) -> Result<Vec<SocketAddr>, DhtError> {
 /// validator:
 ///
 /// - The scanner is lenient (it never rejects); on any anomaly (not a dict,
-/// a truncated token, nesting deeper than [`bencode::MAX_DEPTH`], a
-/// captured key whose value is not a string) it returns `None` and the
-/// caller falls back to the full strict decode — malformed-input
-/// handling (including the y="q" 203/204 error-reply classification) is
-/// unchanged and stays on the strict path.
+///   a truncated token, nesting deeper than [`bencode::MAX_DEPTH`], a
+///   captured key whose value is not a string) it returns `None` and the
+///   caller falls back to the full strict decode — malformed-input
+///   handling (including the y="q" 203/204 error-reply classification) is
+///   unchanged and stays on the strict path.
 /// - With both keys found the returned slices borrow `data` (zero-copy);
-/// a duplicate key keeps the first occurrence (strict decode would reject
-/// the frame anyway; the gate only drops packets that were heading for a
-/// silent drop regardless).
+///   a duplicate key keeps the first occurrence (strict decode would reject
+///   the frame anyway; the gate only drops packets that were heading for a
+///   silent drop regardless).
 pub(crate) fn scan_transaction_header(data: &[u8]) -> Option<(&[u8], &[u8])> {
     let mut pos = 0usize;
     if data.first() != Some(&b'd') {
@@ -1064,38 +1064,38 @@ fn has_key(dict: &[(Vec<u8>, Value)], key: &[u8]) -> bool {
 /// # Classification (BEP5 code list)
 ///
 /// - 203 = "Protocol Error, such as a malformed packet, invalid
-/// arguments, or bad token": `y = "q"` with a known method name but
-/// malformed arguments (missing or mistyped `a`/`id`/`target`/
-/// `info_hash`/`port`/...), or `q` missing/non-string. Matches libtorrent
-/// `node::incoming_error`, whose default code is 203
-/// (`src/kademlia/node.cpp`; every verify_message failure path keeps the
-/// default);
+///   arguments, or bad token": `y = "q"` with a known method name but
+///   malformed arguments (missing or mistyped `a`/`id`/`target`/
+///   `info_hash`/`port`/...), or `q` missing/non-string. Matches libtorrent
+///   `node::incoming_error`, whose default code is 203
+///   (`src/kademlia/node.cpp`; every verify_message failure path keeps the
+///   default);
 /// - 204 = "Method Unknown": `y = "q"` with a method name outside the
-/// BEP5 message set;
+///   BEP5 message set;
 /// - 201 = "Generic Error": no wire trigger in this implementation —
-/// BEP5 defines no "overload" code; overload and limit excess are
-/// handled by per-source rate limiting (`engine::error_limit`) with a
-/// silent non-reply (anti-amplification first; libtorrent also defaults
-/// to silence there). 201 remains only as an encoding-side vector (the
-/// BEP5 example message).
+///   BEP5 defines no "overload" code; overload and limit excess are
+///   handled by per-source rate limiting (`engine::error_limit`) with a
+///   silent non-reply (anti-amplification first; libtorrent also defaults
+///   to silence there). 201 remains only as an encoding-side vector (the
+///   BEP5 example message).
 ///
 /// # Silent faces (return None; anti-amplification, anti-reflection)
 ///
 /// - Undecodable bencode (including strict-canonical violations) or a
-/// non-dict top level: there is no reliable structure to echo; libtorrent
-/// also drops outright when bdecode fails;
+///   non-dict top level: there is no reliable structure to echo; libtorrent
+///   also drops outright when bdecode fails;
 /// - `y` missing/non-string/other: never answer an error to a
-/// response/error/unknown face — an error reply would be a reflection
-/// surface; libtorrent explicitly does not reply to "missing 'y'" and
-/// notes "We don't want to open up a magnification opportunity"
-/// (`src/kademlia/node.cpp`);
+///   response/error/unknown face — an error reply would be a reflection
+///   surface; libtorrent explicitly does not reply to "missing 'y'" and
+///   notes "We don't want to open up a magnification opportunity"
+///   (`src/kademlia/node.cpp`);
 /// - `t` missing/non-string: BEP5 KRPC requires the response to echo the
-/// query's transaction id ("This transaction ID is generated by the
-/// querying node and is echoed in the response"); an error without an
-/// echoable tid cannot be matched by the peer and is outbound bytes with
-/// no protocol value;
+///   query's transaction id ("This transaction ID is generated by the
+///   querying node and is echoed in the response"); an error without an
+///   echoable tid cannot be matched by the peer and is outbound bytes with
+///   no protocol value;
 /// - The message decodes cleanly (defense: proves the classifier only
-/// serves malformed paths).
+///   serves malformed paths).
 ///
 /// Note: strict canonical decoding means a malformed query with
 /// out-of-order keys fails in the bencode arm → silent (libtorrent's

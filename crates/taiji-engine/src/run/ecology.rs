@@ -641,10 +641,10 @@ pub(crate) fn dht_ramp_min_peers() -> usize {
 /// slow tick, same style as `admission_verdict` /
 /// `admission_verdict_limits` in state.rs). Tiers (first match wins):
 /// - ramp tier: `!completed && conn_thin` (conn_thin = fast-tier switch
-/// on && registered < ramp_min) -> `ramp_interval` (`None` = env
-/// value 0 fallback -> the 1/3 tier);
+///   on && registered < ramp_min) -> `ramp_interval` (`None` = env
+///   value 0 fallback -> the 1/3 tier);
 /// - 1/3 fast tier: peer vacuum (peers_idle, all faces zero
-/// connections) or conn_thin -> `announce_interval / 3`;
+///   connections) or conn_thin -> `announce_interval / 3`;
 /// - regular tier: `announce_interval` (default 15min).
 pub(crate) fn dht_announce_cadence(
     registered: usize,
@@ -1071,23 +1071,23 @@ pub(crate) struct TurnoverRow {
 /// Disconnect priority (the `compare_disconnect_peer` key chain;
 /// reference snapshot `src/torrent.cpp`, per-key status):
 /// 1. `is_disconnecting` — omitted: a disconnect here is an immediate
-/// shutdown, no "disconnecting" state projection (the key would be
-/// constantly equal, no discrimination);
+///    shutdown, no "disconnecting" state projection (the key would be
+///    constantly equal, no discrimination);
 /// 2. `is_interesting` — kept ([`TurnoverRow::interesting`]);
 /// 3. `is_seed` — kept ([`TurnoverRow::seed`]);
 /// 4. `on_parole` — omitted: no corresponding face (smart_ban absent);
 /// 5. transfer — carried: `total_payload_download / time_connected` is
-/// carried by the 30s download-window rate (the same wire-received
-/// bytes numerator; the observation window normalizes time);
+///    carried by the 30s download-window rate (the same wire-received
+///    bytes numerator; the observation window normalizes time);
 /// 6. `is_choked` ("prefer to disconnect peers that chokes us") — kept
-/// ([`TurnoverRow::choking_us`], data face =
-/// `PeerTaskHandle::is_choking_us`);
+///    ([`TurnoverRow::choking_us`], data face =
+///    `PeerTaskHandle::is_choking_us`);
 /// 7. `last_received` — omitted: no per-peer last-activity timestamp
-/// projection (`PeerMeta::down` is a cumulative counter, the
-/// `PeerRate::last_*` fields are sampling baselines). The key is the
-/// chain-tail tiebreak: with the first six keys equal the reference
-/// disconnects the peer silent longest; here the stable order
-/// converges (the deterministic equivalent).
+///    projection (`PeerMeta::down` is a cumulative counter, the
+///    `PeerRate::last_*` fields are sampling baselines). The key is the
+///    chain-tail tiebreak: with the first six keys equal the reference
+///    disconnects the peer silent longest; here the stable order
+///    converges (the deterministic equivalent).
 pub(crate) fn compare_disconnect(l: &TurnoverRow, r: &TurnoverRow) -> Ordering {
     if l.interesting != r.interesting {
         // interesting = true is kept -> it sorts greater (later).
@@ -1263,17 +1263,17 @@ pub(crate) fn utp_mute_enabled() -> bool {
 /// time. Output: `(new record, disconnect)`.
 ///
 /// - **Transport gate**: `Transport::Tcp` is always `(None, false)` —
-/// TCP zero throughput is governed by turnover (cap approach) and the
-/// stall valve (session stall); this face never touches TCP;
+///   TCP zero throughput is governed by turnover (cap approach) and the
+///   stall valve (session stall); this face never touches TCP;
 /// - **Output exemption**: any direction producing (>0 B/s) clears the
-/// record and does not disconnect — upload output is a reciprocity
-/// contribution (the tit-for-tat supply side), exempt symmetrically
-/// with download;
+///   record and does not disconnect — upload output is a reciprocity
+///   contribution (the tit-for-tat supply side), exempt symmetrically
+///   with download;
 /// - **Observe -> disconnect**: the first observation records (no
-/// disconnect); it stays observing while under [`UTP_MUTE_AFTER`];
-/// still zero in both directions past the window -> disconnect and
-/// clear the record (the connection leave arm reclaims the remaining
-/// bookkeeping).
+///   disconnect); it stays observing while under [`UTP_MUTE_AFTER`];
+///   still zero in both directions past the window -> disconnect and
+///   clear the record (the connection leave arm reclaims the remaining
+///   bookkeeping).
 pub(crate) fn utp_mute_step(
     transport: Transport,
     down_rate: f64,
@@ -1535,21 +1535,21 @@ fn compare_slow_churn(l: &SlowChurnRow, r: &SlowChurnRow) -> Ordering {
 /// out):
 ///
 /// - pool floor `rows.len() < [`SLOW_CHURN_MIN_POOL`]` / switch off /
-/// `candidates == 0` -> an empty decision (**candidates = 0 means no
-/// replacement, no disconnect** — the candidate-cap shape of the
-/// reference `min(max(n x 4%, 1), num_connect_candidates())`
-/// (session_impl.cpp) adopted here, closing the turnover divergence
-/// gap);
+///   `candidates == 0` -> an empty decision (**candidates = 0 means no
+///   replacement, no disconnect** — the candidate-cap shape of the
+///   reference `min(max(n x 4%, 1), num_connect_candidates())`
+///   (session_impl.cpp) adopted here, closing the turnover divergence
+///   gap);
 /// - median = the lower median of all down_rates (sorted, n/2; n=0 is
-/// blocked by the pool floor first);
+///   blocked by the pool floor first);
 /// - threshold = median x frac_pct / 100; median == 0 -> threshold 0 ->
-/// nobody evictable (`down_rate < 0` is unreachable) — an all-zero
-/// pool is left to the stall valve / utp_mute; this predicate governs
-/// only "online but slow" (positive-rate distributions);
+///   nobody evictable (`down_rate < 0` is unreachable) — an all-zero
+///   pool is left to the stall valve / utp_mute; this predicate governs
+///   only "online but slow" (positive-rate distributions);
 /// - evictable = `down_rate < threshold && age >= min_age` (strictly
-/// below; at the line = the median itself, not evicted); with the
-/// rarity exemption on, sole-holder rows are additionally removed
-/// (the evictable count includes this exemption);
+///   below; at the line = the median itself, not evicted); with the
+///   rarity exemption on, sole-holder rows are additionally removed
+///   (the evictable count includes this exemption);
 /// - K = min(evictable, max(1, n x k_pct / 100), candidates).
 pub(crate) fn slow_churn_pick(
     rows: &mut [SlowChurnRow],
@@ -1799,13 +1799,13 @@ pub(super) fn push_candidate(
 /// on && after a silent failure in the Backoff state (escalating
 /// window) -> re-push. Three exclusions:
 /// - not Backoff (the 3rd failure reached
-/// [`taiji_domain::silent::SILENT_MAX_FAILS`] and entered cooldown)
-/// -> no re-push — cooldown semantics unchanged (the endpoint waits
-/// for discovery re-supply, an ~1800s scale);
+///   [`taiji_domain::silent::SILENT_MAX_FAILS`] and entered cooldown)
+///   -> no re-push — cooldown semantics unchanged (the endpoint waits
+///   for discovery re-supply, an ~1800s scale);
 /// - a non-discovery source (the Redial pool manages its own cadence /
-/// Punch is introducer-gated) -> no re-push;
+///   Punch is introducer-gated) -> no re-push;
 /// - switch off -> no re-push (legacy: only discovery re-supply
-/// re-admits).
+///   re-admits).
 ///
 /// Re-pushed entries retry when the silent backoff window expires and
 /// the drain round admits them naturally (`admit` Backoff -> the

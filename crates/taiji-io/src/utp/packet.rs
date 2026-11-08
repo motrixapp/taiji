@@ -192,8 +192,8 @@ pub struct Packet<'a> {
 /// - length >= 20 ("header format");
 /// - version == 1 ("version"); type in 0-4 ("type");
 /// - extension chain: each entry is `{next, len}` (two bytes) plus len
-/// body bytes; Selective ACK len "must be at least 4, and in multiples
-/// of 4" ("Selective ACK"); unknown extensions are skipped ("extension").
+///   body bytes; Selective ACK len "must be at least 4, and in multiples
+///   of 4" ("Selective ACK"); unknown extensions are skipped ("extension").
 pub fn decode(buf: &[u8]) -> Result<Packet<'_>, UtpError> {
     if buf.len() < HEADER_LEN {
         return Err(super::UtpError::Truncated);

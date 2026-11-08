@@ -652,21 +652,21 @@ impl RequestBook {
     /// `peer_connection.cpp`; source chain: docs/design/request-window.md):
     ///
     /// 1. Lazily settle the rate window ([`RateEwma::settle`], one settle
-    /// per 1s+). Gain by state: slow start exited and long window on ->
-    /// alpha 1/10 (stand-in `SpeedCalc.cc` alignment), otherwise
-    /// reference alpha 1/5 (`stat.cpp`). Any rate evidence
-    /// ([`RateEwma::seeded`]) exits slow start — the check is
-    /// idempotent; settlement and recompute may be driven by different
-    /// entry points.
+    ///    per 1s+). Gain by state: slow start exited and long window on ->
+    ///    alpha 1/10 (stand-in `SpeedCalc.cc` alignment), otherwise
+    ///    reference alpha 1/5 (`stat.cpp`). Any rate evidence
+    ///    ([`RateEwma::seeded`]) exits slow start — the check is
+    ///    idempotent; settlement and recompute may be driven by different
+    ///    entry points.
     /// 2. During slow start: clamp only, never recompute (the window grows
-    /// by +1 per block; here only the bounds clamp). Otherwise
-    /// `clamp(3s x rate / 16KiB, 2, cap)` (cap first, then floor).
+    ///    by +1 per block; here only the bounds clamp). Otherwise
+    ///    `clamp(3s x rate / 16KiB, 2, cap)` (cap first, then floor).
     /// 3. Hysteresis (default on): a target inside the `[0.7w, 1.3w]` band
-    /// holds the window steady (local policy, an intentional
-    /// divergence); disabled, the recompute assigns directly
-    /// (reference bit-for-bit).
+    ///    holds the window steady (local policy, an intentional
+    ///    divergence); disabled, the recompute assigns directly
+    ///    (reference bit-for-bit).
     /// 4. Fallback mode is untouched — the window belongs to
-    /// [`Self::end_receive_round`].
+    ///    [`Self::end_receive_round`].
     ///
     /// Called from every `now`-injecting entry point (dispatch / the
     /// on_piece slot-matched arm / expire_timed_out): supply, delivery,
@@ -800,13 +800,13 @@ impl RequestBook {
     /// `peer_connection.cpp`; source chain: docs/design/request-window.md):
     ///
     /// - 0 samples -> configured cap (the `--bt-request-timeout` analog;
-    /// the reference likewise returns `settings_pack::request_timeout`)
-    /// — no evidence, no behavior change;
+    ///   the reference likewise returns `settings_pack::request_timeout`)
+    ///   — no evidence, no behavior change;
     /// - 1 sample -> `mean + mean/5` (+20%); 2+ -> `mean + 4 x
     /// avg_deviation`;
     /// - ceil to whole seconds -> `min(configured cap)` -> `max(2s)` floor
-    /// (reference order: cap before floor, so a cap below 2s still
-    /// yields the 2s floor).
+    ///   (reference order: cap before floor, so a cap below 2s still
+    ///   yields the 2s floor).
     pub fn adaptive_timeout(&self) -> Duration {
         let (avg, dev, n) = (
             self.rtt.mean(),

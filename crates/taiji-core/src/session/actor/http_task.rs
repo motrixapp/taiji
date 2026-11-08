@@ -373,16 +373,16 @@ pub(in crate::session) struct HttpPersistConfig {
     /// Imported-bitmap flag: the row carries a fork piece->block bitmap (set by
     /// the importer only for bitmap rows). Activation semantics:
     /// - auto-rename is disabled — imported data meeting an existing final file
-    /// is an explicit conflict (`taiji.http.path_conflict`), never a silent
-    /// rename to `f.1.iso` that would sever the `.part` association and
-    /// orphan the data;
+    ///   is an explicit conflict (`taiji.http.path_conflict`), never a silent
+    ///   rename to `f.1.iso` that would sever the `.part` association and
+    ///   orphan the data;
     /// - the digest gate is downgraded on first activation (probe_json
-    /// absent): the import-time strong validators are unknowable (the fork
-    /// keeps no etag/last_modified while a real server always sends them),
-    /// so the seeded digest necessarily drifts; bitmap trust falls to the
-    /// "exists + size" second line of defense. After the first activation
-    /// probe, probe_json/validator_digest are backfilled from observations
-    /// and later resumes return to the strict gate.
+    ///   absent): the import-time strong validators are unknowable (the fork
+    ///   keeps no etag/last_modified while a real server always sends them),
+    ///   so the seeded digest necessarily drifts; bitmap trust falls to the
+    ///   "exists + size" second line of defense. After the first activation
+    ///   probe, probe_json/validator_digest are backfilled from observations
+    ///   and later resumes return to the strict gate.
     ///
     /// false writes no bytes (zero drift for existing payloads).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3678,24 +3678,24 @@ impl SegmentSink for SmallSink {
 /// # Semantic boundary vs the grid path
 ///
 /// - Range = runtime near-equal byte intervals (not block-aligned, outside
-/// the extent concept — no bitmap to resume): an interrupted row =
-/// downloading/zero progress, and re-activation refetches the whole file
-/// from zero (never overstate progress — the safe direction; the refetch
-/// cost for <=2-block tasks is bounded);
+///   the extent concept — no bitmap to resume): an interrupted row =
+///   downloading/zero progress, and re-activation refetches the whole file
+///   from zero (never overstate progress — the safe direction; the refetch
+///   cost for <=2-block tasks is bounded);
 /// - completion = all Ranges drained (each segment's transport carries its
-/// own length check; a short read/overrun fails into retry); the block
-/// bookkeeping finals (blocks_done/done_bytes) are pinned once at the
-/// close-out point — projection != bookkeeping (no double-write face);
+///   own length check; a short read/overrun fails into retry); the block
+///   bookkeeping finals (blocks_done/done_bytes) are pinned once at the
+///   close-out point — projection != bookkeeping (no double-write face);
 /// - the per-host cap applies as usual (permits acquired at the activation
-/// point, held for this fetch round), first-connection per-wave
-/// staggering, the throttled sink, the `--checksum` verdict before
-/// rename, and finalize intent-before-action — all the same assembly as
-/// the grid path;
+///   point, held for this fetch round), first-connection per-wave
+///   staggering, the throttled sink, the `--checksum` verdict before
+///   rename, and finalize intent-before-action — all the same assembly as
+///   the grid path;
 /// - multi-source: Ranges start from a source-rotated assignment and
-/// switch sources on failure up to
-/// `taiji_http::worker::WORKER_FAILURE_CAP` (no demotion ledger — source
-/// health arbitration belongs to the coordinator, which this path does
-/// not assemble).
+///   switch sources on failure up to
+///   `taiji_http::worker::WORKER_FAILURE_CAP` (no demotion ledger — source
+///   health arbitration belongs to the coordinator, which this path does
+///   not assemble).
 #[expect(
     clippy::too_many_arguments,
     reason = "drive-chain hand-off passes the run state explicitly; bundling is a later phase"
@@ -4356,15 +4356,15 @@ async fn batch_gate_acquire(
 /// # Semantic boundary vs the per-item path
 ///
 /// - First-wave stagger discipline is the same (warm pool skips / cold
-/// pool ramps; the ordinal = the worker's); the host permit is acquired
-/// at the activation point and held for the fetch round;
+///   pool ramps; the ordinal = the worker's); the host permit is acquired
+///   at the activation point and held for the fetch round;
 /// - failure retry = the ITEM requeues (the worker is not bound to an
-/// item: after backoff it takes the next item, possibly another file's —
-/// retry phases spread naturally and connect-phase RST noise in the
-/// batch does not cluster);
+///   item: after backoff it takes the next item, possibly another file's —
+///   retry phases spread naturally and connect-phase RST noise in the
+///   batch does not cluster);
 /// - write attribution: the item carries its owner's sink/live, so any
-/// worker's writes land on the owner file's `.part`/rate/heartbeat
-/// faces (the cross-file steal write-back contract).
+///   worker's writes land on the owner file's `.part`/rate/heartbeat
+///   faces (the cross-file steal write-back contract).
 #[expect(
     clippy::too_many_arguments,
     reason = "batch worker takes its host/budget/retry faces explicitly; bundling is a later phase"
@@ -4638,13 +4638,13 @@ pub(super) fn uris_from_mirrors(mirrors_json: Option<&str>, url: &str) -> Vec<St
 ///
 /// - SIZE 0 -> the empty-file shape (create a 0-byte output and done);
 /// - SIZE + `REST 0` both pass -> the rangeable shape (SIZE is the
-/// authoritative total length);
+///   authoritative total length);
 /// - `REST 0` rejected (5xx) -> the degraded shape (single connection, no
-/// bitmap, resume from zero — the degraded semantics);
+///   bitmap, resume from zero — the degraded semantics);
 /// - SIZE unsupported (no authoritative total) -> the source is dropped: a
-/// total-less FTP stream cannot satisfy block-grid bookkeeping or the
-/// `--checksum` completion verdict, so taiji tightens here (aria2 can
-/// stream without a total — a declared divergence).
+///   total-less FTP stream cannot satisfy block-grid bookkeeping or the
+///   `--checksum` completion verdict, so taiji tightens here (aria2 can
+///   stream without a total — a declared divergence).
 ///
 /// Credential chain = URI userinfo > `--ftp-user/--ftp-passwd` >
 /// anonymous/anonymous@ by default (the transport layer uses the same

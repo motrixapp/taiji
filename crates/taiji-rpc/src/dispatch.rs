@@ -153,13 +153,13 @@ impl AppState {
 /// normalization source; the `--rpc-aria2-compat` alias mode is gated
 /// at this single point — one API face at a time). Resolution order:
 /// 1. exact full-name hit in [`RPC_METHODS`] (bare names + the
-/// `system.*`/`taiji.*` extension literals);
+///    `system.*`/`taiji.*` extension literals);
 /// 2. prefix alias normalization: `taiji.<bare>` is always accepted
-/// (the canonical `taiji.addUri` converges to the frozen bare name
-/// here); `aria2.<bare>` only when `aria2_compat` is on. Aliases
-/// apply to bare names only (dotted names never re-match — the
-/// `taiji.moveStorage`-style extension literals and `system.*` have
-/// no prefix alias form).
+///    (the canonical `taiji.addUri` converges to the frozen bare name
+///    here); `aria2.<bare>` only when `aria2_compat` is on. Aliases
+///    apply to bare names only (dotted names never re-match — the
+///    `taiji.moveStorage`-style extension literals and `system.*` have
+///    no prefix alias form).
 ///
 /// The canonical namespace is `taiji.*`; `aria2.*` exists only in
 /// compat mode: with it off, `aria2.*` calls land on the unknown-method
@@ -188,11 +188,11 @@ fn canonical_method(name: &str, aria2_compat: bool) -> Option<&'static str> {
 /// projection of the registration face [`RPC_METHODS`], the single
 /// source of truth:
 /// - entries with a `.` literal (`system.*` introspection, `taiji.*`
-/// extensions) pass through unchanged on both faces;
+///   extensions) pass through unchanged on both faces;
 /// - bare names (the aria2-compatible family) get the face prefix —
-/// canonical `taiji.<bare>`, compat `aria2.<bare>` (the reference's
-/// rpcMethodNames are all presented prefixed, `RpcMethodFactory.cc`;
-/// table order follows the registration face).
+///   canonical `taiji.<bare>`, compat `aria2.<bare>` (the reference's
+///   rpcMethodNames are all presented prefixed, `RpcMethodFactory.cc`;
+///   table order follows the registration face).
 pub(crate) fn method_face_names(aria2_compat: bool) -> Vec<String> {
     let prefix = if aria2_compat { "aria2." } else { "taiji." };
     RPC_METHODS

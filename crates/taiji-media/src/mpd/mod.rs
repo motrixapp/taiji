@@ -10,19 +10,19 @@
 //!
 //! Layout:
 //! * [`model`] — the declared-structure data model (periods →
-//! adaptation sets → representations + the four addressing forms);
+//!   adaptation sets → representations + the four addressing forms);
 //! * [`parse`] — quick-xml streaming parse (namespace-tolerant
-//! local-name matching, DTD/entities disabled, unknown
-//! elements/attributes ignored whole-subtree);
+//!   local-name matching, DTD/entities disabled, unknown
+//!   elements/attributes ignored whole-subtree);
 //! * [`template`] — the `$…$` URL-template grammar (`$$`,
-//! `$RepresentationID$`, `$Bandwidth$`, `$Number$`, `$Time$`,
-//! width format tags; unknown identifiers are errors);
+//!   `$RepresentationID$`, `$Bandwidth$`, `$Number$`, `$Time$`,
+//!   width format tags; unknown identifiers are errors);
 //! * [`expand`] — the consumption mapping: per-representation
-//! cross-period segment sequences onto the HLS track model (the
-//! rulings of record live in that module's docs), the sidx
-//! materialization half, the normalized digest and the variant
-//! identity (both = the parser-line pure functions applied to DASH
-//! facts).
+//!   cross-period segment sequences onto the HLS track model (the
+//!   rulings of record live in that module's docs), the sidx
+//!   materialization half, the normalized digest and the variant
+//!   identity (both = the parser-line pure functions applied to DASH
+//!   facts).
 //!
 //! Judgment-table rows wired across parse+expand:
 //! `type="dynamic"` → `live_unsupported`; `<ContentProtection>` any

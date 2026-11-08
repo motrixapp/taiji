@@ -79,27 +79,27 @@
 //! # Hard invariants (shared-cache behavior)
 //!
 //! - Faces wired to the shared service gain an application-level cache of
-//! ≤[`HOST_CACHE_TTL`] (5min): DNS change convergence moves from the OS
-//! cache TTL to max(5min, OS TTL).
+//!   ≤[`HOST_CACHE_TTL`] (5min): DNS change convergence moves from the OS
+//!   cache TTL to max(5min, OS TTL).
 //! - A connect failure after a cache hit neither evicts nor rotates bad
-//! IPs: the HTTP face gets hyper's Happy Eyeballs over the address
-//! list, but the UDP tracker projects a single address with **no list
-//! fallback — a dead IP stays pinned for the full TTL**.
+//!   IPs: the HTTP face gets hyper's Happy Eyeballs over the address
+//!   list, but the UDP tracker projects a single address with **no list
+//!   fallback — a dead IP stays pinned for the full TTL**.
 //! - A cached list with no record for the requested family (host has only
-//! A records, a V6 face asks) hits an empty projection and returns Err
-//! **without re-querying** — the whole list is the resolver's
-//! authoritative answer, and within the TTL a re-query returns the same
-//! value (the "no record for that family" answer is pinned for the TTL
-//! too).
+//!   A records, a V6 face asks) hits an empty projection and returns Err
+//!   **without re-querying** — the whole list is the resolver's
+//!   authoritative answer, and within the TTL a re-query returns the same
+//!   value (the "no record for that family" answer is pinned for the TTL
+//!   too).
 //! - Concurrent misses on one host may each query once (the first
-//! backfill settles it; steady state is one query per TTL). No
-//! single-flight merging — the complexity is not worth the gain.
+//!   backfill settles it; steady state is one query per TTL). No
+//!   single-flight merging — the complexity is not worth the gain.
 //! - Dual-stack hosts drop from 2 queries to 1: one whole-list resolver
-//! query ([`HostResolver::resolve_list`]) + per-family projections.
+//!   query ([`HostResolver::resolve_list`]) + per-family projections.
 //! - The hang-failure point for HTTP/FTP faces moves earlier from
-//! connect_timeout (default 60s) to 30s (a tightening, not a
-//! relaxation); leftover blocking-thread occupancy outlives the
-//! timeout — see the [`TimeoutResolver`] note.
+//!   connect_timeout (default 60s) to 30s (a tightening, not a
+//!   relaxation); leftover blocking-thread occupancy outlives the
+//!   timeout — see the [`TimeoutResolver`] note.
 //!
 //! # Blocking discipline
 //!
@@ -118,24 +118,24 @@
 //! [`SharedDns::with_timeout_resolver`]):
 //!
 //! - `taiji_dns_lookups_total{result=hit|miss|error|timeout}` — fed at
-//! [`SharedDns::list_cached_or_resolve`], the single source for all
-//! faces (HTTP/FTP bridging, UDP tracker, and DHT bootstrap all pass
-//! through). hit/miss count **cache behavior**, error/timeout count
-//! **resolution outcomes** — a miss followed by a failed resolve
-//! **double-counts** (miss plus error or timeout, one each; a timeout
-//! counts as timeout, not error). Timeout classification happens at the
-//! [`TimeoutResolver`] layer: the timeout fact is self-produced there
-//! and carried through the typed classification exit, **never text
-//! matching**.
+//!   [`SharedDns::list_cached_or_resolve`], the single source for all
+//!   faces (HTTP/FTP bridging, UDP tracker, and DHT bootstrap all pass
+//!   through). hit/miss count **cache behavior**, error/timeout count
+//!   **resolution outcomes** — a miss followed by a failed resolve
+//!   **double-counts** (miss plus error or timeout, one each; a timeout
+//!   counts as timeout, not error). Timeout classification happens at the
+//!   [`TimeoutResolver`] layer: the timeout fact is self-produced there
+//!   and carried through the typed classification exit, **never text
+//!   matching**.
 //! - `taiji_dns_resolve_seconds` (histogram) — observed at the same
-//! function's exit (cache hits contribute near-zero samples; failure
-//! samples include the 30s timeout backstop bound, landing in the last
-//! bucket).
+//!   function's exit (cache hits contribute near-zero samples; failure
+//!   samples include the 30s timeout backstop bound, landing in the last
+//!   bucket).
 //! - `taiji_dns_family_mix_total{mix=v4_only|v6_only|dual}` — at the
-//! resolver's list production point (cache hits do not recount).
+//!   resolver's list production point (cache hits do not recount).
 //! - `taiji_dns_events_total{kind=evict_ttl|evict_capacity}` — at the two
-//! [`HostCache`] eviction points (TTL expiry cleared on the read path /
-//! capacity eviction of the oldest entry on insert).
+//!   [`HostCache`] eviction points (TTL expiry cleared on the read path /
+//!   capacity eviction of the oldest entry on insert).
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -510,16 +510,16 @@ pub enum ResolveError {
 ///
 /// Attribution order (types first, then text):
 /// 1. **source-chain downcast of [`ResolveError`] first** — after the
-/// shared resolver's type-preserving boxing via
-/// [`box_resolve_error`], reqwest/hyper-util layer errors pass
-/// through the source chain unflattened, so type detection cannot
-/// shatter with library Display wording. Discipline: adapter layers
-/// must not box via `to_string()` (breaking the chain loses this
-/// arm — the text fallback still applies but degraded);
+///    shared resolver's type-preserving boxing via
+///    [`box_resolve_error`], reqwest/hyper-util layer errors pass
+///    through the source chain unflattened, so type detection cannot
+///    shatter with library Display wording. Discipline: adapter layers
+///    must not box via `to_string()` (breaking the chain loses this
+///    arm — the text fallback still applies but degraded);
 /// 2. **Display text matching as the fallback** ("dns error" / "failed
-/// to lookup" — hyper_util legacy `ConnectError` historical
-/// wording): covers chains that bypass the shared resolver or broke
-/// type preservation; they still classify.
+///    to lookup" — hyper_util legacy `ConnectError` historical
+///    wording): covers chains that bypass the shared resolver or broke
+///    type preservation; they still classify.
 ///
 /// The argument is `&(dyn Error + 'static)`: the chain walk starts at
 /// the error itself and follows `source()` layer by layer (the
@@ -649,16 +649,16 @@ fn persistence_by_text(text: &str) -> DnsPersistence {
 /// Attribution order (types first, then text — the generalization of
 /// the [`error_chain_is_dns`] discipline):
 /// 1. **type downcast over the whole chain** — [`ResolveError`] (boxed
-/// type-preserving by the shared resolver; persistence read straight
-/// off the variant) → [`std::io::Error`] kind (refused/reset/timeout
-/// as kernel errno facts, immune to wording drift);
+///    type-preserving by the shared resolver; persistence read straight
+///    off the variant) → [`std::io::Error`] kind (refused/reset/timeout
+///    as kernel errno facts, immune to wording drift);
 /// 2. **Display text markers scanned per class** (dns → tls → reset →
-/// timeout → refused → connect) — the whole chain is scanned per
-/// class rather than judged node-locally: connect-class wrapper
-/// wording (e.g. "client error (Connect)") must not shadow a dns
-/// attribution deeper in the chain;
+///    timeout → refused → connect) — the whole chain is scanned per
+///    class rather than judged node-locally: connect-class wrapper
+///    wording (e.g. "client error (Connect)") must not shadow a dns
+///    attribution deeper in the chain;
 /// 3. host kind facts ([`TransportHints`]) as the backstop; no match =
-/// [`TransportErrorClass::Other`].
+///    [`TransportErrorClass::Other`].
 ///
 /// The argument is `&(dyn Error + 'static)`: the same contract as
 /// [`error_chain_is_dns`] (layer-by-layer source walk; any transport
@@ -758,26 +758,26 @@ pub fn box_resolve_error(err: ResolveError) -> Box<dyn std::error::Error + Send 
 /// invariant and behavior notes in the module docs).
 ///
 /// - Lock discipline: the cache is accessed in short `StdMutex`
-/// critical sections (read snapshot / whole-list backfill), **never
-/// across an await** (the resolution await happens outside the lock);
-/// shared across tasks via `Arc<Self>` (spawned tasks clone the Arc
-/// and read the cache without messaging back).
+///   critical sections (read snapshot / whole-list backfill), **never
+///   across an await** (the resolution await happens outside the lock);
+///   shared across tasks via `Arc<Self>` (spawned tasks clone the Arc
+///   and read the cache without messaging back).
 /// - Clock: real [`Instant`] internally (the reqwest `Resolve` face has
-/// no clock parameter); synthetic-clock tests converge in the
-/// [`HostCache`] unit-test layer.
+///   no clock parameter); synthetic-clock tests converge in the
+///   [`HostCache`] unit-test layer.
 /// - Instances: production takes the process-wide default
-/// [`Self::shared_default`] (OnceLock — resolver stack =
-/// [`TimeoutResolver`] around [`TokioHostResolver`], the production
-/// shape of the decorator-on-seam); tests build independent instances
-/// via [`Self::with_resolver`] (cache isolation + assertable stub
-/// counts — no hard singleton, which could be neither swapped nor
-/// reset).
+///   [`Self::shared_default`] (OnceLock — resolver stack =
+///   [`TimeoutResolver`] around [`TokioHostResolver`], the production
+///   shape of the decorator-on-seam); tests build independent instances
+///   via [`Self::with_resolver`] (cache isolation + assertable stub
+///   counts — no hard singleton, which could be neither swapped nor
+///   reset).
 /// - Metrics: the four DNS feed points live in this service (module
-/// docs, "Metrics"); production binds the process default registry
-/// [`crate::metrics::registry_default`], tests inject independent
-/// registries via [`Self::with_registry`] /
-/// [`Self::with_timeout_resolver`] (no bare global counters — zero
-/// parallel-test pollution).
+///   docs, "Metrics"); production binds the process default registry
+///   [`crate::metrics::registry_default`], tests inject independent
+///   registries via [`Self::with_registry`] /
+///   [`Self::with_timeout_resolver`] (no bare global counters — zero
+///   parallel-test pollution).
 pub struct SharedDns {
     resolver: Arc<dyn HostResolver>,
     /// Typed timeout seam: held when the resolver stack contains a
@@ -896,14 +896,14 @@ impl SharedDns {
     /// `resolve_family` and `resolve_for_transport` consumers go through
     /// here):
     /// - `lookups{result}`: hit = hit; miss = miss; a miss followed by a
-    /// failed resolve = error **or** timeout (double count — miss plus
-    /// error|timeout, one each; timeout is classified via
-    /// [`TimeoutResolver`]'s typed exit, never text matching);
+    ///   failed resolve = error **or** timeout (double count — miss plus
+    ///   error|timeout, one each; timeout is classified via
+    ///   [`TimeoutResolver`]'s typed exit, never text matching);
     /// - `resolve_seconds`: observed at this function's exit (hits
-    /// contribute near-zero samples; failure samples include the
-    /// timeout backstop bound);
+    ///   contribute near-zero samples; failure samples include the
+    ///   timeout backstop bound);
     /// - `family_mix{mix}`: attributed at the resolver's list production
-    /// point by family composition (cache hits do not recount).
+    ///   point by family composition (cache hits do not recount).
     ///
     /// # The four DNS log points (reference-aligned, with a declared
     /// level adaptation)
@@ -1005,20 +1005,20 @@ impl SharedDns {
     /// shells only call and convert types):
     ///
     /// - **Literal-IP passthrough** (zero resolution cost, the same
-    /// shape as aria2 `NameResolveCommand.cc` isNumericHost): on the
-    /// reqwest/hyper-util path this branch is dead code (hyper-util's
-    /// `try_parse` short-circuits before the resolver, no behavior
-    /// change) — kept for direct-call faces (FTP, etc.) to reuse;
+    ///   shape as aria2 `NameResolveCommand.cc` isNumericHost): on the
+    ///   reqwest/hyper-util path this branch is dead code (hyper-util's
+    ///   `try_parse` short-circuits before the resolver, no behavior
+    ///   change) — kept for direct-call faces (FTP, etc.) to reuse;
     /// - **port 0 synthesis**: the reqwest face always passes
-    /// `port = 0` — hyper-util fills port 0 on returned addresses by
-    /// scheme convention, and an explicit URL port overrides (a
-    /// nonzero port would be reused, hence cache entries hold only
-    /// [`IpAddr`] and the port is always synthesized by this function
-    /// per call-face argument); direct faces pass a real port and use
-    /// it directly;
+    ///   `port = 0` — hyper-util fills port 0 on returned addresses by
+    ///   scheme convention, and an explicit URL port overrides (a
+    ///   nonzero port would be reused, hence cache entries hold only
+    ///   [`IpAddr`] and the port is always synthesized by this function
+    ///   per call-face argument); direct faces pass a real port and use
+    ///   it directly;
     /// - error surface [`ResolveError`] (information inside the trait
-    /// `String` boundary passes through unchanged), boxed
-    /// type-preserving by adapter shells via [`box_resolve_error`].
+    ///   `String` boundary passes through unchanged), boxed
+    ///   type-preserving by adapter shells via [`box_resolve_error`].
     pub async fn resolve_for_transport(
         &self,
         host: &str,

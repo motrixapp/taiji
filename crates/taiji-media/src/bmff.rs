@@ -9,17 +9,17 @@
 //! nothing more):
 //!
 //! * generic box iteration ([`iter_boxes`]) with 32-bit size, the
-//! `size == 0` "extends to end" form and the `size == 1` 64-bit
-//! largesize escape;
+//!   `size == 0` "extends to end" form and the `size == 1` 64-bit
+//!   largesize escape;
 //! * typed readers for the boxes the fold and the probe must
-//! understand: `mvhd`/`tkhd`/`mdhd`/`hdlr`/`stsd` (+ `stbl` children
-//! for the probe: `stts`/`stsc`/`stsz`/`stco`/`co64`/`stss`/`ctts`);
-//! `moof`/`mfhd`/`traf`/`tfhd`/`tfdt`/`trun` for the fragment fold;
+//!   understand: `mvhd`/`tkhd`/`mdhd`/`hdlr`/`stsd` (+ `stbl` children
+//!   for the probe: `stts`/`stsc`/`stsz`/`stco`/`co64`/`stss`/`ctts`);
+//!   `moof`/`mfhd`/`traf`/`tfhd`/`tfdt`/`trun` for the fragment fold;
 //! * [`fold_track`]: the per-track fMP4 fold — one init segment (its
-//! `moov.trak` codec description passes through **verbatim**, the
-//! amended carrier property: any codec, not a whitelist) plus
-//! the segment archive (a `moof`/`mdat` stream) folded into one
-//! flat sample table ([`FoldedTrack`]).
+//!   `moov.trak` codec description passes through **verbatim**, the
+//!   amended carrier property: any codec, not a whitelist) plus
+//!   the segment archive (a `moof`/`mdat` stream) folded into one
+//!   flat sample table ([`FoldedTrack`]).
 //!
 //! Malformed staging content is an explicit `taiji.media.staging`
 //! error (the media spec's error-code annotation's local-disk face) — never a
@@ -678,29 +678,29 @@ impl SegmentSpan {
 ///
 /// Rules (documented in docs/design/media-synthesis.md):
 /// * the init must carry exactly one `trak` (the HLS per-track form —
-/// this convenience face refuses a multi-trak init; the muxed A/V
-/// form folds through [`parse_init_tracks`] +
-/// [`fold_track_for`]);
+///   this convenience face refuses a multi-trak init; the muxed A/V
+///   form folds through [`parse_init_tracks`] +
+///   [`fold_track_for`]);
 /// * every span must be non-empty, inside the archive and **aligned
-/// with the box structure** (its start is a box start, its end a
-/// box end — a span cutting a box in half contradicts the archive
-/// and is an explicit error);
+///   with the box structure** (its start is a box start, its end a
+///   box end — a span cutting a box in half contradicts the archive
+///   and is an explicit error);
 /// * **sample base resolution** (ISO/IEC 14496-12 §8.8.7): a tfhd
-/// `default-base-is-moof` anchors at the moof's own archive offset;
-/// an **explicit `base-data-offset` is absolute within its segment
-/// file** — the archive-absolute base = the enclosing span's
-/// `archive_offset` plus the file-relative value. trun data-offset
-/// is signed and relative to the base; contiguous samples follow;
+///   `default-base-is-moof` anchors at the moof's own archive offset;
+///   an **explicit `base-data-offset` is absolute within its segment
+///   file** — the archive-absolute base = the enclosing span's
+///   `archive_offset` plus the file-relative value. trun data-offset
+///   is signed and relative to the base; contiguous samples follow;
 /// * every sample byte range must fall inside one `mdat` payload
-/// **within the traf's own segment span** — a range landing in
-/// another segment's mdat, or outside any mdat, fails loudly;
+///   **within the traf's own segment span** — a range landing in
+///   another segment's mdat, or outside any mdat, fails loudly;
 /// * a moof outside every span is an explicit error (the ledger and
-/// the archive disagree);
+///   the archive disagree);
 /// * per-sample durations come from trun/tfhd defaults; a sample with
-/// no derivable duration is an unsupported native input (the caller
-/// degrades to the ffmpeg channel);
+///   no derivable duration is an unsupported native input (the caller
+///   degrades to the ffmpeg channel);
 /// * sync = sample_flags without the non-sync bit (first-sample-flags
-/// honored for the first sample of each trun).
+///   honored for the first sample of each trun).
 pub fn fold_track(
     init: &[u8],
     archive: &[u8],

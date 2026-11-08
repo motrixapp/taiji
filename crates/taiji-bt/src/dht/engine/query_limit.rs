@@ -11,24 +11,24 @@
 //! suppression in front of query handling:
 //!
 //! - Empty bucket => *silent drop* (BEP5 has no "overloaded" code; an
-//! error/201-style reply would itself become the amplifier — same
-//! trade-off as elsewhere: zero replies once over budget);
+//!   error/201-style reply would itself become the amplifier — same
+//!   trade-off as elsewhere: zero replies once over budget);
 //! - After one full burst of *consecutive* over-budget drops
-//! (violations >= burst; rationale in the
-//! [`super::config::DHT_PER_SOURCE_QUERY_BURST`] docs) the source is
-//! suppressed for `suppress_secs` (default 60s): packets are silently
-//! dropped during the window; this is *not a permanent ban* (peers can
-//! come back), and expiry recovers automatically (refill back-fills by
-//! elapsed time, violations reset to zero — no management plane needed);
+//!   (violations >= burst; rationale in the
+//!   [`super::config::DHT_PER_SOURCE_QUERY_BURST`] docs) the source is
+//!   suppressed for `suppress_secs` (default 60s): packets are silently
+//!   dropped during the window; this is *not a permanent ban* (peers can
+//!   come back), and expiry recovers automatically (refill back-fills by
+//!   elapsed time, violations reset to zero — no management plane needed);
 //! - Only the *query* face is limited: responses/error replies are not
-//! governed by this limiter (prevents a reflection loop); error *replies*
-//! are clamped independently per source by `error_limit` (two limiters,
-//! two faces);
+//!   governed by this limiter (prevents a reflection loop); error *replies*
+//!   are clamped independently per source by `error_limit` (two limiters,
+//!   two faces);
 //! - Bootstrap entry points and sources introduced by PORT messages are
-//! exempt ([`QueryRateLimiter::exempt`]): BEP42's "Requests ... should
-//! always be serviced" must hold — v6/new-node bootstrap must not be
-//! starved by the limiter (exemptions carry a TTL and a hard cap; not a
-//! permanent allowlist, see the [`EXEMPT_TTL`] docs).
+//!   exempt ([`QueryRateLimiter::exempt`]): BEP42's "Requests ... should
+//!   always be serviced" must hold — v6/new-node bootstrap must not be
+//!   starved by the limiter (exemptions carry a TTL and a hard cap; not a
+//!   permanent allowlist, see the [`EXEMPT_TTL`] docs).
 //!
 //! # Constants (engineering hardening)
 //!
@@ -37,23 +37,23 @@
 //! hardening constants:
 //!
 //! - [`QUERY_LIMITER_MAX_SOURCES`] = 4096: hard cap on the per-source
-//! state table (same rationale as
-//! `error_limit::ERROR_LIMITER_MAX_SOURCES` / `wire::MAX_PEER_RECORD_KEYS`),
-//! evicting the least-recently-active entry (last_seen). An evicted source
-//! re-enters with fresh budget — but the absolute per-source rate bound
-//! does not depend on table completeness: an attacker forging many
-//! sources still gets a per-source bound (unbounded state growth is what
-//! this cap prevents).
+//!   state table (same rationale as
+//!   `error_limit::ERROR_LIMITER_MAX_SOURCES` / `wire::MAX_PEER_RECORD_KEYS`),
+//!   evicting the least-recently-active entry (last_seen). An evicted source
+//!   re-enters with fresh budget — but the absolute per-source rate bound
+//!   does not depend on table completeness: an attacker forging many
+//!   sources still gets a per-source bound (unbounded state growth is what
+//!   this cap prevents).
 //! - [`EXEMPT_MAX_ENTRIES`] = 4096: exemption table hard cap (same
-//! rationale), evicting the oldest registration.
+//!   rationale), evicting the oldest registration.
 //! - [`EXEMPT_TTL`] = 10min: an exemption is a temporary bootstrap pass,
-//! not a permanent allowlist — prevents forged PORT messages from
-//! laundering arbitrary sources into a permanent bypass. 10min covers the
-//! worst bootstrap round (entry ping retries 10 x transaction timeout 10s
-//! = 100s, `DHTEntryPointNameResolveCommand.cc` passes 10) with ~6x
-//! margin and matches the in-tree token rotation window (10min,
-//! `DHTConstants.h`); sources still in the bootstrap face (re-bootstrap /
-//! PORT re-registration) renew automatically.
+//!   not a permanent allowlist — prevents forged PORT messages from
+//!   laundering arbitrary sources into a permanent bypass. 10min covers the
+//!   worst bootstrap round (entry ping retries 10 x transaction timeout 10s
+//!   = 100s, `DHTEntryPointNameResolveCommand.cc` passes 10) with ~6x
+//!   margin and matches the in-tree token rotation window (10min,
+//!   `DHTConstants.h`); sources still in the bootstrap face (re-bootstrap /
+//!   PORT re-registration) renew automatically.
 //!
 //! # Implementation notes
 //!

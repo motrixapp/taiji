@@ -8,22 +8,22 @@
 //!
 //! Implementation parameters:
 //! - Capacity = rate x 1s (burst <= 1s of bandwidth); cold-start tokens
-//! are 0 (no initial burst; a long idle accumulates at most 1s of
-//! bandwidth).
+//!   are 0 (no initial burst; a long idle accumulates at most 1s of
+//!   bandwidth).
 //! - Refill = rate x elapsed, settled lazily on demand: pure arithmetic
-//! in a short critical section; the std Mutex never spans an await —
-//! waiting is driven by runtime timers, never by sleeping with the
-//! lock held.
+//!   in a short critical section; the std Mutex never spans an await —
+//!   waiting is driven by runtime timers, never by sleeping with the
+//!   lock held.
 //! - `0 = unlimited` (aria2 option semantics) short-circuits at both the
-//! bucket and stream level: the unlimited path is one atomic read plus
-//! a branch (no lock, no future, no timer).
+//!   bucket and stream level: the unlimited path is one atomic read plus
+//!   a branch (no lock, no future, no timer).
 //! - Concurrency fairness: FIFO ticket-order grants (first come, first
-//! served). Waiters estimate their deadline from the token deficit and
-//! re-check when a runtime timer fires; once a grant completes, the new
-//! queue head is woken immediately.
+//!   served). Waiters estimate their deadline from the token deficit and
+//!   re-check when a runtime timer fires; once a grant completes, the new
+//!   queue head is woken immediately.
 //! - Rate hot-update ([`TokenBucket::set_rate`]) is an atomic store plus
-//! waking all waiters to re-estimate; it applies to in-flight streams
-//! immediately.
+//!   waking all waiters to re-estimate; it applies to in-flight streams
+//!   immediately.
 //!
 //! Upstream anchors: aria2 RequestGroupMan.cc (static quota limiting; no
 //! token bucket in aria2), RpcMethodImpl.cc setMaxDownloadSpeedLimit (the
@@ -416,17 +416,17 @@ enum Gate {
 /// paths each acquire permits through the chained bucket pair.
 ///
 /// - `limits = None` (or both buckets unlimited) short-circuits with zero
-/// overhead: one branch, then straight to the inner stream
-/// ([`Throttled::maybe`] with `None` is the bare CLI form).
+///   overhead: one branch, then straight to the inner stream
+///   ([`Throttled::maybe`] with `None` is the bare CLI form).
 /// - Read path: read into an internal staging buffer of at most 16 KiB
-/// first (never past the permit), then hand the data over with one copy
-/// once granted. The socket is untouched while waiting, so the TCP/uTP
-/// window is pushed back; the burst upper bound is one chunk.
+///   first (never past the permit), then hand the data over with one copy
+///   once granted. The socket is untouched while waiting, so the TCP/uTP
+///   window is pushed back; the burst upper bound is one chunk.
 /// - Write path: write to the inner stream first (at most one wire message
-/// in flight) and report completion to the caller only after the permit,
-/// so back-pressure propagates up the write half to the message loop.
+///   in flight) and report completion to the caller only after the permit,
+///   so back-pressure propagates up the write half to the message loop.
 /// - The permit future is owned by this struct (with the bucket Arc);
-/// dropping clears its queue entry (see [`Acquire`]).
+///   dropping clears its queue entry (see [`Acquire`]).
 pub struct Throttled<S> {
     inner: S,
     limits: Option<Arc<LimiterSet>>,

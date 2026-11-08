@@ -5,17 +5,17 @@
 //! protocol crates. Carries three kinds of frozen cross-layer vocabulary:
 //!
 //! - **Method surface** ([`methods`]): the RPC method promise table
-//! (consts / type literals);
+//!   (consts / type literals);
 //! - **Domain model**: metainfo (.torrent parsing into a unified metadata
-//! model), seed (seeding stop policy), progress (progress model), hook
-//! (hook subset execution model), nat (NAT assembly surface),
-//! hash_fetch/hash_source (v2 hash exchange planner / source ledger),
-//! peer_guard (peer ban accounting + blocklist import), redial (peer
-//! redial pool), silent (silent-abandon failure ledger), gid (GID type
-//! vocabulary; the allocator itself lives in core session);
+//!   model), seed (seeding stop policy), progress (progress model), hook
+//!   (hook subset execution model), nat (NAT assembly surface),
+//!   hash_fetch/hash_source (v2 hash exchange planner / source ledger),
+//!   peer_guard (peer ban accounting + blocklist import), redial (peer
+//!   redial pool), silent (silent-abandon failure ledger), gid (GID type
+//!   vocabulary; the allocator itself lives in core session);
 //! - **Event vocabulary** ([`recovery`]): recovery event relay payloads plus
-//! recovery-layer row assembly (a neutral payload surface produced by the
-//! engine and consumed by the session).
+//!   recovery-layer row assembly (a neutral payload surface produced by the
+//!   engine and consumed by the session).
 //!
 //! Dependency discipline: must not depend on core/rpc/cli. Within the
 //! workspace only the three companion crates bt/store/io may be used (for

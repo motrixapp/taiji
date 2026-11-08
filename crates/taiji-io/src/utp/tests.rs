@@ -2,12 +2,12 @@
 //!
 //! Two layers:
 //! - Scripted peer ([`TestEndpoint`]): drives a connection directly; the
-//! test plays the protocol peer packet by packet — pinning BEP-29 state
-//! transitions, sack/duplicate-ack/timeout retransmits, and illegal
-//! transitions;
+//!   test plays the protocol peer packet by packet — pinning BEP-29 state
+//!   transitions, sack/duplicate-ack/timeout retransmits, and illegal
+//!   transitions;
 //! - duplex mock ([`Wire`]): two full listeners interconnected over
-//! programmable channels (loss%/dup%/reorder) for end-to-end loops plus
-//! LEDBAT delay sampling.
+//!   programmable channels (loss%/dup%/reorder) for end-to-end loops plus
+//!   LEDBAT delay sampling.
 //!
 //! Protocol assertions cite BEP-29 section names throughout.
 //!

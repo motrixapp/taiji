@@ -4,13 +4,13 @@
 //! # Protocol facts
 //!
 //! - The secret is 4 random bytes kept as two generations:
-//! `secret_[2][SECRET_SIZE=4]` (aria2 `DHTTokenTracker.h`); generation
-//! uses the current generation, validation accepts either generation
-//! (`DHTTokenTracker.cc`);
+//!   `secret_[2][SECRET_SIZE=4]` (aria2 `DHTTokenTracker.h`); generation
+//!   uses the current generation, validation accepts either generation
+//!   (`DHTTokenTracker.cc`);
 //! - Rotation: current generation -> previous, a fresh secret becomes
-//! current (`DHTTokenTracker.cc`); the rotation window is 10min
-//! (`DHTConstants.h` `DHT_TOKEN_UPDATE_INTERVAL`); the engine drives it
-//! on a timer, this module only provides [`TokenTracker::update_secret`];
+//!   current (`DHTTokenTracker.cc`); the rotation window is 10min
+//!   (`DHTConstants.h` `DHT_TOKEN_UPDATE_INTERVAL`); the engine drives it
+//!   on a timer, this module only provides [`TokenTracker::update_secret`];
 //! - A token is a 20B SHA-1 digest (`DHTTokenTracker.cc`).
 //!
 //! # Token formula: SPEC §6.7 (intentional divergence from aria2)

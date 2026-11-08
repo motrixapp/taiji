@@ -4,12 +4,12 @@
 //! Resolution order, highest precedence first:
 //!
 //! 1. explicit caller parameter (library face; the unified option panel will
-//! project `--media-ffmpeg-path` onto it — no CLI option is added in
-//! the initial release, frozen-seam note);
+//!    project `--media-ffmpeg-path` onto it — no CLI option is added in
+//!    the initial release, frozen-seam note);
 //! 2. `TAIJI_FFMPEG_PATH` environment variable — a *directory* holding
-//! both binaries (ffprobe is derived from the same directory);
+//!    both binaries (ffprobe is derived from the same directory);
 //! 3. the packaged-path constant (`TAIJI_FFMPEG_DIR` build-time env; the
-//! packaging pipeline owns setting it — absent in dev builds);
+//!    packaging pipeline owns setting it — absent in dev builds);
 //! 4. `PATH` search.
 //!
 //! Pairing contract: ffmpeg and ffprobe must resolve from the same

@@ -1,9 +1,9 @@
 //! Piece addressing model (no global piece-index assumption).
 //!
 //! - v1: the flat global index is a protocol fact (BEP3), modeled
-//! explicitly as [`PieceId::V1`];
+//!   explicitly as [`PieceId::V1`];
 //! - v2: a piece belongs to `(file_index, piece_in_file)` (the per-file
-//! piece model).
+//!   piece model).
 //!
 //! Wire index conversion (BEP52 `piece length` section: "Files are mapped
 //! into this piece address space so that each non-empty file is aligned to

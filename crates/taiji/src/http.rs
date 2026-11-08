@@ -1391,12 +1391,12 @@ fn same_dir(a: &str, b: &Path) -> bool {
 /// hit, the row's persisted config is compared with this run's options:
 ///
 /// - `--checksum` given on both sides with different values ->
-/// [`AttachDecision::Reject`] (the only rejection — the checksum is the
-/// completion-time final verdict, and attaching would silently void the
-/// new value);
+///   [`AttachDecision::Reject`] (the only rejection — the checksum is the
+///   completion-time final verdict, and attaching would silently void the
+///   new value);
 /// - other differences (one side missing / suffix differs) -> warnings
-/// returned with [`AttachDecision::Attach`] (the persisted value wins;
-/// the new value is disclosed then dropped).
+///   returned with [`AttachDecision::Attach`] (the persisted value wins;
+///   the new value is disclosed then dropped).
 fn decide_attach(
     rows: &[InflightRow],
     url: &str,
@@ -1614,23 +1614,23 @@ fn metalink_dropped_option_warnings(out: Option<&str>, checksum: Option<&str>) -
 ///
 /// aria2 anchors (read-only reference):
 /// - Entry filtering = `Metalinker.cc queryEntry` — version EXACT
-/// equality, language/os EXACT containment
-/// (`MetalinkEntry::containsLanguage` / `containsOS`); an empty option
-/// value = no filtering (the DefaultOptionHandler empty value);
+///   equality, language/os EXACT containment
+///   (`MetalinkEntry::containsLanguage` / `containsOS`); an empty option
+///   value = no filtering (the DefaultOptionHandler empty value);
 /// - The priority boost = `Metalink2RequestGroup.cc` — a URL
-/// matching `--metalink-location` (compared after lowercase
-/// normalization) or `--metalink-preferred-protocol` (compared via
-/// `MetalinkResource::getTypeString`) gets
-/// `priority += -MetalinkResource::getLowestPriority` (once per
-/// criterion, both hits stack); saturating subtraction on the u32 face
-/// (0 = best; the ordering within an equal-priority group stays in
-/// document order via the expansion seam's stable sort — the
-/// post-boost order invariant is not broken);
+///   matching `--metalink-location` (compared after lowercase
+///   normalization) or `--metalink-preferred-protocol` (compared via
+///   `MetalinkResource::getTypeString`) gets
+///   `priority += -MetalinkResource::getLowestPriority` (once per
+///   criterion, both hits stack); saturating subtraction on the u32 face
+///   (0 = best; the ordering within an equal-priority group stays in
+///   document order via the expansion seam's stable sort — the
+///   post-boost order invariant is not broken);
 /// - The mirror cap = the fork extension `--metalink-servers` (a
-/// DECLARED_OPTION_DIFFS declaration-table entry): a stable pre-sort by
-/// (priority, document order) truncated to the first N — the expansion
-/// seam `expand_add_uri_plans` re-sorts stably on the same key, so the
-/// order is conserved.
+///   DECLARED_OPTION_DIFFS declaration-table entry): a stable pre-sort by
+///   (priority, document order) truncated to the first N — the expansion
+///   seam `expand_add_uri_plans` re-sorts stably on the same key, so the
+///   order is conserved.
 ///
 /// Every entry filtered out by the preferences = the caller exits 2 (the
 /// aria2 `EX_NO_RESULT_WITH_YOUR_PREFS` equivalent, decided in

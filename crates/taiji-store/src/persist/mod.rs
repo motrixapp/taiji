@@ -255,29 +255,29 @@ impl ImportBackup {
 ///
 /// Semantics:
 /// - Must be called before any open/migration of the target database —
-/// `.v1.bak` preserves the bytes from before the migration ledger
-/// advances (a form a 0.1.x binary can open, readable by the
-/// rollback);
+///   `.v1.bak` preserves the bytes from before the migration ledger
+///   advances (a form a 0.1.x binary can open, readable by the
+///   rollback);
 /// - "Target offline" enforcement (precheck item 3) = WAL sidecar
-/// detection: `-wal`/`-shm` on disk means a live local taiji session
-/// or an unclean previous exit (sqlite checkpoints and deletes both
-/// when the last connection closes cleanly; they stay on disk while a
-/// session lives) -> [`StoreError::TargetInUse`]. Checkpoint busy is
-/// not the primary probe: its semantics for idle connections are
-/// unreliable across platforms, and an active session would yield no
-/// snapshot — never silently produce a torn backup;
+///   detection: `-wal`/`-shm` on disk means a live local taiji session
+///   or an unclean previous exit (sqlite checkpoints and deletes both
+///   when the last connection closes cleanly; they stay on disk while a
+///   session lives) -> [`StoreError::TargetInUse`]. Checkpoint busy is
+///   not the primary probe: its semantics for idle connections are
+///   unreliable across platforms, and an active session would yield no
+///   snapshot — never silently produce a torn backup;
 /// - Sidecars absent = cleanly offline; a best-effort
-/// `wal_checkpoint(TRUNCATE)` folds any residual WAL in (busy also
-/// refuses), then a single-file copy is a consistent snapshot;
+///   `wal_checkpoint(TRUNCATE)` folds any residual WAL in (busy also
+///   refuses), then a single-file copy is a consistent snapshot;
 /// - Copy atomicity: temp (unique name in the same directory) + fsync +
-/// atomic rename — an interrupted copy leaves garbage only under the
-/// temp name; a torn copy can never reach the anchor name (a
-/// readability check runs once more before landing the anchor);
+///   atomic rename — an interrupted copy leaves garbage only under the
+///   temp name; a torn copy can never reach the anchor name (a
+///   readability check runs once more before landing the anchor);
 /// - Existing `.v1.bak` -> after a usability check (sqlite header /
-/// openable) [`ImportBackup::KeptExisting`] (never overwritten; see
-/// the variant docs); a failed check = a torn/corrupt backup is
-/// explicitly rejected ([`StoreError::CorruptDatabase`]; anchor bytes
-/// untouched); no target database -> [`ImportBackup::NotNeeded`].
+///   openable) [`ImportBackup::KeptExisting`] (never overwritten; see
+///   the variant docs); a failed check = a torn/corrupt backup is
+///   explicitly rejected ([`StoreError::CorruptDatabase`]; anchor bytes
+///   untouched); no target database -> [`ImportBackup::NotNeeded`].
 ///
 /// # Errors
 ///
@@ -507,13 +507,13 @@ pub fn probe_import_target_readonly(path: &Path) -> Result<ImportTargetProbe, St
 ///
 /// Version gating (exact facts, not degradation):
 /// - `user_version == 0` (uninitialized database): no session_kv /
-/// http_task — dedup all empty, occupancy all empty (an uninitialized
-/// database cannot have imported anything);
+///   http_task — dedup all empty, occupancy all empty (an uninitialized
+///   database cannot have imported anything);
 /// - `0 < user_version < 3` (0.1.x shape): session_kv is present and
-/// queried for dedup (kv reverse-index fallback); http_task is a
-/// ledger v3 table — a pre-v3 (BT-only) database cannot contain HTTP
-/// tasks, so
-/// an empty occupancy set is an exact fact.
+///   queried for dedup (kv reverse-index fallback); http_task is a
+///   ledger v3 table — a pre-v3 (BT-only) database cannot contain HTTP
+///   tasks, so
+///   an empty occupancy set is an exact fact.
 ///
 /// Hit criterion (single source): row present + key equal — scan
 /// http_task rows' `origin_fork_key` first (the criterion proper, alive

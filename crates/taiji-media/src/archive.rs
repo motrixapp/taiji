@@ -7,30 +7,30 @@
 //! # Fingerprint rulings (0.3 compartmentalization)
 //!
 //! * **Normalized URL digest** ([`archive_url_digest`]): SHA-256 hex
-//! over `scheme://host[:port]/path` — the query and fragment
-//! stripped, the path **kept** (a per-resource identity: two
-//! manifests on one origin are different downloads). This reuses
-//! the parser-line pure-function family's primitives ([`m3u8::strip_query`]
-//! semantics + the in-tree SHA-256). It deliberately differs from
-//! the probe face's [`crate::snapshot_url_key`] (origin only,
-//! scheme://host[:port]): that key is the rate/anti-forgery
-//! identity where a per-origin throttle is the point; the archive
-//! fingerprint must not collapse every manifest on an origin into
-//! one "already downloaded" verdict. The difference is recorded
-//! here as the module of record.
+//!   over `scheme://host[:port]/path` — the query and fragment
+//!   stripped, the path **kept** (a per-resource identity: two
+//!   manifests on one origin are different downloads). This reuses
+//!   the parser-line pure-function family's primitives ([`m3u8::strip_query`]
+//!   semantics + the in-tree SHA-256). It deliberately differs from
+//!   the probe face's [`crate::snapshot_url_key`] (origin only,
+//!   scheme://host[:port]): that key is the rate/anti-forgery
+//!   identity where a per-origin throttle is the point; the archive
+//!   fingerprint must not collapse every manifest on an origin into
+//!   one "already downloaded" verdict. The difference is recorded
+//!   here as the module of record.
 //! * **Manifest digest** (checkpoint ②'s compartment): a
-//! **URL-free** digest of the fetched manifest's canonical
-//! structure — the same content served by a switched CDN/mirror
-//! must hit, so the compartment may not bind the fetch location:
+//!   **URL-free** digest of the fetched manifest's canonical
+//!   structure — the same content served by a switched CDN/mirror
+//!   must hit, so the compartment may not bind the fetch location:
 //! * HLS = the parser's playlist digest verbatim
-//! ([`m3u8::media_playlist_digest`] /
-//! [`m3u8::master_playlist_digest`] — already pure parsed
-//! content, no URL input);
+//!   ([`m3u8::media_playlist_digest`] /
+//!   [`m3u8::master_playlist_digest`] — already pure parsed
+//!   content, no URL input);
 //! * DASH = [`mpd::mpd_content_digest`] (the canonical body under
-//! its own domain header) — **not** [`mpd::mpd_digest`], whose
-//! canonical text appends the query-stripped entry URL (the
-//! recovery/structure-diff consumers want the fetch location in
-//! that identity; the archive's cross-URL hit face does not).
+//!   its own domain header) — **not** [`mpd::mpd_digest`], whose
+//!   canonical text appends the query-stripped entry URL (the
+//!   recovery/structure-diff consumers want the fetch location in
+//!   that identity; the archive's cross-URL hit face does not).
 //!
 //! Both compartments land in the `media_archive` row (the store's
 //! faces are taiji-store's business). Note the `media_task.

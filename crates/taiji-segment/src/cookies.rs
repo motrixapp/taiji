@@ -86,22 +86,22 @@ use cookies_psl_generated::{
 /// them first. Three steps (the order is semantic: exceptions beat
 /// the other two):
 /// 1. Exception table (`!rule` minus the `!`) hit -> NOT a public
-/// suffix — exception entries are themselves registrable domains
-/// (`www.ck` beats `*.ck`, `city.kawasaki.jp` beats
-/// `*.kawasaki.jp`);
+///    suffix — exception entries are themselves registrable domains
+///    (`www.ck` beats `*.ck`, `city.kawasaki.jp` beats
+///    `*.kawasaki.jp`);
 /// 2. Exact table hit -> yes (`co.uk`/`github.io`);
 /// 3. Wildcard table (`*.tail` normalized form): strip the leftmost
-/// label from the candidate and probe `*.{tail}`; a hit -> yes.
-/// `*` matches exactly one label: `foo.kawasaki.jp` is a public
-/// suffix (rejected), `bar.foo.kawasaki.jp` is a registrable
-/// domain (allowed); single-label tails behave the same (`*.ck` =>
-/// `foo.ck` rejected / `a.b.ck` allowed — the wildcard eats one
-/// layer: candidate `foo.ck` minus its leftmost label is `ck`, and
-/// probe `*.ck` hits).
-/// All three tables carry a strict-alphabetical-order invariant
-/// (locked by self-check tests), which makes `binary_search` O(log n)
-/// — at 8600+/311/8 entries a linear `contains` would degrade every
-/// property resolution to an O(n) full scan.
+///    label from the candidate and probe `*.{tail}`; a hit -> yes.
+///    `*` matches exactly one label: `foo.kawasaki.jp` is a public
+///    suffix (rejected), `bar.foo.kawasaki.jp` is a registrable
+///    domain (allowed); single-label tails behave the same (`*.ck` =>
+///    `foo.ck` rejected / `a.b.ck` allowed — the wildcard eats one
+///    layer: candidate `foo.ck` minus its leftmost label is `ck`, and
+///    probe `*.ck` hits).
+///    All three tables carry a strict-alphabetical-order invariant
+///    (locked by self-check tests), which makes `binary_search` O(log n)
+///    — at 8600+/311/8 entries a linear `contains` would degrade every
+///    property resolution to an O(n) full scan.
 fn is_multi_label_public_suffix(domain: &str) -> bool {
     // 1. Exceptions beat exact/wildcard: the entry itself is registrable.
     if MULTI_LABEL_PUBLIC_SUFFIX_EXCEPTIONS
@@ -587,25 +587,25 @@ impl CookieStore {
     /// Absorbs one `Set-Cookie` (RFC 6265 §5.2/§5.3 reduced form).
     ///
     /// - Domain: the `Domain` attribute is normalized (lowercase, dots
-    /// stripped) and validated by tail-match before landing as a
-    /// domain cookie (single-label and generated multi-label public
-    /// suffix shapes — exact/wildcard hits — are rejected; exception
-    /// entries are registrable domains and pass,
-    /// [`MULTI_LABEL_PUBLIC_SUFFIXES`]); no attribute = host-only;
-    /// IP hosts are always host-only.
+    ///   stripped) and validated by tail-match before landing as a
+    ///   domain cookie (single-label and generated multi-label public
+    ///   suffix shapes — exact/wildcard hits — are rejected; exception
+    ///   entries are registrable domains and pass,
+    ///   [`MULTI_LABEL_PUBLIC_SUFFIXES`]); no attribute = host-only;
+    ///   IP hosts are always host-only.
     /// - Path: a `Path` attribute not starting with `/` falls back to
-    /// the default-path algorithm.
+    ///   the default-path algorithm.
     /// - Secure: only a resend gate (not resent over non-https); the
-    /// accept face does not reject it.
+    ///   accept face does not reject it.
     /// - Expiry: `Max-Age` wins over `Expires`; already expired =
-    /// delete the same-key stored entry.
+    ///   delete the same-key stored entry.
     /// - Merge: the same `(name, domain, path)` is replaced in place
-    /// (§5.3 step 11), refreshing the activity stamp (recency) — not
-    /// a new entry, never triggering eviction.
+    ///   (§5.3 step 11), refreshing the activity stamp (recency) — not
+    ///   a new entry, never triggering eviction.
     /// - Cap: a new-key insert at the [`MAX_RUNTIME_COOKIE_ENTRIES`]
-    /// limit first evicts the least recently active entry (runtime
-    /// ingestion DoS bound; the file path already has the 1MiB size
-    /// cap).
+    ///   limit first evicts the least recently active entry (runtime
+    ///   ingestion DoS bound; the file path already has the 1MiB size
+    ///   cap).
     pub fn absorb(&self, url: &Url, set_cookie: &str) {
         let Some(host) = request_host(url) else {
             return;
@@ -1682,14 +1682,14 @@ evil.example.com\tTRUE\t/\tFALSE\t0\tinj2\tbad;value
     /// while tail-match against a trailing-dot host still held (the
     /// leak face = the trailing-dot sibling). After the fix:
     /// - `Domain=co.uk.` / `Domain=.co.uk.` normalize to a table hit
-    /// and reject the whole cookie;
+    ///   and reject the whole cookie;
     /// - the host side is normalized the same way (request_host strips
-    /// the dot): normal-domain cookies for trailing-dot URLs are
-    /// accepted after both-side normalization, and a dot-stripped
-    /// host also receives resends;
+    ///   the dot): normal-domain cookies for trailing-dot URLs are
+    ///   accepted after both-side normalization, and a dot-stripped
+    ///   host also receives resends;
     /// - a dotless host setting a trailing-dot Domain
-    /// (`Domain=example.com.`) is accepted as a normal domain after
-    /// normalization.
+    ///   (`Domain=example.com.`) is accepted as a normal domain after
+    ///   normalization.
     #[test]
     fn absorb_trailing_dot_domain_forms_rejected_and_host_normalized() {
         let store = CookieStore::new();

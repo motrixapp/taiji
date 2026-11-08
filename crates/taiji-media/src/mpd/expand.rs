@@ -5,89 +5,89 @@
 //! # Rulings of record (settled and canonicalized)
 //!
 //! * **Segment identity = the cross-period monotonic ordinal** (0,
-//! 1, 2, … across the whole representation, periods in declaration
-//! order). DASH carries no media-sequence anchor; the synthetic
-//! playlist's `media_sequence = 0` and every segment's `sequence` =
-//! its ordinal — the `media_segment.media_sequence` column stores
-//! the ordinal (the schema comment's "DASH NULL" is superseded by
-//! this of-record spelling; the column is reused, never widened).
+//!   1, 2, … across the whole representation, periods in declaration
+//!   order). DASH carries no media-sequence anchor; the synthetic
+//!   playlist's `media_sequence = 0` and every segment's `sequence` =
+//!   its ordinal — the `media_segment.media_sequence` column stores
+//!   the ordinal (the schema comment's "DASH NULL" is superseded by
+//!   this of-record spelling; the column is reused, never widened).
 //! * **One representation = one track** (one archive, one ledger
-//! row per period-spanning representation). Multi-period source
-//! consumption = the single track archive appending across periods
-//! in order; a period boundary carries the **discontinuity bit on
-//! the first segment of every period after the first** (each period
-//! owns an independent media timeline — the native fold rebuilds
-//! sample timing from per-fragment durations and the ffmpeg
-//! fallback resets its demuxer at the DISCONTINUITY), and a period
-//! whose addressing declares a distinct Initialization opens a new
-//! init section (multi-MAP bookkeeping rides the existing
-//! faces unchanged).
+//!   row per period-spanning representation). Multi-period source
+//!   consumption = the single track archive appending across periods
+//!   in order; a period boundary carries the **discontinuity bit on
+//!   the first segment of every period after the first** (each period
+//!   owns an independent media timeline — the native fold rebuilds
+//!   sample timing from per-fragment durations and the ffmpeg
+//!   fallback resets its demuxer at the DISCONTINUITY), and a period
+//!   whose addressing declares a distinct Initialization opens a new
+//!   init section (multi-MAP bookkeeping rides the existing
+//!   faces unchanged).
 //! * **Cross-period representation matching**: the selection names
-//! `(set_idx, rep_idx)` in the first period; later periods match
-//! the set by `@id` when the first period's set carried one, else
-//! by position, and the representation by `@id`, else by position.
-//! A period with no addressable match is a `manifest_parse` error
-//! (an honest refusal, never a silent skip).
+//!   `(set_idx, rep_idx)` in the first period; later periods match
+//!   the set by `@id` when the first period's set carried one, else
+//!   by position, and the representation by `@id`, else by position.
+//!   A period with no addressable match is a `manifest_parse` error
+//!   (an honest refusal, never a silent skip).
 //! * **BaseURL resolution order**: manifest URL ← MPD ← Period ←
-//! AdaptationSet ← Representation (each level's **first** BaseURL;
-//! the multiple-BaseURL failover list is a mirror-source question
-//! this line does not open — one base, documented). Segment/init
-//! URIs resolve against that base and are stored **absolute** in
-//! the synthetic playlist.
+//!   AdaptationSet ← Representation (each level's **first** BaseURL;
+//!   the multiple-BaseURL failover list is a mirror-source question
+//!   this line does not open — one base, documented). Segment/init
+//!   URIs resolve against that base and are stored **absolute** in
+//!   the synthetic playlist.
 //! * **Addressing precedence** per representation (ISO 23009-1
-//! §5.3.9.2): SegmentTemplate > SegmentList > SegmentBase > plain
-//! BaseURL (one whole-resource segment; the sidx form below when
-//! `@indexRange` is present).
+//!   §5.3.9.2): SegmentTemplate > SegmentList > SegmentBase > plain
+//!   BaseURL (one whole-resource segment; the sidx form below when
+//!   `@indexRange` is present).
 //! * **Layer judgment = the existing pure function over the synthetic
-//! playlist** ([`crate::trackdl::classify_track`]): a SegmentList
-//! with `@mediaRange` on every row (or the sidx-derived
-//! single-resource form) yields known byte ranges → the **(a)
-//! layer** (extent-grid reuse; same-URI touching ranges fold into
-//! spans); SegmentTemplate/SegmentTimeline/plain forms carry no
-//! byte information in the MPD attributes → the **(b) layer**
-//! (ordered segment fetch, `seg_bitmap` checkpoints). Semantics note
-//! for the coordination face: the media spec writes "DASH
-//! SegmentTemplate sizes are derivable" — the MPD attribute reality is that a
-//! SegmentTemplate exposes **duration**, never byte size; the
-//! (b)-layer landing here is the honest reading (a spec-errata
-//! suggestion rides the report, not a silent
-//! deviation).
+//!   playlist** ([`crate::trackdl::classify_track`]): a SegmentList
+//!   with `@mediaRange` on every row (or the sidx-derived
+//!   single-resource form) yields known byte ranges → the **(a)
+//!   layer** (extent-grid reuse; same-URI touching ranges fold into
+//!   spans); SegmentTemplate/SegmentTimeline/plain forms carry no
+//!   byte information in the MPD attributes → the **(b) layer**
+//!   (ordered segment fetch, `seg_bitmap` checkpoints). Semantics note
+//!   for the coordination face: the media spec writes "DASH
+//!   SegmentTemplate sizes are derivable" — the MPD attribute reality is that a
+//!   SegmentTemplate exposes **duration**, never byte size; the
+//!   (b)-layer landing here is the honest reading (a spec-errata
+//!   suggestion rides the report, not a silent
+//!   deviation).
 //! * **Expansion output budget** (the review-block guard): every
-//! expanded URI ≤ [`MAX_SEGMENT_URI_BYTES`] (64KiB) and the whole
-//! expansion's URI bytes ≤ [`MAX_EXPANSION_OUTPUT_BYTES`] (128MiB,
-//! enforced at the `push_segment`/`ensure_init` chokepoints with an
-//! allocation-free product pre-check in the `@duration` arm) — a
-//! ≤16MiB input never drives unbounded allocation; over-budget =
-//! `manifest_too_large` (width-tag padding abuse additionally
-//! refuses at parse in [`crate::mpd::template`]). The 100k ×
-//! ~1KiB-URL legit face stays inside; the 4MiB-template × 100k
-//! class (400GiB) refuses at the first URI.
+//!   expanded URI ≤ [`MAX_SEGMENT_URI_BYTES`] (64KiB) and the whole
+//!   expansion's URI bytes ≤ [`MAX_EXPANSION_OUTPUT_BYTES`] (128MiB,
+//!   enforced at the `push_segment`/`ensure_init` chokepoints with an
+//!   allocation-free product pre-check in the `@duration` arm) — a
+//!   ≤16MiB input never drives unbounded allocation; over-budget =
+//!   `manifest_too_large` (width-tag padding abuse additionally
+//!   refuses at parse in [`crate::mpd::template`]). The 100k ×
+//!   ~1KiB-URL legit face stays inside; the 4MiB-template × 100k
+//!   class (400GiB) refuses at the first URI.
 //! * **Variant policy scope**: `--media-variant-policy`
-//! (highest|resolution=<H>|bandwidth=<B>) caps the **primary
-//! ladder** — the video set when one exists, else the audio-only
-//! set (the HLS `select_variant` mirror, the policy's semantics with
-//! equivalent effect; see [`plan_dash_tracks`]); a side audio set
-//! rides Highest (audio renditions join by the language chain,
-//! never by the video policy — the HLS posture).
+//!   (highest|resolution=<H>|bandwidth=<B>) caps the **primary
+//!   ladder** — the video set when one exists, else the audio-only
+//!   set (the HLS `select_variant` mirror, the policy's semantics with
+//!   equivalent effect; see [`plan_dash_tracks`]); a side audio set
+//!   rides Highest (audio renditions join by the language chain,
+//!   never by the video policy — the HLS posture).
 //! * **`$Time$` under the `@duration` form** = `(number −
 //! startNumber) × @duration` (media time in timescale ticks — the
-//! value packagers emit); under SegmentTimeline = the running `S`
-//! media time. `$Number$` under timeline addressing = the running
-//! segment number from `@startNumber`.
+//!   value packagers emit); under SegmentTimeline = the running `S`
+//!   media time. `$Number$` under timeline addressing = the running
+//!   segment number from `@startNumber`.
 //! * **Segment count** per template form = `ceil(period_duration ÷
 //! segment_duration)`; a period without `@duration` falls back to
-//! the `MPD@mediaPresentationDuration` remainder after the
-//! explicitly-durated predecessors. Not derivable =
-//! `manifest_parse`.
+//!   the `MPD@mediaPresentationDuration` remainder after the
+//!   explicitly-durated predecessors. Not derivable =
+//!   `manifest_parse`.
 //! * **Caps**: the cross-period task-level segment count ≤ 100 000
-//! (`manifest_too_large`); every counter is checked arithmetic.
+//!   (`manifest_too_large`); every counter is checked arithmetic.
 //! * **sidx addressing is deferred-I/O**: the pure parse yields a
-//! [`SidxPlan`]; the driver fetches `indexRange`, and
-//! [`materialize_sidx`] (pure, fuzzed) derives the segment byte
-//! ranges — any `reference_type=1` row (a nested sidx) is
-//! `sidx_unsupported` (verdict-table row). The sidx form is
-//! single-period by construction (one resource per representation;
-//! a multi-period sidx MPD is an honest parse refusal).
+//!   [`SidxPlan`]; the driver fetches `indexRange`, and
+//!   [`materialize_sidx`] (pure, fuzzed) derives the segment byte
+//!   ranges — any `reference_type=1` row (a nested sidx) is
+//!   `sidx_unsupported` (verdict-table row). The sidx form is
+//!   single-period by construction (one resource per representation;
+//!   a multi-period sidx MPD is an honest parse refusal).
 
 use crate::bmff;
 use crate::error::MediaError;
@@ -452,23 +452,23 @@ fn find_rep_by_id<'a>(
 ///
 /// Rulings of record:
 /// * primary in a video set (**any** video set — the face is the
-/// pick's own set kind, not the first video set's index; a
-/// multi-codec ladder's set-2 rung is as much the video face as
-/// set-1's) → track 0 is that rung (Required `v`); the side audio
-/// set still rides the language chain under Highest (audio joins by
-/// chain, never by the video pick — `plan_dash_tracks` posture
-/// unchanged);
+///   pick's own set kind, not the first video set's index; a
+///   multi-codec ladder's set-2 rung is as much the video face as
+///   set-1's) → track 0 is that rung (Required `v`); the side audio
+///   set still rides the language chain under Highest (audio joins by
+///   chain, never by the video pick — `plan_dash_tracks` posture
+///   unchanged);
 /// * primary in an audio set (audio-only selection, or an audio-only
-/// MPD whose set is the variant face) → track 0 IS that audio rep
-/// (Required `v`, kind Audio — the audio-only-MPD precedent; no
-/// language-chain track joins it: the selection named its audio);
+///   MPD whose set is the variant face) → track 0 IS that audio rep
+///   (Required `v`, kind Audio — the audio-only-MPD precedent; no
+///   language-chain track joins it: the selection named its audio);
 /// * attached ids resolve to their reps and join as Sidecar `x-aN`
-/// audio tracks, deduped by `(set, rep)` against the planned picks;
+///   audio tracks, deduped by `(set, rep)` against the planned picks;
 /// * an id absent from the fresh MPD = the `variant_policy` refusal
-/// (the same code the tree-face resolution errors carry — a
-/// manifest that changed between Resolving and the driver's
-/// re-fetch lands the honest selection error, never a silent
-/// fallback).
+///   (the same code the tree-face resolution errors carry — a
+///   manifest that changed between Resolving and the driver's
+///   re-fetch lands the honest selection error, never a silent
+///   fallback).
 pub fn plan_dash_tracks_selected(
     mpd: &Mpd,
     manifest_url: &str,

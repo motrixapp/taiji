@@ -5,22 +5,22 @@
 //! replace the old cascade:
 //!
 //! 1. **Paired delete**: the task-row delete faces
-//! ([`super::write_http::delete_http_task`] /
-//! [`super::write_media::delete_media_task`]) clear the gid's cookie
-//! rows inside the same transaction — the delete paths never leave
-//! cookie residue.
+//!    ([`super::write_http::delete_http_task`] /
+//!    [`super::write_media::delete_media_task`]) clear the gid's cookie
+//!    rows inside the same transaction — the delete paths never leave
+//!    cookie residue.
 //! 2. **Terminal clear on the full terminal set** (the v0.3 widening): done
-//! **and** error both clear, driven by the caller (the actor's
-//! terminal close-out); [`clear_task_cookies`] is the idempotent
-//! store face.
+//!    **and** error both clear, driven by the caller (the actor's
+//!    terminal close-out); [`clear_task_cookies`] is the idempotent
+//!    store face.
 //! 3. **Startup GC** ([`sweep_task_cookies`]): clears crash-window
-//! residue — (a) rows with no task row at all (a crash between the
-//! task-row delete and the paired cookie delete), (b) rows whose
-//! task row already sits at a terminal state (a crash before the
-//! terminal clear fired). Error-form residue is reported per gid so
-//! the bootstrap re-emits the clear-on-error alert; done-form and
-//! orphan residue are reported for the GC log. The sweep is
-//! idempotent and never touches active (non-terminal) rows.
+//!    residue — (a) rows with no task row at all (a crash between the
+//!    task-row delete and the paired cookie delete), (b) rows whose
+//!    task row already sits at a terminal state (a crash before the
+//!    terminal clear fired). Error-form residue is reported per gid so
+//!    the bootstrap re-emits the clear-on-error alert; done-form and
+//!    orphan residue are reported for the GC log. The sweep is
+//!    idempotent and never touches active (non-terminal) rows.
 //!
 //! Write semantics (unchanged from the original face): whole-set
 //! replacement — an unchanged set skips (zero disk writes), otherwise a
@@ -222,12 +222,12 @@ pub(super) fn read_cookie_row_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task
 /// Startup GC ("the startup GC cleans crash orphans"). One transaction, three
 /// residue classes:
 /// - orphans: rows whose gid has no http_task and no media_task row
-/// (crash between the task-row delete and the paired cookie delete);
+///   (crash between the task-row delete and the paired cookie delete);
 /// - terminal residue: rows whose task row sits at done/error (crash
-/// before the terminal clear fired) — error-form groups are reported
-/// per (gid, kind) so the bootstrap re-emits the clear-on-error
-/// alert (the crash already ate the runtime emission); done-form
-/// rows feed the log count only;
+///   before the terminal clear fired) — error-form groups are reported
+///   per (gid, kind) so the bootstrap re-emits the clear-on-error
+///   alert (the crash already ate the runtime emission); done-form
+///   rows feed the log count only;
 /// - everything else (an active/paused task's rows) is untouched.
 ///
 /// Idempotent by construction (the second run finds no residue); never

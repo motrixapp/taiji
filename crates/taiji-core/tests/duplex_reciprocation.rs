@@ -10,11 +10,11 @@
 //! data flow + tit-for-tat unchoke wiring:
 //!
 //! - engine -> L: piece 0 bytes (the upload serving surface + the choke
-//! round's unchoke landing);
+//!   round's unchoke landing);
 //! - L -> engine: piece 1 bytes (the download surface via ad-aware
-//! dispatch);
+//!   dispatch);
 //! - completion criterion = EngineEnd::Completed + both directions'
-//! bytes match their sources.
+//!   bytes match their sources.
 //!
 //! Note: the peers are driven by the test over the raw wire protocol
 //! (the same protocol obligation surface); inter-process reciprocity

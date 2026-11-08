@@ -4,11 +4,11 @@
 //!
 //! 1. `--media-archive=true` download → exit 0, the archive row lands;
 //! 2. the same URL re-run (rotated query) → the checkpoint-1 skip:
-//! exit 0 with **zero** payload fetches (the mock counts);
+//!    exit 0 with **zero** payload fetches (the mock counts);
 //! 3. `--media-archive-clear=true` (the one-shot pre-clear) + the
-//! same URL → exit 0 and the payload face is hit again (a full
-//! re-download — the clear-then-redownload premise, through the
-//! `taiji.clearMediaArchive` session face).
+//!    same URL → exit 0 and the payload face is hit again (a full
+//!    re-download — the clear-then-redownload premise, through the
+//!    `taiji.clearMediaArchive` session face).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

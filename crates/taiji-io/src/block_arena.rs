@@ -2,49 +2,49 @@
 //!
 //! Upstream anchors (libtorrent pooling motif):
 //! - Size-bucketed free lists with malloc fallback when the pool is empty:
-//! libtorrent `packet_pool::acquire/release` dispatches by allocation
-//! size (`include/libtorrent/aux_/packet_pool.hpp`). This implementation
-//! keeps two buckets (1KiB control frames / 16KiB main); over-main
-//! allocations bypass the pool (oversized bitfields / extension metadata
-//! are low-frequency, once per connection).
+//!   libtorrent `packet_pool::acquire/release` dispatches by allocation
+//!   size (`include/libtorrent/aux_/packet_pool.hpp`). This implementation
+//!   keeps two buckets (1KiB control frames / 16KiB main); over-main
+//!   allocations bypass the pool (oversized bitfields / extension metadata
+//!   are low-frequency, once per connection).
 //! - Block size 16KiB: `default_block_size = 0x4000`
-//! (`include/libtorrent/disk_interface.hpp`; taiji merkle BLOCK_SIZE is
-//! the same value).
+//!   (`include/libtorrent/disk_interface.hpp`; taiji merkle BLOCK_SIZE is
+//!   the same value).
 //! - malloc-direct + free reuse with in-use accounting (`m_in_use`):
-//! `src/disk_buffer_pool.cpp` (allocate_buffer_impl / free_buffer). The
-//! libtorrent 2.x "pool" is allocator-level reuse plus watermark
-//! accounting; this crate lifts reuse above the allocator into an
-//! explicit free list, so mmap/munmap/first-touch page faults go to zero
-//! at steady state regardless of allocator behavior.
+//!   `src/disk_buffer_pool.cpp` (allocate_buffer_impl / free_buffer). The
+//!   libtorrent 2.x "pool" is allocator-level reuse plus watermark
+//!   accounting; this crate lifts reuse above the allocator into an
+//!   explicit free list, so mmap/munmap/first-touch page faults go to zero
+//!   at steady state regardless of allocator behavior.
 //!
 //! Discipline:
 //! - No unsafe: the pool is a `Vec<Box<[u8; N]>>` free list inside a
-//! `Mutex`; the [`BlockLease`] rental returns through a `Drop` guard
-//! (reference count to zero = owner drop = return; the
-//! [`Bytes::from_owner`] custom-owner pattern, bytes 1.9+).
+//!   `Mutex`; the [`BlockLease`] rental returns through a `Drop` guard
+//!   (reference count to zero = owner drop = return; the
+//!   [`Bytes::from_owner`] custom-owner pattern, bytes 1.9+).
 //! - Memory budget: the pool cap (bytes) is an explicit component of a
-//! face's unverified-byte budget (sized on the same basis as the write
-//! cache `BH_WR_CACHE_BYTES`, see engine `pipeline.rs`
-//! `block_arena_for_face`): rented bytes stay <= the cap (over-cap falls
-//! back to direct allocation, counted in `alloc_fallback_total`); the
-//! free-list block counts are bounded by the same cap. A face's budget =
-//! write-cache cap + pool cap (both demand-grown, never preallocated;
-//! watermarks exposed via [`BlockArena::readout`] and the
-//! `taiji_block_arena_*` metrics).
+//!   face's unverified-byte budget (sized on the same basis as the write
+//!   cache `BH_WR_CACHE_BYTES`, see engine `pipeline.rs`
+//!   `block_arena_for_face`): rented bytes stay <= the cap (over-cap falls
+//!   back to direct allocation, counted in `alloc_fallback_total`); the
+//!   free-list block counts are bounded by the same cap. A face's budget =
+//!   write-cache cap + pool cap (both demand-grown, never preallocated;
+//!   watermarks exposed via [`BlockArena::readout`] and the
+//!   `taiji_block_arena_*` metrics).
 //! - Kill switch: `BH_BLOCK_ARENA=0` (recognized at the engine assembly
-//! point) => the face builds no pool and the wire/cell sides fall back
-//! to direct allocation (existing behavior, unchanged).
+//!   point) => the face builds no pool and the wire/cell sides fall back
+//!   to direct allocation (existing behavior, unchanged).
 //! - Page-returnable main bucket: the 16KiB blocks are individual
-//! anonymous mmaps (memmap2 `MmapMut`), so memory leaves with the
-//! drop — munmap returns the pages on every unix. musl mallocng
-//! retains freed size-class groups (measured: 4,000 x 16KiB freed =>
-//! RSS unchanged on ext-server/musl 1.2.x), so heap-backed blocks cannot
-//! shrink RSS at all; the mapping-backed form also drops the fresh
-//! block's 16KiB zeroing (anon pages arrive zero lazily).
-//! [`BlockArena::release_idle`] (the download-complete hook) drops
-//! idle main blocks beyond a small floor; the small bucket (1KiB,
-//! sub-page — a mapping per block would waste 4x) stays heap-backed
-//! and release truncates its free list instead.
+//!   anonymous mmaps (memmap2 `MmapMut`), so memory leaves with the
+//!   drop — munmap returns the pages on every unix. musl mallocng
+//!   retains freed size-class groups (measured: 4,000 x 16KiB freed =>
+//!   RSS unchanged on ext-server/musl 1.2.x), so heap-backed blocks cannot
+//!   shrink RSS at all; the mapping-backed form also drops the fresh
+//!   block's 16KiB zeroing (anon pages arrive zero lazily).
+//!   [`BlockArena::release_idle`] (the download-complete hook) drops
+//!   idle main blocks beyond a small floor; the small bucket (1KiB,
+//!   sub-page — a mapping per block would waste 4x) stays heap-backed
+//!   and release truncates its free list instead.
 //!
 use std::sync::Arc;
 use std::sync::Mutex;

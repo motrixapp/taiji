@@ -11,42 +11,42 @@
 //! # Rewrite semantics (settled, on record here + the design doc)
 //!
 //! * **segment URI → the archive file**: every segment line names the
-//! track's one archive file (`archive-<label>.<ext>`), addressing
-//! its bytes with an explicit
-//! `#EXT-X-BYTERANGE:<seg_len>@<archive_offset>` — whole-resource
-//! source segments get an explicit range too (the archive-interval
-//! form; offsets = cumulative Σ plaintext seg_len in playlist
-//! order, the decrypted-archive semantics);
+//!   track's one archive file (`archive-<label>.<ext>`), addressing
+//!   its bytes with an explicit
+//!   `#EXT-X-BYTERANGE:<seg_len>@<archive_offset>` — whole-resource
+//!   source segments get an explicit range too (the archive-interval
+//!   form; offsets = cumulative Σ plaintext seg_len in playlist
+//!   order, the decrypted-archive semantics);
 //! * **plaintext form**: **no `EXT-X-KEY` lines at all** (not even
-//! `METHOD=NONE`) — the archive holds decrypted bytes
-//! (decrypt-as-consume), so the rewritten playlist is semantically
-//! METHOD=NONE for every segment; key material lives only in the
-//! DB (`media_key` discipline);
+//!   `METHOD=NONE`) — the archive holds decrypted bytes
+//!   (decrypt-as-consume), so the rewritten playlist is semantically
+//!   METHOD=NONE for every segment; key material lives only in the
+//!   DB (`media_key` discipline);
 //! * **init sections**: `EXT-X-MAP` rewritten to the staging file
-//! `init-<label>-<n>.mp4` (the parser name face); the MAP's own
-//! `BYTERANGE` attribute is dropped (the file holds exactly the
-//! init bytes) — a MAP line is (re)emitted whenever the segment's
-//! MAP ordinal changes, including the first segment;
+//!   `init-<label>-<n>.mp4` (the parser name face); the MAP's own
+//!   `BYTERANGE` attribute is dropped (the file holds exactly the
+//!   init bytes) — a MAP line is (re)emitted whenever the segment's
+//!   MAP ordinal changes, including the first segment;
 //! * **structural tags preserved**: `EXTM3U`/`VERSION`/
-//! `TARGETDURATION`/`MEDIA-SEQUENCE` (identity anchor)/
-//! `PLAYLIST-TYPE`/`INDEPENDENT-SEGMENTS`/`DISCONTINUITY-SEQUENCE`
-//! at their positions; `EXT-X-DISCONTINUITY` before exactly the
-//! segments that carried it; `ENDLIST` last. Unknown tags are
-//! dropped (the rewrite is a closed form — the unknown-tag
-//! forward-compat face belongs to the *source* parser);
+//!   `TARGETDURATION`/`MEDIA-SEQUENCE` (identity anchor)/
+//!   `PLAYLIST-TYPE`/`INDEPENDENT-SEGMENTS`/`DISCONTINUITY-SEQUENCE`
+//!   at their positions; `EXT-X-DISCONTINUITY` before exactly the
+//!   segments that carried it; `ENDLIST` last. Unknown tags are
+//!   dropped (the rewrite is a closed form — the unknown-tag
+//!   forward-compat face belongs to the *source* parser);
 //! * `source.m3u8` is untouched (the download already archived it).
 //!
 //! # Consumption faces (settled and canonicalized)
 //!
 //! 1. **native**: the typed [`TrackRewrite`] feeds the transmux
-//! directly (archive + init files + per-segment archive spans) —
-//! the m3u8 text is a product, not a native input;
+//!    directly (archive + init files + per-segment archive spans) —
+//!    the m3u8 text is a product, not a native input;
 //! 2. **ffmpeg fallback**: the rewritten `local-<label>.m3u8` **is**
-//! the ffmpeg HLS-demuxer input (`-protocol_whitelist file
+//!    the ffmpeg HLS-demuxer input (`-protocol_whitelist file
 //! -allowed_extensions ALL -i local-<label>.m3u8`);
 //! 3. **ffprobe dual-run**: probes the synthesized **product** (not
-//! the playlist): duration ∈ ΣEXTINF × [0.98, 1.02] + stream set
-//! = the selected track set (the remux verification face).
+//!    the playlist): duration ∈ ΣEXTINF × [0.98, 1.02] + stream set
+//!    = the selected track set (the remux verification face).
 
 use crate::error::MediaError;
 use crate::m3u8::model::{MediaPlaylist, init_section_filename};

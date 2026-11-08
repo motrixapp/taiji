@@ -3,20 +3,20 @@
 //! # Format facts
 //!
 //! - compact peer: 4B (IPv4) or 16B (IPv6) network-byte-order address +
-//! 2B network-byte-order port; the length constants match aria2
-//! `src/BtConstants.h` (`COMPACT_LEN_IPV4 = 6` / `COMPACT_LEN_IPV6 = 18`).
-//! Byte layout matches the `BittorrentHelperTest.cc` vectors:
-//! `192.168.0.1:6881` -> `c0a800011ae1`,
-//! `1002:1035:4527:3546:7854:1237:3247:3217:6881` ->
-//! `100210354527354678541237324732171ae1`.
+//!   2B network-byte-order port; the length constants match aria2
+//!   `src/BtConstants.h` (`COMPACT_LEN_IPV4 = 6` / `COMPACT_LEN_IPV6 = 18`).
+//!   Byte layout matches the `BittorrentHelperTest.cc` vectors:
+//!   `192.168.0.1:6881` -> `c0a800011ae1`,
+//!   `1002:1035:4527:3546:7854:1237:3247:3217:6881` ->
+//!   `100210354527354678541237324732171ae1`.
 //! - compact node info: 20B node ID + compact peer, unit length
-//! `20 + COMPACT_LEN` (26B/38B); aria2 assembles it in
-//! `DHTFindNodeReplyMessage.cc` and parses it in
-//! `DHTMessageFactoryImpl.cc` (`extractNodes`: the string length must be
-//! a multiple of `unit = getCompactLength(family) + 20` or it errors; a
-//! single address that fails to unpack is skipped).
+//!   `20 + COMPACT_LEN` (26B/38B); aria2 assembles it in
+//!   `DHTFindNodeReplyMessage.cc` and parses it in
+//!   `DHTMessageFactoryImpl.cc` (`extractNodes`: the string length must be
+//!   a multiple of `unit = getCompactLength(family) + 20` or it errors; a
+//!   single address that fails to unpack is skipped).
 //! - BEP5 "compact node info" text: `<id>` (20B) + network-byte-order
-//! ip:port.
+//!   ip:port.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 

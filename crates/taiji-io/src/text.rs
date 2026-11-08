@@ -17,21 +17,21 @@
 //! # Set contents (18 code points)
 //!
 //! - **Bidirectional overrides, 12 Cf code points**: U+061C (ALM),
-//! U+200E/U+200F (LRM/RLM), U+202A-202E (LRE/RLE/PDF/LRO/RLO),
-//! U+2066-2069 (LRI/RLI/FSI/PDI) — these can reorder the displayed
-//! name (the `photo\u{202E}gpj.exe` rendering as `photo.exe` display
-//! spoof).
+//!   U+200E/U+200F (LRM/RLM), U+202A-202E (LRE/RLE/PDF/LRO/RLO),
+//!   U+2066-2069 (LRI/RLI/FSI/PDI) — these can reorder the displayed
+//!   name (the `photo\u{202E}gpj.exe` rendering as `photo.exe` display
+//!   spoof).
 //! - **Zero-width, 3**: U+200B (ZWSP), U+200C (ZWNJ), U+FEFF (BOM) —
-//! zero rendering width, so `evil\u{200B}.exe` is visually identical
-//! to `evil.exe` (name borrowing / directory-twin surface).
+//!   zero rendering width, so `evil\u{200B}.exe` is visually identical
+//!   to `evil.exe` (name borrowing / directory-twin surface).
 //! - **Line/paragraph separators, 2**: U+2028 (Zl) / U+2029 (Zp) —
-//! separator semantics are a residual log-line injection surface;
-//! neither `is_ascii_control` (C0+DEL) nor `char::is_control` (Cc)
-//! covers them.
+//!   separator semantics are a residual log-line injection surface;
+//!   neither `is_ascii_control` (C0+DEL) nor `char::is_control` (Cc)
+//!   covers them.
 //! - **DEL U+007F**: overlaps the consumers' control-character checks
-//! (`char::is_control` covers C0+DEL+C1), but this function still
-//! carries DEL itself so a future consumer relying only on this
-//! function cannot let DEL through by skipping the control check.
+//!   (`char::is_control` covers C0+DEL+C1), but this function still
+//!   carries DEL itself so a future consumer relying only on this
+//!   function cannot let DEL through by skipping the control check.
 //!
 //! # Deliberately excluded (passthrough; the trade-off is fixed)
 //!

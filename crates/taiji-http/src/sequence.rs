@@ -23,7 +23,7 @@
 //! concurrency × 8 segments ahead, single writer, 32MiB reorder
 //! buffer cap):
 //! - [`LOOKAHEAD_SEGMENTS_PER_WORKER`] × workers = the leading window
-//! (segments claimed but not yet delivered);
+//!   (segments claimed but not yet delivered);
 //! - [`LOOKAHEAD_BUFFER_CAP_BYTES`] = the window byte cap.
 //!
 //! **Anchor semantics of the 32MiB cap**: the cap governs ONE task-level shared
@@ -123,18 +123,18 @@ pub fn buffer_allows(buffered_bytes: u64, cap: u64) -> bool {
 /// account. Two consumption faces:
 ///
 /// * the **claim gate**: workers stop claiming new segments while the
-/// account holds the cap (backpressure — pre-fix the gate saw only
-/// the reorder half, so in-flight collection was unaccounted);
+///   account holds the cap (backpressure — pre-fix the gate saw only
+///   the reorder half, so in-flight collection was unaccounted);
 /// * the **write valve**: a collector write that would push the
-/// account past `cap + one segment valve` fails the fetch (the
-/// single-segment completion allowance — a body already streaming
-/// must be able to finish past the cap, else every claim/write race
-/// at the cap would kill the job; the liveness shape
-/// depends on in-flight bodies completing). The failed fetch
-/// re-enters the retry machinery; when the window drains (the
-/// ordered delivery frees bytes) the retry succeeds — under a
-/// forged big-segment list the retries may exhaust the budget,
-/// which is the task-level rejection (the honest OOM defense).
+///   account past `cap + one segment valve` fails the fetch (the
+///   single-segment completion allowance — a body already streaming
+///   must be able to finish past the cap, else every claim/write race
+///   at the cap would kill the job; the liveness shape
+///   depends on in-flight bodies completing). The failed fetch
+///   re-enters the retry machinery; when the window drains (the
+///   ordered delivery frees bytes) the retry succeeds — under a
+///   forged big-segment list the retries may exhaust the budget,
+///   which is the task-level rejection (the honest OOM defense).
 ///
 /// The resident bound is `cap + one segment valve` for ANY worker
 /// count — pre-fix each fetch carried an independent valve
@@ -467,13 +467,13 @@ impl Engine {
 /// when every segment is delivered or the failure budget is spent).
 ///
 /// - `uris`: the ordered sequence ([`crate::traits::SegmentPlan::UriSequence`]
-/// payload);
+///   payload);
 /// - `is_done`: resume prefix predicate (the persisted `seg_bitmap`
-/// face; a `true` after the first `false` is ignored — resume
-/// domains are prefixes by construction);
+///   face; a `true` after the first `false` is ignored — resume
+///   domains are prefixes by construction);
 /// - `transport_for`: whole-body transport per index;
 /// - `ctx`: per-source request context (the same face the extent
-/// workers consume);
+///   workers consume);
 /// - `sink`: ordered-delivery sink.
 pub async fn run_sequence(
     uris: Vec<String>,

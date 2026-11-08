@@ -386,14 +386,14 @@ pub(crate) fn sanitize_base_options(
 /// `addMetalink(metalink, options?, position?)`
 ///
 /// - `metalink`: base64 document (the JSON-RPC branch decodes base64
-/// with the strict standard alphabet + padding — invalid = an
-/// explicit execution error, the aria2 DECODE_FAILURE semantics);
+///   with the strict standard alphabet + padding — invalid = an
+///   explicit execution error, the aria2 DECODE_FAILURE semantics);
 /// - `options`: the per-task option dict (the base face, passed through
-/// to every task; metalink group keys are absorbed here, see
-/// [`sanitize_base_options`]);
+///   to every task; metalink group keys are absorbed here, see
+///   [`sanitize_base_options`]);
 /// - `position`: the queue insertion position (aria2
-/// insertReservedGroup(pos) semantics — subtask i lands at
-/// `position + i`, keeping in-group order).
+///   insertReservedGroup(pos) semantics — subtask i lands at
+///   `position + i`, keeping in-group order).
 ///
 /// The reply = a plain GID string array (document expansion order; the
 /// aria2 gids face). If a subtask is rejected by the session

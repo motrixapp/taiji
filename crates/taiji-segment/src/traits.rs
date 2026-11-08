@@ -73,10 +73,10 @@ impl Extent {
 /// pair (frozen assumption: the field set is final as defined here;
 /// changes require an ADR):
 /// - `source`: the per-task source ordinal — the accounting domain of
-/// multi-source weighting/demotion/removal;
+///   multi-source weighting/demotion/removal;
 /// - `extent`: the extent ordinal allocated by the ExtentCoordinator
-/// (kept through a steal), for sink write-range instrumentation and
-/// single-decision-point diagnostics.
+///   (kept through a steal), for sink write-range instrumentation and
+///   single-decision-point diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SegId {
     /// Per-task source ordinal (0-based; the weighted-rotation

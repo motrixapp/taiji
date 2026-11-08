@@ -3,25 +3,25 @@
 //!
 //! Decision order (first match wins; rationale in the branch comments):
 //! 1. **path** (compared after stripping query/fragment) — a signature
-//! URL's query drifts on every fetch; the path is the resource
-//! location fact;
+//!    URL's query drifts on every fetch; the path is the resource
+//!    location fact;
 //! 2. **encoding** — with `Content-Encoding != identity` the Range
-//! semantics are unknowable and the bitmap is not enabled; if either
-//! side fails, there is nothing to resume from;
+//!    semantics are unknowable and the bitmap is not enabled; if either
+//!    side fails, there is nothing to resume from;
 //! 3. **length** — the authoritative total must be present and equal on
-//! both sides; a missing side = no authoritative length (the
-//! no-bitmap shape), never resume;
+//!    both sides; a missing side = no authoritative length (the
+//!    no-bitmap shape), never resume;
 //! 4. **strong validators**: strong ETag first, Last-Modified fallback
-//! — both present and equal -> strong resume; both present but
-//! unequal -> from zero; **a one-sided strong ETag** (the peer once
-//! sent a strong validator and it is missing now, or vice versa) ->
-//! the Last-Modified **fallback decision**: LM match = strong
-//! resume, unequal / undecidable = from zero `EtagMismatch` — never
-//! degrade to a weak resume (the server has proven it sends strong
-//! validators; a missing one makes the resource suspect);
+//!    — both present and equal -> strong resume; both present but
+//!    unequal -> from zero; **a one-sided strong ETag** (the peer once
+//!    sent a strong validator and it is missing now, or vice versa) ->
+//!    the Last-Modified **fallback decision**: LM match = strong
+//!    resume, unequal / undecidable = from zero `EtagMismatch` — never
+//!    degrade to a weak resume (the server has proven it sends strong
+//!    validators; a missing one makes the resource suspect);
 //! 5. **neither** (strong ETag and Last-Modified missing on both
-//! sides) but path+length match -> weak resume
-//! (`ResumeBasis::PathOnly`).
+//!    sides) but path+length match -> weak resume
+//!    (`ResumeBasis::PathOnly`).
 //!
 //! **One-sided asymmetry (a recorded decision)**: a strong ETag on one
 //! side -> the LM fallback (step 4, possibly a strong resume); LM on
@@ -107,10 +107,10 @@ pub fn validator_digest(facts: &ValidatorFacts) -> Result<Vec<u8>, serde_json::E
 /// **Accepted input grammar** (a signature contract; a hand-written
 /// byte scan, not the full RFC 3986 grammar):
 /// - absolute URL: `scheme://authority/path?query#fragment` (scheme =
-/// any non-empty string; the authority ends at the first `/`) —
-/// `http://h/f.bin?sig=x` -> `/f.bin`;
+///   any non-empty string; the authority ends at the first `/`) —
+///   `http://h/f.bin?sig=x` -> `/f.bin`;
 /// - an already-stripped origin-form path: `/path?query#fragment` —
-/// `/f.bin?x=1` -> `/f.bin`;
+///   `/f.bin?x=1` -> `/f.bin`;
 /// - an empty path (`http://h` or `http://h?q=1`) -> `/`.
 ///
 /// Semantic boundary (the comparison is a **byte-level** path match):

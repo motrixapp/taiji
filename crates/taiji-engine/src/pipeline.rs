@@ -257,8 +257,8 @@ struct BatchStep {
     evicted: Vec<u64>,
     /// This block's buffer-face duration (microseconds; instrumentation
     /// - the first cut of the block-push hot path: range/dup checks + v2
-    /// block hash + digest accumulation + cache merge/evict). u32 micros
-    /// caps at ~71 minutes; a per-block duration cannot overflow.
+    ///   block hash + digest accumulation + cache merge/evict). u32 micros
+    ///   caps at ~71 minutes; a per-block duration cannot overflow.
     buffer_us: u32,
     res: Result<PooledOutcome, StoreError>,
 }

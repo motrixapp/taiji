@@ -176,27 +176,27 @@ pub struct DhtLease {
 /// [`MagnetTaskConfig::dht`]).
 ///
 /// - A standalone ephemeral UDP carrier (a single v4 demux instance; the
-/// tracker/uTP channels are dropped unconsumed — announce goes through
-/// each tracker actor's own UDP carrier, and metadata-phase connections
-/// are always TCP). Independent of the upgraded engine's DHT assembly
-/// (engine.rs).
+///   tracker/uTP channels are dropped unconsumed — announce goes through
+///   each tracker actor's own UDP carrier, and metadata-phase connections
+///   are always TCP). Independent of the upgraded engine's DHT assembly
+///   (engine.rs).
 /// - BEP42: the external address is probed at assembly and handed down
-/// (node_id derivation/re-derivation semantics in bt::dht::security; a
-/// failed probe = keep the random id, the task does not fail).
+///   (node_id derivation/re-derivation semantics in bt::dht::security; a
+///   failed probe = keep the random id, the task does not fail).
 /// - bootstrap/get_peers/announce are driven by the metadata-phase task
-/// ([`discover_and_fetch`]); PeersFound events are consumed in that
-/// loop too.
+///   ([`discover_and_fetch`]); PeersFound events are consumed in that
+///   loop too.
 /// - `restore`: a session-persisted dht_state (the
-/// `load_dht_restore_state` product; the aria2 single-DHTRegistry
-/// semantics — the metadata phase reuses the persisted routing-table
-/// cache so a restart skips bootstrapping from zero; None = from
-/// zero).
+///   `load_dht_restore_state` product; the aria2 single-DHTRegistry
+///   semantics — the metadata phase reuses the persisted routing-table
+///   cache so a restart skips bootstrapping from zero; None = from
+///   zero).
 /// - demux lifecycle: cancelled by the shutdown token (task close-out) or
-/// when all handles drop (engine exit -> the forward bridge task ends),
-/// whichever comes first; a keepalive task holds one handle clone until
-/// the token cancels, keeping the demux present for the whole phase.
+///   when all handles drop (engine exit -> the forward bridge task ends),
+///   whichever comes first; a keepalive task holds one handle clone until
+///   the token cancels, keeping the demux present for the whole phase.
 /// - Assembly failure = None (tracker/LSD discovery remain as fallbacks;
-/// the DHT face is not faked).
+///   the DHT face is not faked).
 pub async fn spawn_phase_dht(
     shutdown: tokio_util::sync::CancellationToken,
     restore: Option<taiji_bt::dht::DhtRestoreState>,

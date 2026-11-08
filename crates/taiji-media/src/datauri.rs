@@ -9,19 +9,19 @@
 //! ```
 //!
 //! * The mediatype is accepted and ignored (key material is judged by
-//! its decoded length, not its declared type).
+//!   its decoded length, not its declared type).
 //! * `;base64` switches the payload to base64 (RFC 4648 §4 with
-//! padding; **whitespace is rejected** — a key URI is not
-//! pretty-printed prose, and silently skipping embedded newlines is
-//! an injection surface).
+//!   padding; **whitespace is rejected** — a key URI is not
+//!   pretty-printed prose, and silently skipping embedded newlines is
+//!   an injection surface).
 //! * Without `;base64` the payload is percent-decoded (RFC 3986 §2.1);
-//! stray non-percent `%` bytes are a parse error. Bytes that are not
-//! US-ASCII pass through as their UTF-8 encoding (browser-aligned
-//! leniency — the key-length check is the real gate).
+//!   stray non-percent `%` bytes are a parse error. Bytes that are not
+//!   US-ASCII pass through as their UTF-8 encoding (browser-aligned
+//!   leniency — the key-length check is the real gate).
 //! * The **decoded** size is capped at [`MAX_DATA_URI_BYTES`] (64KiB):
-//! a larger payload is refused before any allocation-heavy work
-//! beyond the URI text itself (which is itself bounded by the
-//! manifest's 16MiB cap upstream).
+//!   a larger payload is refused before any allocation-heavy work
+//!   beyond the URI text itself (which is itself bounded by the
+//!   manifest's 16MiB cap upstream).
 //!
 //! Errors are [`MediaError::KeyInvalid`] — the key-material face.
 

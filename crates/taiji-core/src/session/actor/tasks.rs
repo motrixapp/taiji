@@ -1354,13 +1354,13 @@ impl SessionActor {
     /// transfer, so a pause/remove racing the arrival keeps its halt
     /// semantics):
     /// - pause → requeue to the front paused (the teardown already
-    /// wrote the paused row with the §3.2 phase memory —
-    /// `MediaEnd::Paused{memory: Processing}` for both the gate hang
-    /// and the true synthesis);
+    ///   wrote the paused row with the §3.2 phase memory —
+    ///   `MediaEnd::Paused{memory: Processing}` for both the gate hang
+    ///   and the true synthesis);
     /// - remove → Removed result + media row/staging deletion;
     /// - natural terminal (Done/Failed — the driver's own outcome
-    /// classification) → DownloadResult + the terminal cookie
-    /// close-out.
+    ///   classification) → DownloadResult + the terminal cookie
+    ///   close-out.
     ///
     /// Every branch releases the synthesis slot/position and pumps
     /// (release-then-backfill — a parked member promotes in this
@@ -1439,14 +1439,14 @@ impl SessionActor {
     /// seeding registry): the seed-domain twin of `handle_ended` +
     /// `retire_and_fire`. Dispatch per the record flags:
     /// - forceRecheck deferred mark → consume straight into checking
-    /// (the stop was the recheck's own; no results, no requeue);
+    ///   (the stop was the recheck's own; no results, no requeue);
     /// - pause → requeue to the front paused (the seed_parked
-    /// provenance routes the later unpause back to the seed side);
+    ///   provenance routes the later unpause back to the seed side);
     /// - remove → Removed result + row deletion;
     /// - natural terminal (seed criteria met: Detached / SeedStopped,
-    /// or any other classification) → DownloadResult with the same
-    /// `ended_classification` mapping as the active domain (Complete
-    /// for the seed-stop family — §4.1.5).
+    ///   or any other classification) → DownloadResult with the same
+    ///   `ended_classification` mapping as the active domain (Complete
+    ///   for the seed-stop family — §4.1.5).
     pub(super) async fn handle_seeding_ended(&mut self, gid: Gid, outcome: TaskOutcome) {
         let flags = self.queue.seeding_flags(gid);
         // forceRecheck-on-seeding stop landing: consume into checking
@@ -1779,14 +1779,14 @@ impl SessionActor {
     /// Hook dispatch and notice publishing mirror executeStopHook
     /// (RequestGroupMan.cc) plus the notifyDownloadEvent call sites:
     /// - requeue-to-front paused (pause teardown) → on-download-pause hook +
-    /// `EventKind::Pause`;
+    ///   `EventKind::Pause`;
     /// - requeue-to-front unpaused (restart) → NO pause hook and no Pause
-    /// event (same as aria2);
+    ///   event (same as aria2);
     /// - terminal: FINISHED → on-download-complete/`Complete`, error →
-    /// on-download-error/`Error`, everything else (REMOVED/IN_PROGRESS,
-    /// including remove and shutdown interruption) → on-download-stop/
-    /// `Stop` — hooks fire before event notices (same order as the
-    /// reference; bus wiring).
+    ///   on-download-error/`Error`, everything else (REMOVED/IN_PROGRESS,
+    ///   including remove and shutdown interruption) → on-download-stop/
+    ///   `Stop` — hooks fire before event notices (same order as the
+    ///   reference; bus wiring).
     ///
     /// Orphan-event guard: after forceRemove detaches immediately, the
     /// watcher still delivers one late Failed teardown (abort race) — the
@@ -2947,18 +2947,18 @@ impl SessionActor {
     /// Routing table (the transfer edges checking→seeding /
     /// checking→reserved; every arm ends in pump_all):
     /// - **full** (`recheck_outcome_complete`) and not pause-intent →
-    /// release the check slot and enter the **seed side** direct: the
-    /// seed slot (activate_seed — engine assembly inside the seed slot)
-    /// or, budget full, the seed_wait FIFO — never the reserved
-    /// download-slot detour (the same measured-bitmap routing as the
-    /// restart path, §4.1.4 isomorph);
+    ///   release the check slot and enter the **seed side** direct: the
+    ///   seed slot (activate_seed — engine assembly inside the seed slot)
+    ///   or, budget full, the seed_wait FIFO — never the reserved
+    ///   download-slot detour (the same measured-bitmap routing as the
+    ///   restart path, §4.1.4 isomorph);
     /// - **full** with the pause intent set → the user pause wins over
-    /// auto-seeding: requeue paused at the head with the complete-content
-    /// provenance mark (seed_parked — the later unpause reactivates on
-    /// the seed side, never a download slot);
+    ///   auto-seeding: requeue paused at the head with the complete-content
+    ///   provenance mark (seed_parked — the later unpause reactivates on
+    ///   the seed side, never a download slot);
     /// - **not full** (or the recheck errored: verifier build failure =
-    /// bitmap cleared = download from scratch) → requeue reserved at
-    /// the head, pause intent preserved (the existing path).
+    ///   bitmap cleared = download from scratch) → requeue reserved at
+    ///   the head, pause intent preserved (the existing path).
     ///
     /// The gid already left the checking registry at the function head
     /// (early return = stranded until restart — the defense below
@@ -3098,18 +3098,18 @@ impl SessionActor {
     ///
     /// Per domain:
     /// - **Reserved/ReservedPaused**: dequeue into the check pool's
-    /// waiting FIFO (row state 'checking'); the recheck spawns within
-    /// max-concurrent-checks (park_check + pump); requeue at the head
-    /// on completion (paused intent preserved).
+    ///   waiting FIFO (row state 'checking'); the recheck spawns within
+    ///   max-concurrent-checks (park_check + pump); requeue at the head
+    ///   on completion (paused intent preserved).
     /// - **Active**: stop first (pause teardown semantics —
-    /// `retire_and_fire` requeues paused without taking an activation
-    /// slot); once the teardown event lands, the `checking_deferred` mark
-    /// parks the task into check_pending (consumed by `handle_ended`) —
-    /// the recheck must wait for engine exit to prevent an in-flight bitfield
-    /// overwrite (engine auto-save / terminal flush would clobber the
-    /// recheck write-back).
+    ///   `retire_and_fire` requeues paused without taking an activation
+    ///   slot); once the teardown event lands, the `checking_deferred` mark
+    ///   parks the task into check_pending (consumed by `handle_ended`) —
+    ///   the recheck must wait for engine exit to prevent an in-flight bitfield
+    ///   overwrite (engine auto-save / terminal flush would clobber the
+    ///   recheck write-back).
     /// - **Checking** (in flight **or parked**): already rechecking =
-    /// explicit Err (idempotent re-entry not accepted).
+    ///   explicit Err (idempotent re-entry not accepted).
     /// - **Result/metadata tasks**: explicit Err (no faking).
     pub(super) async fn force_recheck(
         &mut self,

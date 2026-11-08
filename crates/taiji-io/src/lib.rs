@@ -2,29 +2,29 @@
 //!
 //! Responsibilities:
 //! - Unified peer transport abstraction: TCP and µTP (BEP-29) with an
-//! MSE/PE encryption layer stackable on top, exposing only
-//! `AsyncRead + AsyncWrite` upward;
+//!   MSE/PE encryption layer stackable on top, exposing only
+//!   `AsyncRead + AsyncWrite` upward;
 //! - Outbound dialing: dual-stack Happy Eyeballs (IPv6 racing IPv4 with a
-//! 300ms head start);
+//!   300ms head start);
 //! - DNS resolution and caching (with bad-IP marking);
 //! - Connection pool (TTL 15s, FIN probe before checkout);
 //! - Rate-limited streams (global + per-torrent dual token buckets; the
-//! read path `await`s permits for backpressure).
+//!   read path `await`s permits for backpressure).
 //! - UdpDemux: a shared v4/v6 UDP entry dispatching DHT / UDP-tracker /
-//! µTP into three bounded channels by packet signature.
+//!   µTP into three bounded channels by packet signature.
 //! - MSE/PE: DH-768 + ARC4 (first 1024B of keystream dropped) + PLAIN
-//! negotiation + the `Encrypted<S>` wrapper stream and an inbound
-//! sniffing pure function (SPEC §6.4/§6.1).
+//!   negotiation + the `Encrypted<S>` wrapper stream and an inbound
+//!   sniffing pure function (SPEC §6.4/§6.1).
 //! - µTP (BEP-29): v1 header/extension codec, Syn/SynRecv/Connected/Fin/
-//! Closed state machine, sack selective retransmit, LEDBAT congestion
-//! control, UtpListener (SPEC §6.5; `UtpStream` added at the frozen
-//! PeerTransport seam).
+//!   Closed state machine, sack selective retransmit, LEDBAT congestion
+//!   control, UtpListener (SPEC §6.5; `UtpStream` added at the frozen
+//!   PeerTransport seam).
 //! - NAT: NAT-PMP (RFC 6886 hand-written packets) + UPnP IGD (rupnp)
-//! port mapping with 60min renewal, NatActor command/event face
-//! (SPEC §6.8; `Mapped`/`Failed` events feed the announce port view).
+//!   port mapping with 60min renewal, NatActor command/event face
+//!   (SPEC §6.8; `Mapped`/`Failed` events feed the announce port view).
 //! - winpath: Windows long-path verbatim conversion — a uniform wrapper
-//! applied at each crate's fs choke point just before a path is handed
-//! to the OS (zero-cost identity off Windows).
+//!   applied at each crate's fs choke point just before a path is handed
+//!   to the OS (zero-cost identity off Windows).
 //!
 //! Status: udp_demux, mse, utp, nat, dns implemented; the remaining
 //! faces are scaffolding. Hard constraints: SPEC §2 (unsafe banned

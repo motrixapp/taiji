@@ -14,14 +14,14 @@ use std::collections::HashMap;
 ///
 /// Lifetime discipline:
 /// - entries exist only while a piece is in flight (lazily allocated at
-/// block granularity); at piece completion [`Self::take_piece`] moves the
-/// entry out whole with [`PieceJob`](crate::verified::PieceJob)
-/// (cross-validation `take`, `precomputed_block_hashes.cpp`);
+///   block granularity); at piece completion [`Self::take_piece`] moves the
+///   entry out whole with [`PieceJob`](crate::verified::PieceJob)
+///   (cross-validation `take`, `precomputed_block_hashes.cpp`);
 /// - piece reset/eviction syncs through [`Self::drop_piece`] with the pool
-/// reset (cross-validation `drop`, same file) — re-fetched bytes re-enter
-/// the table;
+///   reset (cross-validation `drop`, same file) — re-fetched bytes re-enter
+///   the table;
 /// - an empty table allocates nothing (HashMap empty state); the v1 face /
-/// disabled switch carries no table (zero overhead).
+///   disabled switch carries no table (zero overhead).
 #[derive(Debug)]
 pub struct PrecomputedBlockHashes {
     /// Slots per piece (`piece_len / 16KiB`; fixed at construction).

@@ -615,11 +615,11 @@ impl TorrentStatusView {
 /// not files, and are not counted; the same anchor as the engine
 /// `selection_mask` / `so=` parsing):
 /// - `None` = select all (every file true, pad placeholder entries
-/// included — the isRequested default face; zero behavior change
-/// for tasks without a selection);
+///   included — the isRequested default face; zero behavior change
+///   for tasks without a selection);
 /// - `Some(set)` = only members true. `client_idx` = the file's
-/// ordinal in the non-pad order; pad entries pass `None` (not in
-/// the client list → always false).
+///   ordinal in the non-pad order; pad entries pass `None` (not in
+///   the client list → always false).
 pub fn file_selected(selection: Option<&[u32]>, client_idx: Option<u32>) -> bool {
     match (selection, client_idx) {
         (None, _) => true,

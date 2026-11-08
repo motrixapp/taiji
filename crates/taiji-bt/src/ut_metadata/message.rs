@@ -244,9 +244,9 @@ pub enum ServeError {
 /// Mirrors the reference `doReceivedAction`:
 /// - empty metadata -> reject;
 /// - `index * 16KiB < metadata length` -> the data slice
-/// `[index*16KiB, min((index+1)*16KiB, len))` (a short final piece);
+///   `[index*16KiB, min((index+1)*16KiB, len))` (a short final piece);
 /// - otherwise out of range -> [`ServeError::IndexTooBig`] (a peer
-/// violation -> disconnect recommended).
+///   violation -> disconnect recommended).
 pub fn serve_request(metadata: &[u8], index: usize) -> Result<ServeOutcome, ServeError> {
     if metadata.is_empty() {
         return Ok(ServeOutcome::Reject { index });

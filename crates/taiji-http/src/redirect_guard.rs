@@ -17,21 +17,21 @@
 //! # Classification list (restricted = true)
 //!
 //! - Loopback: v4 `127.0.0.0/8`, v6 `::1` (RFC 1122 §3.2.1.3,
-//! RFC 4291 §2.5.3).
+//!   RFC 4291 §2.5.3).
 //! - RFC1918 private: v4 `10/8`, `172.16/12`, `192.168/16` (RFC 1918;
-//! same domain as std `is_private`).
+//!   same domain as std `is_private`).
 //! - Link-local: v4 `169.254.0.0/16`, v6 `fe80::/10` (RFC 3927,
-//! RFC 4291 §2.5.6; the cloud-metadata endpoint 169.254.169.254 sits
-//! in the v4 range).
+//!   RFC 4291 §2.5.6; the cloud-metadata endpoint 169.254.169.254 sits
+//!   in the v4 range).
 //! - ULA: v6 `fc00::/7` (RFC 4193).
 //! - v4-mapped: v6 `::ffff:0:0/96` -> normalized and classified as the
-//! embedded v4 (RFC 4291 §2.5.5.2).
+//!   embedded v4 (RFC 4291 §2.5.5.2).
 //! - NAT64: v6 `64:ff9b::/96` -> same (the Well-Known Prefix,
-//! RFC 6052 §2.1; the local-use `64:ff9b:1::/48` is not listed —
-//! outside this spec's list).
+//!   RFC 6052 §2.1; the local-use `64:ff9b:1::/48` is not listed —
+//!   outside this spec's list).
 //! - Unspecified: v4 `0.0.0.0`, v6 `::` (RFC 1122, RFC 4291 §2.5.2).
 //! - Multicast: v4 `224.0.0.0/4`, v6 `ff00::/8` (RFC 1112,
-//! RFC 4291 §2.7).
+//!   RFC 4291 §2.7).
 //!
 //! Everything else is non-restricted (publicly routable). Deliberately
 //! **not** listed (the anti-over-blocking red line): CGNAT `100.64/10`
@@ -42,73 +42,73 @@
 //! # Decision policy (aligned with the initial classification)
 //!
 //! - The task's initial URL is classified **exactly once** (before the
-//! first hop, [`classify_host_all`]) under the **all** rule: all
-//! resolved addresses must be restricted to form a restricted anchor —
-//! a mixed-family host (public A + restricted AAAA via static DNS
-//! poisoning) must not form one, or the "restricted initial -> allow
-//! all hops" short-circuit branch voids the entire guard.
+//!   first hop, [`classify_host_all`]) under the **all** rule: all
+//!   resolved addresses must be restricted to form a restricted anchor —
+//!   a mixed-family host (public A + restricted AAAA via static DNS
+//!   poisoning) must not form one, or the "restricted initial -> allow
+//!   all hops" short-circuit branch voids the entire guard.
 //! - Each redirect hop: the target is classified via
-//! [`classify_host_any`] under the **any** rule (any resolved address
-//! restricted -> restricted); a restricted target **and** a
-//! non-restricted initial -> abort
-//! ([`HttpError::RedirectToRestrictedIp`]; the payload carries the
-//! target host, not credentials).
+//!   [`classify_host_any`] under the **any** rule (any resolved address
+//!   restricted -> restricted); a restricted target **and** a
+//!   non-restricted initial -> abort
+//!   ([`HttpError::RedirectToRestrictedIp`]; the payload carries the
+//!   target host, not credentials).
 //! - A restricted initial (localhost/LAN task) -> every hop passes:
-//! trusted LAN/tunnel topologies (local services, router admin pages,
-//! intranet mirrors) are real usage, in the same spirit as the FTP
-//! surface's "pass when the reply equals the control peer".
+//!   trusted LAN/tunnel topologies (local services, router admin pages,
+//!   intranet mirrors) are real usage, in the same spirit as the FTP
+//!   surface's "pass when the reply equals the control peer".
 //! - Host decision order: `pinned_resolve` pins (reqwest's overrides
-//! layer sits above the injected resolver — the pin address is the
-//! actual connect target, so a decision not matching the connection
-//! would make the pin surface a bypass seam) > literal IP classified
-//! directly (zero resolution) > shared resolver. Pins/literals are
-//! single-address decisions; the any/all rules do not differ at these
-//! two levels.
+//!   layer sits above the injected resolver — the pin address is the
+//!   actual connect target, so a decision not matching the connection
+//!   would make the pin surface a bypass seam) > literal IP classified
+//!   directly (zero resolution) > shared resolver. Pins/literals are
+//!   single-address decisions; the any/all rules do not differ at these
+//!   two levels.
 //! - **Failure surface (fail-closed, differentiated by rule)**: a hop
-//! target whose resolution fails / yields an empty list is rejected
-//! as Restricted — such a hop could not download successfully anyway,
-//! so rejecting costs nothing; and negative results are not cached
-//! (taiji-io dns.rs), so allowing would leave the deterministic
-//! two-query bypass of "answer SERVFAIL to the guard query, answer a
-//! private address to the connect query". An initial anchor whose
-//! resolution fails / yields an empty list counts as Public (the
-//! guard stays armed) — an empty list carries no "all restricted"
-//! evidence, and letting `all` over an empty set (vacuous truth) form
-//! a restricted anchor would disarm the guard on the failure surface
-//! (an opening in the opposite direction of the per-hop fail-closed;
-//! deliberately not taken).
+//!   target whose resolution fails / yields an empty list is rejected
+//!   as Restricted — such a hop could not download successfully anyway,
+//!   so rejecting costs nothing; and negative results are not cached
+//!   (taiji-io dns.rs), so allowing would leave the deterministic
+//!   two-query bypass of "answer SERVFAIL to the guard query, answer a
+//!   private address to the connect query". An initial anchor whose
+//!   resolution fails / yields an empty list counts as Public (the
+//!   guard stays armed) — an empty list carries no "all restricted"
+//!   evidence, and letting `all` over an empty set (vacuous truth) form
+//!   a restricted anchor would disarm the guard on the failure surface
+//!   (an opening in the opposite direction of the per-hop fail-closed;
+//!   deliberately not taken).
 //!
 //! # Residuals (registered)
 //!
 //! - **any/all divergence shapes**: the rules differ only when a
-//! resolver multi-address list is expanded — all-public and
-//! all-restricted lists decide identically under both; a mixed family
-//! is Public as an initial anchor (the tightened side) and Restricted
-//! as a hop target (the existing conservative side). Resulting
-//! over-blocking shape: a legitimate dual-stack host (public A + ULA
-//! AAAA intranet service) as the initial URL arms the guard as
-//! public, so a hop to its intranet target is rejected — the user
-//! resolves this with a literal-IP initial URL or `pinned_resolve`
-//! (single address, no rule ambiguity); a mixed hop target is
-//! rejected when any address is restricted, even if connect path
-//! selection would land on the public address (selection prefers v4
-//! and shares nothing with the decision) — the same conservative
-//! side, security direction first.
+//!   resolver multi-address list is expanded — all-public and
+//!   all-restricted lists decide identically under both; a mixed family
+//!   is Public as an initial anchor (the tightened side) and Restricted
+//!   as a hop target (the existing conservative side). Resulting
+//!   over-blocking shape: a legitimate dual-stack host (public A + ULA
+//!   AAAA intranet service) as the initial URL arms the guard as
+//!   public, so a hop to its intranet target is rejected — the user
+//!   resolves this with a literal-IP initial URL or `pinned_resolve`
+//!   (single address, no rule ambiguity); a mixed hop target is
+//!   rejected when any address is restricted, even if connect path
+//!   selection would land on the public address (selection prefers v4
+//!   and shares nothing with the decision) — the same conservative
+//!   side, security direction first.
 //! - **Failure-surface residual**: the guard decision and the
-//! connection are two independent queries (negatives uncached) —
-//! with per-hop fail-closed, the "guard fails + connect succeeds"
-//! direction is closed (reject on failure, no bypass); the "guard
-//! succeeds + the record changed by connect time" direction falls
-//! into the rebinding window (next item).
+//!   connection are two independent queries (negatives uncached) —
+//!   with per-hop fail-closed, the "guard fails + connect succeeds"
+//!   direction is closed (reject on failure, no bypass); the "guard
+//!   succeeds + the record changed by connect time" direction falls
+//!   into the rebinding window (next item).
 //! - A DNS rebinding window theoretically exists between the decision
-//! and the actual connection (the domain's record changes after the
-//! decision): the shared resolver's TTL cache makes the decision
-//! result and the transport connection mostly same-source same-value,
-//! narrowing but not eliminating the window (not pin-style
-//! elimination — the same water level as industry-wide redirect
-//! protection). The resolver and the transport share the
-//! [`taiji_io::dns::SharedDns`] process-level instance
-//! ([`taiji_io::dns::SharedDns::shared_default`]).
+//!   and the actual connection (the domain's record changes after the
+//!   decision): the shared resolver's TTL cache makes the decision
+//!   result and the transport connection mostly same-source same-value,
+//!   narrowing but not eliminating the window (not pin-style
+//!   elimination — the same water level as industry-wide redirect
+//!   protection). The resolver and the transport share the
+//!   [`taiji_io::dns::SharedDns`] process-level instance
+//!   ([`taiji_io::dns::SharedDns::shared_default`]).
 //!
 //! Upstream anchor mapping: docs/design/http.md
 

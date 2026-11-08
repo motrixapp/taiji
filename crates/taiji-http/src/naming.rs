@@ -49,17 +49,17 @@
 //! option, therefore:
 //!
 //! - Strict validation `^\.[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`: a single
-//! tail token; separators/NUL/overlong/out-of-domain characters are
-//! rejected, collapsing the path-injection surface to the naming
-//! domain itself ([`IncompleteSuffix::parse`], out-of-domain is
-//! always `taiji.option.invalid`);
+//!   tail token; separators/NUL/overlong/out-of-domain characters are
+//!   rejected, collapsing the path-injection surface to the naming
+//!   domain itself ([`IncompleteSuffix::parse`], out-of-domain is
+//!   always `taiji.option.invalid`);
 //! - Persisted at creation: the suffix is written into
-//! `http_task.config_json` ([`CONFIG_KEY_INCOMPLETE_SUFFIX`]); on
-//! restore the task's persisted value wins over the session default
-//! — a default change never breaks in-flight tasks
-//! ([`IncompleteSuffix::restore_from_config`]);
+//!   `http_task.config_json` ([`CONFIG_KEY_INCOMPLETE_SUFFIX`]); on
+//!   restore the task's persisted value wins over the session default
+//!   — a default change never breaks in-flight tasks
+//!   ([`IncompleteSuffix::restore_from_config`]);
 //! - Path conflict checks and auto-file-renaming both run with the
-//! configured suffix.
+//!   configured suffix.
 //!
 //! # Creation-time path conflict check (`taiji.http.path_conflict`)
 //!
@@ -431,19 +431,19 @@ pub struct CreationPolicy {
 /// `taiji.http.path_conflict`).
 ///
 /// - Target output exists (on disk, or held by another task in the
-/// in-process final-path registry — the window where an in-flight
-/// task has a decided name but no file yet carries the same weight
-/// as disk presence) -> rename if `auto_file_renaming` is on
-/// (returns the candidate name), otherwise reject;
+///   in-process final-path registry — the window where an in-flight
+///   task has a decided name but no file yet carries the same weight
+///   as disk presence) -> rename if `auto_file_renaming` is on
+///   (returns the candidate name), otherwise reject;
 /// - the incomplete path `<final><suffix>` occupied by a directory ->
-/// same-code rejection (an existing file-shaped `.part` is NOT a
-/// conflict — that is the resume input face, decided by
-/// [`decide_part_reuse`]);
+///   same-code rejection (an existing file-shaped `.part` is NOT a
+///   conflict — that is the resume input face, decided by
+///   [`decide_part_reuse`]);
 /// - on success the final path is claimed in the registry (`holder` =
-/// the task gid; idempotent on the same key — a reactivation rerun
-/// does not self-reject); release points are the rename landing
-/// ([`crate::finalize`] closure) or task removal (the claim spans
-/// the task lifetime).
+///   the task gid; idempotent on the same key — a reactivation rerun
+///   does not self-reject); release points are the rename landing
+///   ([`crate::finalize`] closure) or task removal (the claim spans
+///   the task lifetime).
 ///
 /// This check is a creation-time snapshot; the authoritative
 /// arbitration for the `.part` open face is the per-path claim in
@@ -569,14 +569,14 @@ where
 /// `.part` reuse decision.
 ///
 /// - Degraded tasks (no bitmap: no-range / no REST / non-identity
-/// encoding) -> restore always from zero (`Restart`);
+///   encoding) -> restore always from zero (`Restart`);
 /// - no probed total length -> no resume criterion, from zero;
 /// - `.part` missing -> from zero;
 /// - matching length -> resume (`Resume`; the bitmap-trust second
-/// line of defense still runs as usual); mismatching length -> full
-/// re-download (`Restart`; **the caller clears the bitmap** —
-/// bitmap persistence lives in the store, this module only produces
-/// the decision).
+///   line of defense still runs as usual); mismatching length -> full
+///   re-download (`Restart`; **the caller clears the bitmap** —
+///   bitmap persistence lives in the store, this module only produces
+///   the decision).
 ///
 /// Illegal shapes such as a directory occupying the `.part` path are
 /// rejected earlier by [`plan_output`] at creation.

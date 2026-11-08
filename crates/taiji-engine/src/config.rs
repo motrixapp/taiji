@@ -399,25 +399,25 @@ impl std::fmt::Debug for TrackerWireConfig {
 /// # Errors
 ///
 /// - [`MetainfoError::Layout`] / [`MetainfoError::HybridMismatch`]: layout
-/// planning failed for the wire or disk view
-/// ([`taiji_domain::metainfo::TorrentMeta::layout`] /
-/// [`Metainfo::disk_layout`]; a hybrid v1 offset table that disagrees
-/// with the v2 file tree surfaces here).
+///   planning failed for the wire or disk view
+///   ([`taiji_domain::metainfo::TorrentMeta::layout`] /
+///   [`Metainfo::disk_layout`]; a hybrid v1 offset table that disagrees
+///   with the v2 file tree surfaces here).
 /// - [`MetainfoError::PieceBudgetExceeded`]: a face declares more pieces
-/// than `MAX_TORRENT_PIECES` (checked before any piece-level allocation).
+///   than `MAX_TORRENT_PIECES` (checked before any piece-level allocation).
 /// - [`MetainfoError::NoV1Pieces`] / [`MetainfoError::NoV2Identity`]: the
-/// swarm kind needs a face whose identity the metainfo does not carry.
+///   swarm kind needs a face whose identity the metainfo does not carry.
 /// - [`MetainfoError::PiecesCountMismatch`]: the v1 `pieces` hash count
-/// differs from the layout's piece count.
+///   differs from the layout's piece count.
 /// - [`MetainfoError::MisalignedHybridLayout`]: a hybrid v1 piece maps into
-/// a padding region (the BEP 52 piece-alignment premise is broken).
+///   a padding region (the BEP 52 piece-alignment premise is broken).
 /// - [`MetainfoError::FileNotInLayout`]: a v2 file is absent from the
-/// layout (metadata/layout inconsistent).
+///   layout (metadata/layout inconsistent).
 /// - [`MetainfoError::BadPieceLayer`]: a v2 file's piece layer is missing
-/// or malformed for its piece count.
+///   or malformed for its piece count.
 /// - [`MetainfoError::FacePieceCountMismatch`]: the hybrid v1/v2 face piece
-/// counts differ (also raised early by the v2 face when the v1 hash list
-/// is shorter than the v2 piece count).
+///   counts differ (also raised early by the v2 face when the v1 hash list
+///   is shorter than the v2 piece count).
 ///
 /// Post-completion residency of an assembled engine (the
 /// [`engine_config`] completion face): what the engine does when the

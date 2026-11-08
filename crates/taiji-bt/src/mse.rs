@@ -12,13 +12,13 @@
 //! # Wiring points
 //!
 //! - The engine accept path currently calls
-//! [`crate::peer::handshake_accept_any`] directly; wiring it up means
-//! swapping that call for this module's [`accept_any`] (the
-//! `PeerTransport` seam shape is unchanged). Core-side file ownership is
-//! separate; this module does not reach across it.
+//!   [`crate::peer::handshake_accept_any`] directly; wiring it up means
+//!   swapping that call for this module's [`accept_any`] (the
+//!   `PeerTransport` seam shape is unchanged). Core-side file ownership is
+//!   separate; this module does not reach across it.
 //! - The announce `requirecrypto=1` landing point is in the tracker;
-//! [`announce_crypto_param`] is its parameter surface, with semantics
-//! matching `DefaultBtAnnounce.cc`.
+//!   [`announce_crypto_param`] is its parameter surface, with semantics
+//!   matching `DefaultBtAnnounce.cc`.
 //!
 //! # Tests
 //!

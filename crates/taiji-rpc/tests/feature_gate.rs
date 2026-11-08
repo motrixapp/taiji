@@ -4,13 +4,13 @@
 //! Assertion mechanism: this test binary is itself a taiji-rpc link
 //! product —
 //! - On state (default): the `metalink` consumption seam is genuinely
-//! exercised by the test -> taiji-metalink's code and symbol paths
-//! necessarily embed in the binary (the crate identity appears as
-//! symbol names / panic paths);
+//!   exercised by the test -> taiji-metalink's code and symbol paths
+//!   necessarily embed in the binary (the crate identity appears as
+//!   symbol names / panic paths);
 //! - Off state: `taiji-metalink` is not in the dependency graph
-//! (optional dep + feature gate), so the identity cannot appear in
-//! the product — appearing at all means the gate has failed (the
-//! dependency seam was bypassed).
+//!   (optional dep + feature gate), so the identity cannot appear in
+//!   the product — appearing at all means the gate has failed (the
+//!   dependency seam was bypassed).
 //!
 //! The fingerprint strings are assembled at runtime (this file's source
 //! contains no contiguous fingerprint, avoiding self-fulfilling

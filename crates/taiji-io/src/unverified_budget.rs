@@ -9,23 +9,23 @@
 //! all in-process WrDiskCaches**:
 //!
 //! - Admission point = `taiji_store::cache::WrDiskCache::update_min_loss`
-//! (a second, global gate on top of each face's existing LRU eviction:
-//! a face over the global cap **evicts its own data** to make room and
-//! never touches other faces); release points = negative deltas /
-//! eviction / detachment / Drop.
+//!   (a second, global gate on top of each face's existing LRU eviction:
+//!   a face over the global cap **evicts its own data** to make room and
+//!   never touches other faces); release points = negative deltas /
+//!   eviction / detachment / Drop.
 //! - When a claim fails and the claimer has nothing of its own to evict,
-//! the claim is **forced** (the bytes have already arrived in RAM and
-//! cannot be dropped) — so the total ceiling = cap + one increment
-//! (cell granularity): soft-cap semantics.
+//!   the claim is **forced** (the bytes have already arrived in RAM and
+//!   cannot be dropped) — so the total ceiling = cap + one increment
+//!   (cell granularity): soft-cap semantics.
 //! - Default 384MiB: 5 default concurrent single-face tasks (5×60MiB =
-//! 300MiB) always fit inside the cap with **zero behavior change**;
-//! hybrid / higher concurrency tightens gently from inside the cap
-//! (evicting an over-cap face amplifies wire re-fetch — the cap is
-//! deliberately wider than the default load).
+//!   300MiB) always fit inside the cap with **zero behavior change**;
+//!   hybrid / higher concurrency tightens gently from inside the cap
+//!   (evicting an over-cap face amplifies wire re-fetch — the cap is
+//!   deliberately wider than the default load).
 //! - Knob `BH_SESSION_UNVERIFIED_BYTES` (u64 bytes, default 384MiB,
-//! clamped [128MiB, 4GiB] — the lower bound keeps the knob from
-//! starving unverified buffering, the upper bound keeps the OOM guard
-//! from being inflated back; registry in `knobs`).
+//!   clamped [128MiB, 4GiB] — the lower bound keeps the knob from
+//!   starving unverified buffering, the upper bound keeps the OOM guard
+//!   from being inflated back; registry in `knobs`).
 //!
 //! block_arena is not accounted: pool rentals are already strictly
 //! budgeted by the face-level `cap_bytes` (`claim_budget` rolls claims

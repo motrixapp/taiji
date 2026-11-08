@@ -93,13 +93,13 @@ pub(crate) struct StallValve {
 /// Seeder rotation decision (pure function; table-driven test face over
 /// [`PeerStallRow`]):
 /// - first sight of an eligible row -> record the observation start, no
-/// disconnect (the continuity criterion begins);
+///   disconnect (the continuity criterion begins);
 /// - eligible row sustained >= [`SEEDER_ROTATE_IDLE_SECS`] and this
-/// window's batch not full -> disconnect (observation bookkeeping
-/// cleared; reconnection is handled by the redial pool's 60s backoff —
-/// sequential single connection);
+///   window's batch not full -> disconnect (observation bookkeeping
+///   cleared; reconnection is handled by the redial pool's 60s backoff —
+///   sequential single connection);
 /// - ineligible row -> clear observation bookkeeping (supply recovery /
-/// unchoke revokes the rotation intent).
+///   unchoke revokes the rotation intent).
 ///
 /// Returns the cuids disconnected this window (<= batch).
 pub(crate) fn rotation_pick(
@@ -131,13 +131,13 @@ pub(crate) fn rotation_pick(
 /// opens an action window (entry edge ∨ action-period edge).
 ///
 /// - `armed` = session age >= [`STALL_ARM_MIN_AGE_SECS`] ∧ leecher phase
-/// (guaranteed by the caller); while not armed, zero-increment counts
-/// do not accumulate (startup noise).
+///   (guaranteed by the caller); while not armed, zero-increment counts
+///   do not accumulate (startup noise).
 /// - `zero_delta` = false (supply-recovery edge): clear the count / stall
-/// state / rotation bookkeeping.
+///   state / rotation bookkeeping.
 /// - Zero increment >= [`STALL_DETECT_SECS`]: set the stall state; the
-/// entry edge returns true; afterwards true once per
-/// [`STALL_ACTION_PERIOD`].
+///   entry edge returns true; afterwards true once per
+///   [`STALL_ACTION_PERIOD`].
 pub(crate) fn stall_valve_advance(
     valve: &mut StallValve,
     zero_delta: bool,

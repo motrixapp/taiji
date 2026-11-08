@@ -22,24 +22,24 @@
 //! already in the dependency set. Hard invariants:
 //!
 //! - The lock lives as long as the session: the lock is held while the
-//! connection is alive; on process death (including kill -9) the
-//! kernel releases the POSIX file lock and the next opener
-//! automatically recovers the lock database's hot journal — no
-//! stale-lock deadlock (an `O_EXCL` create-file scheme would deadlock
-//! after kill -9, hence not adopted);
+//!   connection is alive; on process death (including kill -9) the
+//!   kernel releases the POSIX file lock and the next opener
+//!   automatically recovers the lock database's hot journal — no
+//!   stale-lock deadlock (an `O_EXCL` create-file scheme would deadlock
+//!   after kill -9, hence not adopted);
 //! - the lock file is never deleted: release + unlink races with a
-//! concurrent opener and can swap file identity (two "holders" each
-//! locking a different inode); an empty lock database lingering is
-//! harmless;
+//!   concurrent opener and can swap file identity (two "holders" each
+//!   locking a different inode); an empty lock database lingering is
+//!   harmless;
 //! - no waiting: after a short `busy_timeout` window an occupied lock
-//! fails (`SQLITE_BUSY`) — a concurrent second process means "fail
-//! with an explicit error", not queueing (queued resume = implicit
-//! serialized sessions, beyond what a user expects);
+//!   fails (`SQLITE_BUSY`) — a concurrent second process means "fail
+//!   with an explicit error", not queueing (queued resume = implicit
+//!   serialized sessions, beyond what a user expects);
 //! - zero interference with the main database: the lock lives on a
-//! separate file, so this process's PersistWriter writes to the main
-//! database are unaffected;
+//!   separate file, so this process's PersistWriter writes to the main
+//!   database are unaffected;
 //! - the daemon (the RPC-resident form) will join the same lock: a
-//! planned integration; today only the `taiji http` CLI holds it.
+//!   planned integration; today only the `taiji http` CLI holds it.
 //!
 //! Upstream anchor mapping: docs/design/cli.md
 

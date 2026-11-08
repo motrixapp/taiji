@@ -6,18 +6,18 @@
 //! Reproducibility contract ("generation recipe + product
 //! sha256 manifest archived; fixed inputs rebuild bit-identical"):
 //! * every ffmpeg invocation pins a fixed argv (lavfi synthetic
-//! sources, `-threads 1`, `+bitexact` on container/streams, fixed
-//! x264 params — no wall-clock/machine state in the output) and runs
-//! with the target directory as cwd so the muxer-written playlists
-//! carry bare relative URIs (no absolute paths in any product);
+//!   sources, `-threads 1`, `+bitexact` on container/streams, fixed
+//!   x264 params — no wall-clock/machine state in the output) and runs
+//!   with the target directory as cwd so the muxer-written playlists
+//!   carry bare relative URIs (no absolute paths in any product);
 //! * the AES-128 post-processing (rotation/MAP-after-KEY encryption —
-//! ffmpeg's hls muxer cannot express key rotation) is a pure-Rust
-//! AES-128-CBC pass with fixed key/IV constants;
+//!   ffmpeg's hls muxer cannot express key rotation) is a pure-Rust
+//!   AES-128-CBC pass with fixed key/IV constants;
 //! * [`generate_matrix`] writes the whole tree plus `SHA256SUMS`
-//! (every product, sorted relative paths) and `RECIPE.json` (ffmpeg
-//! version line, the recorded argv of every invocation, the crypto
-//! constants). A second run over the same ffmpeg build is
-//! **bit-identical** — the rebuild cross-check the matrix test asserts.
+//!   (every product, sorted relative paths) and `RECIPE.json` (ffmpeg
+//!   version line, the recorded argv of every invocation, the crypto
+//!   constants). A second run over the same ffmpeg build is
+//!   **bit-identical** — the rebuild cross-check the matrix test asserts.
 //!
 //! The claim is machine/ffmpeg-build scoped (a different ffmpeg build
 //! may encode differently): RECIPE.json records the exact version
@@ -27,24 +27,24 @@
 //! Matrix (the 0.3.0 VOD subset):
 //! 1. `master-multibitrate` — master with 3 variants (240/180/120p);
 //! 2. `independent-audio` — EXT-X-MEDIA audio rendition + video-only
-//! variants (AUDIO group);
+//!    variants (AUDIO group);
 //! 3. `aes-rotation` — ≥2 KEY rotated exactly at segment boundaries,
-//! explicit + default (media-sequence) IV forms, then the
-//! vector-① METHOD=NONE reset tail;
+//!    explicit + default (media-sequence) IV forms, then the
+//!    vector-① METHOD=NONE reset tail;
 //! 4. `byterange` — single-file fMP4 (MAP + segments as byte ranges
-//! of one resource), explicit form as muxed plus the
-//! vector-② **omitted-offset** derived form;
+//!    of one resource), explicit form as muxed plus the
+//!    vector-② **omitted-offset** derived form;
 //! 5. `discontinuity` — two fMP4 parts at different resolutions
-//! joined at an EXT-X-DISCONTINUITY with per-part MAPs;
+//!    joined at an EXT-X-DISCONTINUITY with per-part MAPs;
 //! 6. `nonzero-seq` — MEDIA-SEQUENCE base 50_000 media playlist;
 //! 7. `multimap-v8` — v8 `KEY=` attribute on the first MAP + the
-//! vector-③ MAP-after-KEY boundary (an ambient KEY declared
-//! before the second MAP covers that encrypted init; default-IV
-//! chain falls back to the first following segment's sequence);
+//!    vector-③ MAP-after-KEY boundary (an ambient KEY declared
+//!    before the second MAP covers that encrypted init; default-IV
+//!    chain falls back to the first following segment's sequence);
 //! 8. `mkv-fallback` — mpegts-segment playlist (the synthesis TS fallback
-//! trigger: no init section) + a matroska product (the MKV form);
+//!    trigger: no init section) + a matroska product (the MKV form);
 //! 9. `hundredk` — a 100 000-segment BYTERANGE manifest (the
-//! ≤100k in-cap boundary form; the parse-gate carrier).
+//!    ≤100k in-cap boundary form; the parse-gate carrier).
 //!
 //! This module is test-support only — never product code.
 

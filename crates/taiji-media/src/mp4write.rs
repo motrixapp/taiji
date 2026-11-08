@@ -7,28 +7,28 @@
 //! this writer; docs/design/media-synthesis.md carries the matrix):
 //!
 //! * **any-codec stsd passthrough** — the source init's sample
-//! description bytes are copied verbatim (no codec whitelist: the
-//! disqualifier of the crates.io `mp4` candidate);
+//!   description bytes are copied verbatim (no codec whitelist: the
+//!   disqualifier of the crates.io `mp4` candidate);
 //! * **faststart by construction** — `ftyp, moov, mdat` layout with
-//! the moov's `stco`/`co64` chunk offsets resolved against the
-//! known post-moov mdat position (two-pass serialize);
+//!   the moov's `stco`/`co64` chunk offsets resolved against the
+//!   known post-moov mdat position (two-pass serialize);
 //! * **multi-track merge** — N [`TrackSpec`]s become N traks over one
-//! shared mdat (one chunk per track);
+//!   shared mdat (one chunk per track);
 //! * **tx3g subtitle tracks** — [`tx3g_track_spec`] builds a tx3g trak
-//! from cue windows (VTT/SRT conversion lives in [`crate::vtt`]);
+//!   from cue windows (VTT/SRT conversion lives in [`crate::vtt`]);
 //! * **covr cover art** — [`covr_udta`] (iTunes `meta.ilst.covr` (a udta child)
-//! with the jpeg/png well-known data type);
+//!   with the jpeg/png well-known data type);
 //! * **©nam title** — `meta.ilst.©nam.data` (the title embed,
-//! the product wiring; the same ilst family as covr — one
-//! `meta.ilst` carries every present item);
+//!   the product wiring; the same ilst family as covr — one
+//!   `meta.ilst` carries every present item);
 //! * **chpl chapters** — [`chpl_box`] (Nero-style, timestamps in
-//! 100 ns units — the unit convention is documented per the matrix
-//! annotation; not a product face yet);
+//!   100 ns units — the unit convention is documented per the matrix
+//!   annotation; not a product face yet);
 //! * **multi-Period concat** — the caller concatenates same-codec
-//! sample streams into one [`TrackSpec`] (the matrix entry measures
-//! exactly that composition);
+//!   sample streams into one [`TrackSpec`] (the matrix entry measures
+//!   exactly that composition);
 //! * **MKV is out of scope by verdict** — the writer only emits the
-//! MP4 family; MKV routes to the ffmpeg fallback channel.
+//!   MP4 family; MKV routes to the ffmpeg fallback channel.
 //!
 //! The output is a byte vector (the pipeline writes it to
 //! `<out>.part` then atomically renames); the

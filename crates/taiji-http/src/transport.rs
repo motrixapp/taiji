@@ -4,15 +4,15 @@
 //!
 //! Assembly contract (invariants):
 //! - one instance per worker (bound to its URI/source ordinal — the
-//! per-source accounting key propagates for real; EWMA-weighted
-//! share arbitration belongs to the coordinator);
+//!   per-source accounting key propagates for real; EWMA-weighted
+//!   share arbitration belongs to the coordinator);
 //! - after claiming an extent and before `fetch`, the worker
-//! registers the allocated extent ordinal via
-//! [`HttpRangeTransport::arm`] (the frozen trait signature carries
-//! no `SegId`; this method is the `SegId` carrier seam);
+//!   registers the allocated extent ordinal via
+//!   [`HttpRangeTransport::arm`] (the frozen trait signature carries
+//!   no `SegId`; this method is the `SegId` carrier seam);
 //! - disk writes go through the injected [`SegmentSink`] (this crate
-//! does not depend on taiji-store; the DB/bitmap pipeline belongs
-//! to the core-side sink implementation).
+//!   does not depend on taiji-store; the DB/bitmap pipeline belongs
+//!   to the core-side sink implementation).
 //!
 //! Upstream anchor mapping: docs/design/http.md
 

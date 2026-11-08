@@ -99,15 +99,15 @@ pub enum Progress {
 }
 /// torrent_progress counter row assembly (SPEC §5.3):
 /// - `upload_at_startup` = this session's baseline (the restored value;
-/// the schema comment "cumulative upload before this session", the
-/// `.aria2` control file uploadLength semantics);
+///   the schema comment "cumulative upload before this session", the
+///   `.aria2` control file uploadLength semantics);
 /// - `uploaded_total`/`downloaded_total` = baseline + session deltas
-/// (cross-session totals);
+///   (cross-session totals);
 /// - `active_time_s`/`seed_time_s` = baseline + session totals (1s tick);
 /// - `v1_bitfield` = face 0's synthesized bitmap (v1/hybrid real bitmap,
-/// v2 synthetic pseudo-bitmap, SPEC §4.4);
+///   v2 synthetic pseudo-bitmap, SPEC §4.4);
 /// - `v2_file_bits` = the v2 face's per-file bitmap (encoding in
-/// [`encode_v2_file_bits`]; the write side of the restore face).
+///   [`encode_v2_file_bits`]; the write side of the restore face).
 ///
 /// **In-flight block bitmaps are not persisted (intentional
 /// deviation)**: aria2's control file persists and restores in-flight

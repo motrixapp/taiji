@@ -5,41 +5,41 @@
 //! # Shape (concurrency discipline)
 //!
 //! - N workers, each with a bounded queue (depth
-//! [`VerifyPoolConfig::queue_per_worker`]). The dispatcher round-robins
-//! `try_send` from the last placement; when every queue is full it
-//! blocks on `send` to the next placement — a full pool makes
-//! [`VerifyPool::dispatch`] await, which backs up the pipeline's block
-//! input channel and ultimately the peer read loop (natural
-//! backpressure, no unbounded channel). Total in-flight job bound =
-//! `workers x queue_per_worker` (memory bound = that x longest-piece
-//! bytes, accounted together with the write-cache limit).
+//!   [`VerifyPoolConfig::queue_per_worker`]). The dispatcher round-robins
+//!   `try_send` from the last placement; when every queue is full it
+//!   blocks on `send` to the next placement — a full pool makes
+//!   [`VerifyPool::dispatch`] await, which backs up the pipeline's block
+//!   input channel and ultimately the peer read loop (natural
+//!   backpressure, no unbounded channel). Total in-flight job bound =
+//!   `workers x queue_per_worker` (memory bound = that x longest-piece
+//!   bytes, accounted together with the write-cache limit).
 //! - Shared write handle ([`SharedDiskWriter`]) deserializes writes.
-//! Lock domains: write-external operations (fsync/allocate/truncate)
-//! take the exclusive write lock; the write hot path takes the read
-//! lock concurrently on unix when `BH_PARALLEL_WRITES=1` (concurrent
-//! pwrite to one fd at different offsets is POSIX-safe; libtorrent's
-//! mmap backend follows the same zero-serialization philosophy). The
-//! default is off = writes take the write lock = the old
-//! global-mutex semantics (see
-//! `taiji_store::verified::parallel_writes_env`). Piece goff ranges
-//! never overlap, so interleaving is harmless; cells within one piece
-//! are written by a single worker in ascending goff — intra-piece
-//! write order is unchanged. All locks are synchronous std locks;
-//! worker blocking work runs inside `spawn_blocking`, never held
-//! across an `await`.
+//!   Lock domains: write-external operations (fsync/allocate/truncate)
+//!   take the exclusive write lock; the write hot path takes the read
+//!   lock concurrently on unix when `BH_PARALLEL_WRITES=1` (concurrent
+//!   pwrite to one fd at different offsets is POSIX-safe; libtorrent's
+//!   mmap backend follows the same zero-serialization philosophy). The
+//!   default is off = writes take the write lock = the old
+//!   global-mutex semantics (see
+//!   `taiji_store::verified::parallel_writes_env`). Piece goff ranges
+//!   never overlap, so interleaving is harmless; cells within one piece
+//!   are written by a single worker in ascending goff — intra-piece
+//!   write order is unchanged. All locks are synchronous std locks;
+//!   worker blocking work runs inside `spawn_blocking`, never held
+//!   across an `await`.
 //! - Verify before write: a worker runs [`PieceJob::verify`] (pure CPU)
-//! first and only then [`PieceJob::write_to`]; a failure/mismatch
-//! verdict goes back to the pipeline for the existing reset/refetch or
-//! fatal handling — pooling changes where the discipline executes, not
-//! the discipline.
+//!   first and only then [`PieceJob::write_to`]; a failure/mismatch
+//!   verdict goes back to the pipeline for the existing reset/refetch or
+//!   fatal handling — pooling changes where the discipline executes, not
+//!   the discipline.
 //! - Eviction semantics untouched: eviction happens in the pipeline's
-//! buffer step (`buffer_block`) and never intersects this pool;
-//! finished-piece cells leave the cache with their job.
+//!   buffer step (`buffer_block`) and never intersects this pool;
+//!   finished-piece cells leave the cache with their job.
 //! - Shutdown order: pipeline drops the pool -> `dispatch_tx` closes ->
-//! the dispatcher drains and exits -> worker queues close -> workers
-//! finish in-flight jobs and exit (in-flight writes complete
-//! naturally, same semantics as the pre-pool per-job
-//! `spawn_blocking`).
+//!   the dispatcher drains and exits -> worker queues close -> workers
+//!   finish in-flight jobs and exit (in-flight writes complete
+//!   naturally, same semantics as the pre-pool per-job
+//!   `spawn_blocking`).
 //!
 //! # Reference
 //!
@@ -188,24 +188,24 @@ pub(super) type PieceJobGroup = Vec<PieceJob>;
 /// underestimated and could be overrun — the four-way send ring below).
 ///
 /// 1. In-flight PIECE bound = pieces produced-but-not-drained by the
-/// current batch (<= [`BUFFER_BATCH_BLOCKS`], including pending
-/// in-batch groups — undispatched groups produce no verdict) + pool
-/// resident group slots x pieces per slot: slots = worker queues
-/// (queue/worker) + executing (1/worker) + dispatch channel in
-/// flight (workers, stragglers of the previous batch) =
-/// workers x (queue+2) slots, each <=
-/// [`super::pipeline::PIECE_GROUP_MAX`] pieces (the pipeline
-/// flushes at the cap — the structural bound).
+///    current batch (<= [`BUFFER_BATCH_BLOCKS`], including pending
+///    in-batch groups — undispatched groups produce no verdict) + pool
+///    resident group slots x pieces per slot: slots = worker queues
+///    (queue/worker) + executing (1/worker) + dispatch channel in
+///    flight (workers, stragglers of the previous batch) =
+///    workers x (queue+2) slots, each <=
+///    [`super::pipeline::PIECE_GROUP_MAX`] pieces (the pipeline
+///    flushes at the cap — the structural bound).
 /// 2. Each piece has at most 2 messages in flight (two-phase: early
-/// Verified + final).
+///    Verified + final).
 /// 3. Capacity >= 2 x the piece bound => worker return sends (early
-/// `blocking_send` and the final send) never block => workers always
-/// return to the take-group loop => the dispatch chain (queues ->
-/// dispatcher -> dispatch channel) must keep draining => a pipeline
-/// blocked in dispatch inside a batch (not polling verdicts) always
-/// unblocks. Without it: pipeline dispatch blocks -> dispatcher
-/// blocks on a full worker queue -> worker blocks returning a
-/// verdict -> nobody drains (a four-way send ring).
+///    `blocking_send` and the final send) never block => workers always
+///    return to the take-group loop => the dispatch chain (queues ->
+///    dispatcher -> dispatch channel) must keep draining => a pipeline
+///    blocked in dispatch inside a batch (not polling verdicts) always
+///    unblocks. Without it: pipeline dispatch blocks -> dispatcher
+///    blocks on a full worker queue -> worker blocks returning a
+///    verdict -> nobody drains (a four-way send ring).
 ///
 /// Still bounded, not unbounded: memory = capacity x PoolResult (a
 /// small fixed-size struct, ~80B; 192 entries in the default 4/2 shape
@@ -359,23 +359,23 @@ async fn run_worker(
 /// Execution order (grouped; a single-job group = the old per-job
 /// semantics):
 /// 1. Verify the whole group (in-piece order): `Ok(true)` returns
-/// [`PoolVerdict::Verified`] via `early` (early HAVE advertise —
-/// libtorrent commit `7f691246a` passed->have; advertise does not
-/// wait for the write); `Ok(false)` / `Err` = this piece's final
-/// verdict (HashMismatch + smart_ban snapshot / Cross) and the GROUP
-/// WRITE IS SKIPPED (verify-before-write discipline: any unverified
-/// piece falls the whole group back to the old single-job write path,
-/// writing passing pieces individually — exactly the pre-grouping
-/// independent per-job writes).
+///    [`PoolVerdict::Verified`] via `early` (early HAVE advertise —
+///    libtorrent commit `7f691246a` passed->have; advertise does not
+///    wait for the write); `Ok(false)` / `Err` = this piece's final
+///    verdict (HashMismatch + smart_ban snapshot / Cross) and the GROUP
+///    WRITE IS SKIPPED (verify-before-write discipline: any unverified
+///    piece falls the whole group back to the old single-job write path,
+///    writing passing pieces individually — exactly the pre-grouping
+///    independent per-job writes).
 /// 2. Group write (when the whole group passed): one `write_batch` lock
-/// domain, [`PieceJob::write_group`] — adjacent piece cells coalesce
-/// into contiguous segments written vectorized. Write failure maps by
-/// the returned `first_failed`: `[..idx)` = Written (bytes on disk),
-/// `[idx..)` = WriteFailed (refetch + rewrite is idempotent).
+///    domain, [`PieceJob::write_group`] — adjacent piece cells coalesce
+///    into contiguous segments written vectorized. Write failure maps by
+///    the returned `first_failed`: `[..idx)` = Written (bytes on disk),
+///    `[idx..)` = WriteFailed (refetch + rewrite is idempotent).
 /// 3. Early channel closed (pipeline shutdown race) = the write has no
-/// consumer: skip the group's write and converge on JoinFailed
-/// finals (job bytes freed with the job; data recoverable via engine
-/// refetch — the existing shutdown semantics, observable).
+///    consumer: skip the group's write and converge on JoinFailed
+///    finals (job bytes freed with the job; data recoverable via engine
+///    refetch — the existing shutdown semantics, observable).
 ///
 /// Write observation granularity: a group write is one call, so only the
 /// group's FIRST Written verdict carries

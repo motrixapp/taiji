@@ -148,17 +148,17 @@ mod tests {
 
     /// Admission convergence table:
     /// - good layer (true piece-root layer) -> converges and is admitted
-    /// with the same trust level as a metadata-carried layer
-    /// (downstream `verify_and_put_layer`/`verify_block` behave
-    /// bit-for-bit identically);
+    ///   with the same trust level as a metadata-carried layer
+    ///   (downstream `verify_and_put_layer`/`verify_block` behave
+    ///   bit-for-bit identically);
     /// - bad layer (any hash flipped 1 bit) -> the whole file is
-    /// refused;
+    ///   refused;
     /// - wrong layer (a half-block layer string — count mismatch) ->
-    /// refused;
+    ///   refused;
     /// - wrong root (converges on a different root) -> refused;
     /// - short delivery (too few hashes) -> refused;
     /// - extra hashes (untrimmed out-of-bounds slots) -> admitted after
-    /// trimming;
+    ///   trimming;
     /// - empty payload -> refused.
     #[test]
     fn admission_convergence_table() {

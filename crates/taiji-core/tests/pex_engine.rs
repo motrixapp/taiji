@@ -6,15 +6,15 @@
 //! the leaves, source = pex):
 //!
 //! - `pex_engine_discovers_and_dials`: the engine ext handshake
-//! advertises ut_pex=1 (BEP 10 m dict) -> consumes the announcer's
-//! ut_pex frame (codec decode) -> discovered peers feed connection
-//! management (self-connect guard / dedup / one connection per IP, same
-//! as the tracker/DHT paths) -> SessionMetrics engine-level contribution
-//! count > 0 (engine-level reading face);
+//!   advertises ut_pex=1 (BEP 10 m dict) -> consumes the announcer's
+//!   ut_pex frame (codec decode) -> discovered peers feed connection
+//!   management (self-connect guard / dedup / one connection per IP, same
+//!   as the tracker/DHT paths) -> SessionMetrics engine-level contribution
+//!   count > 0 (engine-level reading face);
 //! - `pex_private_torrent_silent` (acceptance criterion 3): private=true
-//! -> `pex_offered` is false -> no advertisement (the announcer asserts
-//! the m dict has no ut_pex), and ut_pex sent anyway by the announcer is
-//! not consumed either (zero leaf connections, pex count 0).
+//!   -> `pex_offered` is false -> no advertisement (the announcer asserts
+//!   the m dict has no ut_pex), and ut_pex sent anyway by the announcer is
+//!   not consumed either (zero leaf connections, pex count 0).
 //!
 //! Harness shape matches `engine_loop.rs`: fake HTTP tracker + wire-level
 //! announcer/leaf seeders (handshake-level hold, no piece serving).

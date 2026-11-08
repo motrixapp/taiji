@@ -11,18 +11,18 @@
 //!
 //! Layout:
 //! * [`sniff`] — entry classification, content > extension >
-//! Content-Type → `not_media`;
+//!   Content-Type → `not_media`;
 //! * [`parse_manifest`] — line-oriented state machine; media vs
-//! master classification on tag presence (RFC 8216 §4); the
-//! pinned semantics (BYTERANGE per-URI omitted-offset accumulation,
-//! METHOD=NONE explicit reset, positional MAP/KEY boundary) live in
-//! [`parse`];
+//!   master classification on tag presence (RFC 8216 §4); the
+//!   pinned semantics (BYTERANGE per-URI omitted-offset accumulation,
+//!   METHOD=NONE explicit reset, positional MAP/KEY boundary) live in
+//!   [`parse`];
 //! * [`policy`] — `--media-variant-policy` value parsing + selection;
 //! * [`digest`] — query-stripped normalized manifest digest and the
-//! variant identity pure function;
+//!   variant identity pure function;
 //! * [`model`] — the data structures (segment identity = absolute
-//! media sequence; byte-range merge runs ≤8 for the transport
-//! wiring).
+//!   media sequence; byte-range merge runs ≤8 for the transport
+//!   wiring).
 //!
 //! Fuzz surface: `m3u8_parse` (fuzz workspace, the parser
 //! roster); vectors in `fuzz/seeds/m3u8_parse/` = RFC 8216 §8 modeled

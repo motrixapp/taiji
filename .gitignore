@@ -1,8 +1,57 @@
+# Build output (workspace root; fuzz/ has its own .gitignore)
 /target
-fuzz/target
+
+# Rust toolchain stray output: rustfmt backups / MSVC PDB / cargo-mutants / ICE dumps
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+rustc-ice-*.txt
+
+# Local git worktrees — never commit
+/taiji-worktrees/
+
+# Local bench scratch (cargo benches live in crates/*/benches/, keep those)
+/bench/
+
+# SQLite dev databases + WAL / rollback-journal sidecars
 *.sqlite3
 *.sqlite3.lock
+*.sqlite3-journal
 *.sqlite3-shm
 *.sqlite3-wal
+
+# Coverage / profiling artifacts
+*.profraw
+*.profdata
+*.lcov
+flamegraph.svg
+perf.data*
+
+# Environment / secrets
+.env
+
+# Editors: JetBrains whole-dir; VS Code keep shareable config (official template pattern)
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+
+# OS noise (trimmed github/gitignore Global/* — cross-platform contributors)
 .DS_Store
-bench/
+._*
+__MACOSX/
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+nohup.out
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/

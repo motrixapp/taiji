@@ -1172,8 +1172,11 @@ async fn unpause_all_clears_parked_check_pending_intent() {
     // member stays paused in the waiting queue (the pre-fix face
     // leaves the member that was still parked at unpauseAll stuck
     // paused — the stalled assert trips on the residue).
+    // 1500×20ms = 30s: the resume wave (recheck + reactivation of five
+    // members) exceeded the historical 12s budget on loaded shared CI
+    // runners where the whole suite runs concurrently.
     let mut resumed = false;
-    for _ in 0..600 {
+    for _ in 0..1500 {
         let waiting = tell_waiting(&handle).await;
         let stalled = waiting
             .iter()

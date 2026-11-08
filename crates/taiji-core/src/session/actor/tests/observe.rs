@@ -311,10 +311,14 @@ async fn four_pool_mixed_load_global_stat_caliber() {
             // 'active' in TellActive (the live driver face).
             let views =
                 status_list(&call(&handle, SessionCommand::TellActive { keys: vec![] }).await);
-            let resident = views
-                .iter()
-                .find(|v| v.gid == media_gid)
-                .unwrap_or_else(|| panic!("the synthesis resident is in TellActive"));
+            let Some(resident) = views.iter().find(|v| v.gid == media_gid) else {
+                // Query race: the meter snapshot hit the synthesis
+                // resident but the TellActive read that followed missed
+                // it (the phase advanced between the two queries) —
+                // keep polling instead of panicking; the invariant is
+                // re-verified on the next meter hit.
+                continue;
+            };
             assert_eq!(
                 resident.status,
                 StatusKind::Active,

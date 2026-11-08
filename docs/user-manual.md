@@ -1,5 +1,7 @@
 # taiji User Manual
 
+English | [简体中文](./user-manual.zh-CN.md)
+
 ## HTTP/FTP One-Shot Download (`taiji http`)
 
 ```sh
@@ -7,7 +9,7 @@ taiji http <URL…> -d <dir> [-o filename] [--checksum sha-256=<hex>]
 ```
 
 - Multiple URLs = mirrors of the same file (aria2 addUri semantics); ftp/ftps are
-  accepted (lands in B2).
+  accepted.
 - **Resume**: the bitmap in the session database `taiji.sqlite3` is the source of
   truth for resumption. After the process is killed (including kill -9),
   **re-running with the same arguments** automatically continues in-flight tasks
@@ -33,8 +35,8 @@ taiji http <URL…> -d <dir> [-o filename] [--checksum sha-256=<hex>]
 - Exit codes: 0 = completed; 1 = task failed/interrupted/concurrency refused/
   attach refused; 2 = usage or option value-range error.
 - Remaining options (`--split`/`--timeout`/`--header`/`--all-proxy` etc.) are
-  accepted and take effect with the B1 option group (an explicit runtime warning
-  is emitted; they are not made to look effective while doing nothing).
+  accepted; until the corresponding option group lands they emit an explicit
+  runtime warning (they are not made to look effective while doing nothing).
 - **Downloads requiring login (cookie surface)**:
   - `--load-cookies <netscape file>`: carries cookies to download protected URLs
     (Netscape format exported by curl/browsers). A missing file / over 1MiB =

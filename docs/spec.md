@@ -1,5 +1,7 @@
 # taiji Engine Specification
 
+English | [简体中文](./spec.zh-CN.md)
+
 | | |
 |---|---|
 | Version | v0.3 |

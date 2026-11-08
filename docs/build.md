@@ -1,5 +1,7 @@
 # Build and release
 
+English | [简体中文](./build.zh-CN.md)
+
 ## Workspace
 
 ```

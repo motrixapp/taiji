@@ -1,5 +1,7 @@
 # taiji–aria2 differential declaration (RPC / option surface · v1.1)
 
+English | [简体中文](./rpc-api-diff.zh-CN.md)
+
 This file is the **controlled list (whitelist) of every known behavioral difference**
 between the taiji engine and aria2 (the retirement counterpart being the aria2 fork,
 hereafter "the fork"). Governance rules:

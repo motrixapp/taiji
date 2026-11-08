@@ -1,5 +1,7 @@
 # taiji RPC API
 
+English | [简体中文](./rpc-api.zh-CN.md)
+
 JSON-RPC 2.0 over HTTP `POST /jsonrpc` (single/batch/system.multicall) and
 WebSocket (`GET /jsonrpc` upgrade). Authentication: `token:` as the first
 parameter or HTTP Basic (`--rpc-secret` / `--rpc-user` + `--rpc-passwd`); with
@@ -160,8 +162,8 @@ guard / attach comparison semantics).
 | `taiji.setFilePriority` | Partial update of multi-level file priorities: `setFilePriority(gid, pairs)` — pairs = `[{index, priority}]` (index 1-based client file order; priority ∈ -1..=7: -1 skip / 0 normal / 1..7 high); unlisted files untouched. Torrent tasks only; active tasks take effect live in the engine, waiting/paused tasks receive it on activation; -1 ⇔ move out of the selection set / 0..7 ⇔ join it (mutually consistent with the single `select-file` selection surface); persisted in config_json (kept across restarts). Echo = `tellStatus`/`getFiles` files[] `priority` key. Write surface (refused by the write gate when `--rpc-secret` is unset). aria2 has no such method (an own extension aligned with libtorrent's `file_priority` capability) |
 | `taiji.setDiskTier` / `getDiskTier` | Disk allocation tier |
 | `taiji.getCapabilities` | Capability discovery (extension method/event inventory) |
-| `taiji.addUriWithCookies` | Add a download with structured cookies (uris, cookies[], options?): cookies item by item `{name, value, domain, path?, hostOnly?, secure?, httpOnly?, expiresAt?}` (fork parseRpcCookies verbatim validation — ≤300 entries / unknown fields refused / expiry = non-negative Unix milliseconds); all URIs must be http(s); cookies go into the task's CookieStore (the same storage surface as `--load-cookies`), and manual `Cookie:` headers are stripped (structured cookies are authoritative); `.torrent` URL not accepted (no cookie consumption point on the metadata surface). Accepted after a reversal of the early stance; Motrix baseline) |
-| `taiji.setTaskCookies` | Runtime override of the cookie jar of waiting/paused HTTP tasks (gid, cookies[]): whole-set replacement + row persistence (kept across restarts); active/non-HTTP tasks = `Task cookies can only be set on waiting or paused cookie tasks.`. Accepted after a reversal of the early stance; Motrix baseline) |
+| `taiji.addUriWithCookies` | Add a download with structured cookies (uris, cookies[], options?): cookies item by item `{name, value, domain, path?, hostOnly?, secure?, httpOnly?, expiresAt?}` (fork parseRpcCookies verbatim validation — ≤300 entries / unknown fields refused / expiry = non-negative Unix milliseconds); all URIs must be http(s); cookies go into the task's CookieStore (the same storage surface as `--load-cookies`), and manual `Cookie:` headers are stripped (structured cookies are authoritative); `.torrent` URL not accepted (no cookie consumption point on the metadata surface). Accepted after a reversal of the early stance; Motrix baseline |
+| `taiji.setTaskCookies` | Runtime override of the cookie jar of waiting/paused HTTP tasks (gid, cookies[]): whole-set replacement + row persistence (kept across restarts); active/non-HTTP tasks = `Task cookies can only be set on waiting or paused cookie tasks.`. Accepted after a reversal of the early stance; Motrix baseline |
 
 ## BT Task Tracker Dynamic Editing (`taiji.addTracker` / `taiji.removeTracker`)
 

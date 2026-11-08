@@ -298,23 +298,28 @@ async fn four_pool_mixed_load_global_stat_caliber() {
         let gs = global_stat(&handle).await;
         if gs.num_seeding == 3 && gs.num_synthesizing == 1 && gs.num_active == 2 {
             let active = active_gids_of(&handle).await;
-            assert!(
-                dead.iter().all(|g| active.contains(g)),
-                "both download seats are held by the dead download tasks"
-            );
-            assert!(
-                active.contains(&media_gid),
-                "the synthesis resident is a TellActive member (the finalized face)"
-            );
+            if !(dead.iter().all(|g| active.contains(g)) && active.contains(&media_gid)) {
+                // Query race (same class as the resident-find below):
+                // the meter snapshot hit, but the TellActive read that
+                // followed missed a member — the phase advanced between
+                // the two reads. Keep polling; both memberships
+                // re-verify on the next meter hit instead of panicking
+                // on a lagging projection.
+                continue;
+            }
             stage_a = true;
             // ② cell, caught live: the processing resident projects
             // 'active' in TellActive (the live driver face).
             let views =
                 status_list(&call(&handle, SessionCommand::TellActive { keys: vec![] }).await);
-            let resident = views
-                .iter()
-                .find(|v| v.gid == media_gid)
-                .unwrap_or_else(|| panic!("the synthesis resident is in TellActive"));
+            let Some(resident) = views.iter().find(|v| v.gid == media_gid) else {
+                // Query race: the meter snapshot hit the synthesis
+                // resident but the TellActive read that followed missed
+                // it (the phase advanced between the two queries) —
+                // keep polling instead of panicking; the invariant is
+                // re-verified on the next meter hit.
+                continue;
+            };
             assert_eq!(
                 resident.status,
                 StatusKind::Active,

@@ -980,10 +980,13 @@ async fn pause_all_covers_parked_check_pending_members() {
         // the discriminators: the pre-fix parked-face miss would leave
         // the parked members unpaused on full bitmaps, self-activating
         // onto the seed side and never reaching the paused terminal.)
-        assert_eq!(
-            num_active(&handle).await,
-            2,
-            "zero download seats (only the two holders)"
+        // Upper bound, not equality: while the pause wave applies, a
+        // holder transiently leaves the meter (state transition) and
+        // num_active dips — the guard is that NO new download seat is
+        // taken beyond the two holders.
+        assert!(
+            num_active(&handle).await <= 2,
+            "zero download seats beyond the two holders"
         );
         assert!(
             tell_stopped_gids(&handle).await.is_empty(),
@@ -1179,7 +1182,11 @@ async fn unpause_all_clears_parked_check_pending_intent() {
             .iter()
             .filter(|v| gids.contains(&v.gid) && v.status == StatusKind::Waiting)
             .count();
-        if num_active(&handle).await == 2 && !stalled && unpaused == 3 {
+        // <= 2, not == 2: on slow hosts a holder can finish its
+        // verification between polls and leave the meter before this
+        // triple condition is observed — the regression surface is the
+        // stuck-pause residue, not the exact meter reading.
+        if num_active(&handle).await <= 2 && !stalled && unpaused == 3 {
             resumed = true;
             break;
         }

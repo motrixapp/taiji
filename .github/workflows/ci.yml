@@ -40,7 +40,10 @@ jobs:
       # `SKIP(taiji.rpc.live-diff): …` marker for consumers to check.
       # Restore a real reference (build the fork + TAIJI_DIFF_ARIA2C)
       # before removing this.
-      - run: cargo test --workspace --all-targets
+      # --no-fail-fast: surface every failing suite in one run (this
+      # branch's Linux legs were unreachable for its whole history and
+      # the backlog is being worked through; fail-fast hides the tail).
+      - run: cargo test --workspace --all-targets --no-fail-fast
         env:
           TAIJI_DIFF_ALLOW_SKIP: "1"
 

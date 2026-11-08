@@ -86,15 +86,17 @@ fn mandatory_tier_with_one_binary_missing_is_a_hard_error() {
 
 #[test]
 fn all_tiers_absent_is_missing() {
-    // No explicit, no env, no packaged, and a PATH holding no ffmpeg.
+    // No explicit, no env, no packaged; the live PATH decides the
+    // outcome — a PATH hit (dev machines) yields the path source, a
+    // PATH without ffmpeg (the CI runners) yields Missing. Both are
+    // the legitimate per-environment outcome; only an unexpected error
+    // class or source fails. The dedicated PATH test below exercises
+    // search_path_in with a controlled value.
     let request = DiscoveryRequest { explicit_dir: None };
     match discover_with_env(&request, None, None) {
-        // NOTE: the live PATH may still hold ffmpeg on the dev/CI
-        // machine — a Path-tier hit is a legitimate outcome; only the
-        // Missing error is *forbidden* here. The dedicated PATH test
-        // below exercises search_path_in with a controlled value.
         Ok(p) => assert_eq!(p.source.as_str(), "path"),
-        Err(e) => panic!("unexpected missing on a machine with a PATH hit: {e}"),
+        Err(e) if e.code() == "taiji.media.ffmpeg_missing" => {}
+        Err(e) => panic!("unexpected error class: {e}"),
     }
 }
 

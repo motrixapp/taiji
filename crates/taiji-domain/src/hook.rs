@@ -346,6 +346,13 @@ impl HookRunner {
     /// does not depend on `--on-*` option configuration). An empty
     /// command set plus no relay = a pure no-op (the zero-cost contract
     /// holds).
+    ///
+    /// Runtime contract: a hook command present means the reap task is
+    /// spawned onto the **caller's Tokio runtime** (production: the
+    /// session actor's) — calling `fire` outside a runtime context
+    /// with a configured command panics on Linux (the pidfd reaper
+    /// needs a reactor; macOS's kqueue path tolerates the missing
+    /// context, which hides the contract there).
     pub fn fire(&self, ev: HookEvent) -> bool {
         let spawned = self.fire_command(ev);
         if let Some(notify) = &self.notify {
@@ -572,7 +579,11 @@ mod tests {
             let mut order = ORDER.lock().unwrap_or_else(|p| p.into_inner());
             order.push("notify");
         }));
-        let _ = runner.fire(HookEvent::Stop);
+        // Supply the runtime the contract requires (see fire's doc):
+        // bare-call panics on Linux via the pidfd reaper.
+        let _ = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async { runner.fire(HookEvent::Stop) });
         let order = ORDER.lock().unwrap_or_else(|p| p.into_inner());
         assert_eq!(
             order.as_slice(),

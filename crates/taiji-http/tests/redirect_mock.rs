@@ -664,6 +664,21 @@ async fn loopback_initial_redirect_to_other_loopback_port_allowed() {
 /// unreachable link-local target fail fast.
 #[tokio::test]
 async fn loopback_initial_redirect_to_linklocal_literal_allowed() {
+    // Environment guard: cloud CI runners (Azure/GCP) host a LIVE
+    // metadata service on 169.254.169.254 — the "unreachable target"
+    // premise of this test does not hold there and the followed 404
+    // would be misread as a failure. Probe cheaply and skip loudly.
+    if tokio::net::TcpStream::connect("169.254.169.254:80")
+        .await
+        .is_ok()
+    {
+        eprintln!(
+            "SKIP(redirect.linklocal): a live metadata service answers at \
+             169.254.169.254 on this host (cloud runner) — the \
+             unreachable-target premise does not hold"
+        );
+        return;
+    }
     let loc = "http://169.254.169.254/latest/meta-data/".to_string();
     let app = Router::new().route(
         "/start",

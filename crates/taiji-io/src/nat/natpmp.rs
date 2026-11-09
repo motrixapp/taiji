@@ -97,10 +97,10 @@ pub const REQUESTED_LEASE_SECS: u32 = 3600;
 /// far below the grant distribution of legitimate gateways.
 pub const MIN_GRANTED_LIFETIME_SECS: u32 = 60;
 
-/// Short window for the epoch poisoning breaker (local policy, no RFC
-/// anchor): a second regression inside the window does not schedule a new
-/// recreate (§3.7 jitter plus full-round retries are naturally slower than
-/// that rhythm); consecutive regressions reaching
+/// Short window for the epoch poisoning breaker's first tier (local
+/// policy, no RFC anchor): a second regression inside the window does not
+/// schedule a new recreate (§3.7 jitter plus full-round retries are
+/// naturally slower than that rhythm); consecutive regressions reaching
 /// [`EPOCH_POISON_STRIKES`] mean a forged-reply-driven permanent recreate
 /// loop (attack path: one every ~5s) -> disable NAT-PMP. 60s is far above
 /// the rhythm of one legitimate reboot (a single reboot yields a single
@@ -112,6 +112,24 @@ pub const EPOCH_POISON_WINDOW: Duration = Duration::from_secs(60);
 /// (reboot + jittered reconnect) never trips, while sustained forged
 /// replies trip the breaker within a few rounds.
 pub const EPOCH_POISON_STRIKES: u32 = 4;
+
+/// Long window for the epoch poisoning breaker's second tier (local
+/// policy, no RFC anchor): a rate limit behind the short tier. A forger
+/// pacing regressions at least [`EPOCH_POISON_WINDOW`] apart resets the
+/// short count on every strike and would keep a recreate loop alive
+/// forever (one full remap round per regression); this tier counts every
+/// regression of a fixed window opened by its first one (a regression
+/// at/after the window end opens the next window as its first strike), so
+/// such a cadence is held under [`EPOCH_POISON_LONG_STRIKES`] regressions
+/// per window.
+pub const EPOCH_POISON_LONG_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+/// The Nth §3.6 regression within the long window = epoch poisoning
+/// (disable NAT-PMP; local policy, no RFC anchor). A legitimate reboot
+/// yields one regression, so 6 in an hour is already a pathological
+/// gateway; after the trip the IGD backend carries on (`nat.rs`
+/// `observe_pmp_reply`).
+pub const EPOCH_POISON_LONG_STRIKES: u32 = 6;
 
 /// Mapping protocol (RFC 6886 §3.3 opcode 1 = Map UDP, 2 = Map TCP).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -405,23 +423,35 @@ impl EpochTracker {
 /// "every regression => recreate after 0-5s" is undefended against forged
 /// replies: a LAN man-in-the-middle alternating high/low epochs gets a
 /// permanent recreate loop (a full remap round every ~5s). This guard adds
-/// short-window monotonicity bookkeeping: consecutive regressions within
-/// [`EPOCH_POISON_WINDOW`] reaching [`EPOCH_POISON_STRIKES`] => poisoning
-/// (returns true; the caller disables NAT-PMP), terminating the loop.
-/// Sparse regressions (>= a window apart) reset the count — legitimate
-/// occasional gateway reboots are unaffected.
+/// two tiers of regression bookkeeping; either tier filling => poisoning
+/// (returns true; the caller disables NAT-PMP), terminating the loop:
+///
+/// - short tier (monotonicity): consecutive regressions within
+///   [`EPOCH_POISON_WINDOW`] reaching [`EPOCH_POISON_STRIKES`]. Sparse
+///   regressions (>= a window apart) reset this count;
+/// - long tier (rate limit): regressions within one
+///   [`EPOCH_POISON_LONG_WINDOW`] reaching [`EPOCH_POISON_LONG_STRIKES`] —
+///   catches a forger pacing itself just past the short window, which
+///   resets the short count on every strike.
+///
+/// Legitimate occasional gateway reboots (one regression each) fill
+/// neither tier.
 #[derive(Debug, Clone, Default)]
 pub struct EpochPoisonGuard {
     last_regression: Option<Instant>,
     strikes: u32,
+    /// Start of the current long-tier window (`None` = no regression yet).
+    long_window_start: Option<Instant>,
+    /// Regressions in the current long-tier window, its opener included.
+    long_strikes: u32,
     poisoned: bool,
 }
 
 impl EpochPoisonGuard {
     /// Record one §3.6 regression (the instant is injected by the caller —
     /// the pure state machine is table-testable). Returns true = regressions
-    /// filled the short window, epoch poisoning declared (terminal state:
-    /// all later calls return true).
+    /// filled the short or the long window, epoch poisoning declared
+    /// (terminal state: all later calls return true).
     pub fn observe_regression(&mut self, now: Instant) -> bool {
         if self.poisoned {
             return true;
@@ -436,6 +466,22 @@ impl EpochPoisonGuard {
         // strikes = extra regressions after the first one inside the
         // window; full = the EPOCH_POISON_STRIKES-th regression.
         if self.strikes >= EPOCH_POISON_STRIKES - 1 {
+            self.poisoned = true;
+        }
+        // Long tier: a fixed window opened by its first regression; one
+        // at/after the window end rolls it over and counts as the new
+        // window's first strike. Full = the EPOCH_POISON_LONG_STRIKES-th
+        // regression of one window.
+        match self.long_window_start {
+            Some(start) if now.saturating_duration_since(start) < EPOCH_POISON_LONG_WINDOW => {
+                self.long_strikes = self.long_strikes.saturating_add(1);
+            }
+            _ => {
+                self.long_window_start = Some(now);
+                self.long_strikes = 1;
+            }
+        }
+        if self.long_strikes >= EPOCH_POISON_LONG_STRIKES {
             self.poisoned = true;
         }
         self.poisoned

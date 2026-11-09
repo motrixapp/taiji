@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Exclude closed: the post-merge close event once raced the main
+    # push run inside the same concurrency group and cancelled it
+    # (leaving a cancelled X on the merge commit) — and running CI on
+    # an already-merged/closed PR is pure waste anyway.
+    types: [opened, synchronize, reopened]
 
 # Efficiency practices per github/awesome-copilot skills/
 # github-actions-efficiency: cancel the superseded in-flight run on the
@@ -18,7 +23,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Keyed by the branch name on both faces (PRs use head_ref, pushes
+  # use ref_name) so a PR's events and the main push after its merge
+  # never share a group — github.ref (refs/pull/N/merge vs
+  # refs/heads/main) blurred exactly that boundary once.
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:

@@ -423,7 +423,7 @@ impl Default for SeedPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Synthetic readout source (synthetic upload injection for the
     /// tolerance assertions).
@@ -683,6 +683,62 @@ mod tests {
             "must not satisfy immediately after reset"
         );
         assert!(check.started());
+    }
+
+    /// Latch stickiness, deliberate (`checkStarted_`,
+    /// SeedCheckCommand.cc:71-82: set on the first downloadFinished tick,
+    /// never cleared): a phase regression after completion (Finished ->
+    /// Running) neither closes the gate nor re-arms `reset` on the next
+    /// completion — Running ticks keep evaluating and seed-time stays
+    /// anchored at the first completion. Clearing the latch would restart
+    /// seed-time after every regress-and-complete cycle, diverging from
+    /// aria2; pinned against such a "fix".
+    #[test]
+    fn seed_check_latch_is_sticky_across_phase_regression() {
+        /// Probe criterion: counts `reset` calls and returns a steerable
+        /// verdict (shared handles — once boxed into the SeedCheck it is
+        /// read and steered from outside).
+        struct Probe {
+            resets: std::sync::Arc<AtomicU64>,
+            satisfied: std::sync::Arc<AtomicBool>,
+        }
+        impl SeedCriteria for Probe {
+            fn evaluate(&mut self) -> bool {
+                self.satisfied.load(Ordering::SeqCst)
+            }
+            fn reset(&mut self) {
+                self.resets.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let resets = std::sync::Arc::new(AtomicU64::new(0));
+        let satisfied = std::sync::Arc::new(AtomicBool::new(false));
+        let mut check = SeedCheck {
+            started: false,
+            criteria: Some(Box::new(Probe {
+                resets: resets.clone(),
+                satisfied: satisfied.clone(),
+            })),
+        };
+        // Completion: latch set + the single reset (the timing anchor).
+        assert!(!check.tick(DownloadPhase::Finished));
+        assert!(check.started());
+        assert_eq!(resets.load(Ordering::SeqCst), 1);
+        // Phase regresses: the latch stays set ...
+        assert!(!check.tick(DownloadPhase::Running));
+        assert!(check.started(), "latch is sticky across a phase regression");
+        // ... and Running ticks keep evaluating: satisfaction still halts.
+        satisfied.store(true, Ordering::SeqCst);
+        assert!(
+            check.tick(DownloadPhase::Running),
+            "criteria still evaluated after the phase regression"
+        );
+        // Re-completion re-arms nothing: seed-time keeps its first anchor.
+        assert!(check.tick(DownloadPhase::Finished));
+        assert_eq!(
+            resets.load(Ordering::SeqCst),
+            1,
+            "re-completion must not reset the criteria again"
+        );
     }
 
     /// Ratio control exact over a simulated 24h (two-percent tolerance):

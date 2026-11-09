@@ -292,6 +292,10 @@ pub(super) fn load_max_queue_pos(conn: &Connection) -> Result<i64, StoreError> {
     .map_err(StoreError::from)
 }
 
+/// Terminal-state domain (shared by three sites; the 2 values outside
+/// TORRENT_ACTIVE_STATES).
+const TERMINAL_STATES: &[&str] = &["done", "error"];
+
 /// Persisted DownloadResult write face: only terminal rows (done/error)
 /// accepted — letting non-state semantics slip in would pollute the
 /// recovery active set; the write side rejects explicitly (defense).
@@ -299,7 +303,7 @@ pub(super) fn insert_download_result(
     conn: &mut Connection,
     row: &TorrentRow,
 ) -> Result<PersistOutcome, StoreError> {
-    if row.state != "done" && row.state != "error" {
+    if !TERMINAL_STATES.contains(&row.state.as_str()) {
         return Err(StoreError::Internal(format!(
             "download result row must have terminal state (done|error), got '{}'",
             row.state
@@ -307,10 +311,6 @@ pub(super) fn insert_download_result(
     }
     upsert_torrent(conn, row, None)
 }
-
-/// Terminal-state SQL fragment (shared by two sites; the 2 values outside
-/// TORRENT_ACTIVE_STATES).
-const TERMINAL_STATES: &[&str] = &["done", "error"];
 
 /// Purge persisted DownloadResults: all terminal rows deleted (FK cascade
 /// removes dependents).
@@ -338,9 +338,17 @@ pub(super) fn remove_download_result(
     conn: &mut Connection,
     gid: &str,
 ) -> Result<PersistOutcome, StoreError> {
+    let placeholders = TERMINAL_STATES
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql_params: Vec<&str> = std::iter::once(gid)
+        .chain(TERMINAL_STATES.iter().copied())
+        .collect();
     let n = conn.execute(
-        "DELETE FROM torrent WHERE gid = ?1 AND state IN ('done', 'error')",
-        params![gid],
+        &format!("DELETE FROM torrent WHERE gid = ?1 AND state IN ({placeholders})"),
+        rusqlite::params_from_iter(sql_params),
     )?;
     Ok(if n > 0 {
         PersistOutcome::Written

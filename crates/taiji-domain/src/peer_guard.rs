@@ -578,7 +578,7 @@ mod tests {
         // The violation ban takes the same IP: new ban ...
         assert!(ledger.record_violation(a, "viol", now + 120));
         // ... and the stale failure queue is dropped with it.
-        assert!(ledger.failures.get(&a).is_none());
+        assert!(!ledger.failures.contains_key(&a));
         // Past the violation ban's expiry (until = now+120+300): a fresh
         // hash failure counts from 1 instead of tripping the old 2+1
         // history straight into Banned.

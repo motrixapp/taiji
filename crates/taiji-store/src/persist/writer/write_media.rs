@@ -113,19 +113,21 @@ pub(super) fn upsert_media_task(
     if same {
         return Ok(PersistOutcome::SkippedUnchanged);
     }
-    // Terminal-degrade guard (the http_task upsert's discipline): a
-    // non-terminal state never overwrites a terminal row (paused/
-    // error/done). Real race this closes (found in review): the media
-    // pipeline's phase writes are partly detached tasks — a stale
-    // `processing`/`verifying` write landing after the teardown's
-    // `paused` (or after `done`) must not resurrect a live phase.
-    // Leaving a terminal state goes through the explicit faces
-    // (reopen_media_task for error/done; the paused→queued unpause
-    // job) — never the plain upsert.
+    // Guarded-state guard (the http_task upsert's discipline): a
+    // live-phase state never overwrites a guarded row (paused/
+    // error/done — [`MEDIA_TASK_GUARDED_STATES`]; `paused` is not
+    // terminal: restart recovery resumes it, hence it sits in the
+    // active set too). Real race this closes (found in review): the
+    // media pipeline's phase writes are partly detached tasks — a
+    // stale `processing`/`verifying` write landing after the
+    // teardown's `paused` (or after `done`) must not resurrect a
+    // live phase. Leaving a guarded state goes through the explicit
+    // faces (reopen_media_task for error/done; the paused→queued
+    // unpause job) — never the plain upsert.
     if let Some(cur) = existing.as_ref() {
-        let terminal = matches!(cur.state.as_str(), "paused" | "error" | "done");
-        let incoming_terminal = matches!(row.state.as_str(), "paused" | "error" | "done");
-        if terminal && !incoming_terminal {
+        let guarded = MEDIA_TASK_GUARDED_STATES.contains(&cur.state.as_str());
+        let incoming_guarded = MEDIA_TASK_GUARDED_STATES.contains(&row.state.as_str());
+        if guarded && !incoming_guarded {
             return Ok(PersistOutcome::SkippedUnchanged);
         }
     }
@@ -493,6 +495,16 @@ pub const MEDIA_TASK_ACTIVE_STATES: &[&str] = &[
     "paused",
 ];
 
+/// media_task guarded-state domain (the upsert guard's refuse set):
+/// the two terminals plus `paused`. `paused` deliberately sits in
+/// BOTH lists — active because restart recovery resumes it, guarded
+/// because the teardown's `paused` row must survive a late detached
+/// phase write (the name avoids "terminal": a paused task is not
+/// finished, it is parked). Leaving this set goes only through the
+/// explicit faces: [`unpause_media_task`] (paused→queued) /
+/// [`reopen_media_task`] (error|done→resolving).
+pub const MEDIA_TASK_GUARDED_STATES: &[&str] = &["paused", "error", "done"];
+
 /// Upsert one media_format row (row-comparison skip; created_at keeps
 /// its initial value). A dangling FK (no media_task row) = an
 /// explicit error — a format snapshot never exists without its task.
@@ -624,8 +636,8 @@ pub(super) fn load_media_task_gc_refs(
 /// single exit from `paused`): state back to `queued`, the phase
 /// memory cleared, progress retained. Hit = `Written`; missing row /
 /// not-paused = `SkippedUnchanged` (idempotent). Routed through this
-/// explicit job because the upsert's terminal-degrade guard refuses
-/// non-terminal overwrites of `paused`.
+/// explicit job because the upsert's guarded-state guard refuses
+/// live-phase overwrites of `paused`.
 pub(super) fn unpause_media_task(
     conn: &mut Connection,
     gid: &str,
@@ -1188,8 +1200,8 @@ mod tests {
             Some(PersistOutcome::SkippedUnchanged),
             "non-terminal rows are not reopened"
         );
-        // Terminal-degrade guard: a stale live-phase write never
-        // resurrects a terminal row; the explicit unpause job is the
+        // Guarded-state guard: a stale live-phase write never
+        // resurrects a guarded row; the explicit unpause job is the
         // single paused→queued exit.
         {
             let mut c = conn();
@@ -1208,7 +1220,7 @@ mod tests {
             assert_eq!(
                 load_media_task(&c, gid).ok().flatten().map(|r| r.state),
                 Some("paused".into()),
-                "the terminal row survives the stale write"
+                "the guarded row survives the stale write"
             );
             // ...and over `done` likewise.
             let mut done = task_row(gid);

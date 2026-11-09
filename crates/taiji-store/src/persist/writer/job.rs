@@ -382,7 +382,7 @@ pub enum PersistJob {
     },
     /// The paused→queued unpause transition (the reserved unpause
     /// face's single exit from `paused`; routed explicitly because the
-    /// upsert's terminal-degrade guard refuses non-terminal
+    /// upsert's guarded-state guard refuses live-phase
     /// overwrites). Clears the phase memory; progress retained.
     UnpauseMediaTask {
         gid: String,

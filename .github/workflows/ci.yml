@@ -44,8 +44,20 @@ jobs:
       # exact release for reproducibility; bump deliberately.
       - name: Install rqbit (e2e harness dependency)
         run: |
-          curl -sSL -o /usr/local/bin/rqbit \
-            https://github.com/ikatson/rqbit/releases/download/v9.1.0/rqbit-linux-amd64
+          set -euo pipefail
+          # Transient edge flakiness once served an HTML error page here
+          # (which then exploded as a shell syntax error); retry and
+          # verify the ELF magic so a bad download fails loudly at the
+          # install step instead of downstream in the e2e suite.
+          for i in 1 2 3 4 5; do
+            curl -sSL --retry 5 --retry-connrefused \
+              -o /usr/local/bin/rqbit \
+              https://github.com/ikatson/rqbit/releases/download/v9.1.0/rqbit-linux-amd64 \
+              && head -c4 /usr/local/bin/rqbit | od -An -tx1 | grep -q '7f 45 4c 46' && break
+            echo "retry $i: bad download, retrying"; sleep $((i * 5))
+          done
+          head -c4 /usr/local/bin/rqbit | od -An -tx1 | grep -q '7f 45 4c 46' \
+            || { echo "rqbit download kept failing (not an ELF)"; exit 1; }
           chmod +x /usr/local/bin/rqbit
           rqbit --version
       - run: cargo fmt --all -- --check
@@ -106,8 +118,20 @@ jobs:
       # runs download_rpc_e2e here too).
       - name: Install rqbit (e2e harness dependency)
         run: |
-          curl -sSL -o /usr/local/bin/rqbit \
-            https://github.com/ikatson/rqbit/releases/download/v9.1.0/rqbit-linux-amd64
+          set -euo pipefail
+          # Transient edge flakiness once served an HTML error page here
+          # (which then exploded as a shell syntax error); retry and
+          # verify the ELF magic so a bad download fails loudly at the
+          # install step instead of downstream in the e2e suite.
+          for i in 1 2 3 4 5; do
+            curl -sSL --retry 5 --retry-connrefused \
+              -o /usr/local/bin/rqbit \
+              https://github.com/ikatson/rqbit/releases/download/v9.1.0/rqbit-linux-amd64 \
+              && head -c4 /usr/local/bin/rqbit | od -An -tx1 | grep -q '7f 45 4c 46' && break
+            echo "retry $i: bad download, retrying"; sleep $((i * 5))
+          done
+          head -c4 /usr/local/bin/rqbit | od -An -tx1 | grep -q '7f 45 4c 46' \
+            || { echo "rqbit download kept failing (not an ELF)"; exit 1; }
           chmod +x /usr/local/bin/rqbit
           rqbit --version
       - run: cargo clippy -p ${{ matrix.crate }} --no-default-features --all-targets -- -D warnings

@@ -1,6 +1,6 @@
 //! Task face: activation (`activate`: full spawn chain for metainfo /
-//! magnet / URL fetch), teardown dispatch (`handle_ended`: pause requeue to
-//! front / restart / `DownloadResult`), the add/remove/pause/unpause
+//! magnet / URL fetch), teardown dispatch (`handle_ended`: pause
+//! requeue to front / restart / `DownloadResult`), the add/remove/pause/unpause
 //! lifecycle, metadata upgrade (`upgrade_from_fetched` / paused residency),
 //! and identity dedup.
 //!
@@ -11,6 +11,7 @@
 //! Upstream anchor mapping: docs/design/core.md
 
 use super::*;
+use crate::session::queue::RetireOutcome;
 
 impl SessionActor {
     /// Activate a queue item: spawn the engine / magnet full chain /
@@ -1200,8 +1201,16 @@ impl SessionActor {
             self.pump_all().await;
             return;
         }
-        let requeued =
+        let outcome =
             self.retire_and_fire(gid, status, total_len, completed, note.clone(), engine_code);
+        // The unpauseAll-superseded landing rewrites the row face: the
+        // revoked pause must not write 'paused' back — borrow the
+        // restart face (queued row), keeping remove authoritative.
+        let flags = if matches!(outcome, RetireOutcome::RequeuedUnpauseSuperseded) {
+            flags.map(|(_p, rm, _r)| (false, rm, true))
+        } else {
+            flags
+        };
         if !is_http {
             self.persist_after_end(gid, status, note, flags, upgraded)
                 .await;
@@ -1256,8 +1265,13 @@ impl SessionActor {
         // move to checking and spawn the recheck (a remove override = the
         // mark is voided). Placed before pump — a requeued paused item is
         // not picked up by fillup, so dequeuing into checking has no race.
-        self.begin_deferred_recheck(gid, requeued).await;
-        if requeued.is_some() {
+        let requeued_paused = match outcome {
+            RetireOutcome::Requeued { paused } => Some(paused),
+            RetireOutcome::RequeuedUnpauseSuperseded => Some(false),
+            RetireOutcome::Result => None,
+        };
+        self.begin_deferred_recheck(gid, requeued_paused).await;
+        if !matches!(outcome, RetireOutcome::Result) {
             self.persist_queue_renumber().await;
         }
         self.pump_all().await;
@@ -1480,18 +1494,22 @@ impl SessionActor {
         match requeued {
             // Requeued to the front paused: payload retained; the
             // provenance mark routes the unpause back to the seed side.
-            // (Some(false) is unreachable — the seeding record has no
-            // restart face; the arm keeps the shape of the active
-            // domain's dispatch.)
-            Some(true) => {
+            // (Requeued{paused:false} is unreachable — the seeding
+            // record has no restart face; the arm keeps the shape of
+            // the active domain's dispatch.)
+            RetireOutcome::Requeued { paused: true } => {
                 if let Some(h) = &hook {
                     h.fire(HookEvent::Pause);
                 }
                 self.publish(gid, EventKind::Pause);
                 self.seed_parked.insert(gid);
             }
-            Some(false) => {}
-            None => {
+            RetireOutcome::Requeued { paused: false } => {}
+            // The revoked in-flight pause lands unpaused on the waiting
+            // face (no seed_parked mark — the download-side fillup
+            // reactivation is the correct next step).
+            RetireOutcome::RequeuedUnpauseSuperseded => {}
+            RetireOutcome::Result => {
                 if retired_status == StatusKind::Complete {
                     self.metrics.note_task_completed();
                 }
@@ -1504,16 +1522,17 @@ impl SessionActor {
             }
         }
         // Row dispatch through the shared face (remove → delete; pause
-        // → paused row; natural terminal → done/error result row).
-        self.persist_after_end(
-            gid,
-            retired_status,
-            note,
-            flags.map(|(p, r)| (p, r, false)),
-            None,
-        )
-        .await;
-        if requeued.is_some() {
+        // → paused row; natural terminal → done/error result row). A
+        // superseded pause lands the queued state instead (the restart
+        // row face — never resurrect 'paused').
+        let flags = if matches!(requeued, RetireOutcome::RequeuedUnpauseSuperseded) {
+            flags.map(|(_p, r)| (false, r, true))
+        } else {
+            flags.map(|(p, r)| (p, r, false))
+        };
+        self.persist_after_end(gid, retired_status, note, flags, None)
+            .await;
+        if !matches!(requeued, RetireOutcome::Result) {
             self.persist_queue_renumber().await;
         }
         // A seed slot freed (or a requeue rewrote the reserved order):
@@ -1809,7 +1828,7 @@ impl SessionActor {
         completed: u64,
         note: Option<String>,
         error_engine: Option<super::super::view::EngineFailure>,
-    ) -> Option<bool> {
+    ) -> RetireOutcome {
         let hook = self.running.get(&gid).and_then(|t| t.hook.clone());
         let was_active = self.queue.contains_active(gid);
         // Terminal display snapshot (files/bitfield/piece faces/bt dict)
@@ -1836,15 +1855,19 @@ impl SessionActor {
         match requeued {
             // Requeued to the front: payload retained (pause/restart tasks
             // are not final).
-            Some(true) => {
+            RetireOutcome::Requeued { paused: true } => {
                 if let Some(h) = &hook {
                     h.fire(HookEvent::Pause);
                 }
                 // Pause notice (hook first).
                 self.publish(gid, EventKind::Pause);
             }
-            Some(false) => {}
-            None => {
+            RetireOutcome::Requeued { paused: false } => {}
+            // A late teardown whose pause request an unpauseAll already
+            // revoked: land silent and unpaused (the row rewrite is the
+            // caller's flags face — see the call site).
+            RetireOutcome::RequeuedUnpauseSuperseded => {}
+            RetireOutcome::Result => {
                 if was_active {
                     if retired_status == StatusKind::Complete {
                         self.metrics.note_task_completed();

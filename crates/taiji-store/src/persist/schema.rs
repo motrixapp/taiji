@@ -365,7 +365,13 @@ mod tests {
     /// plus the two terminals reconstructs exactly that set (the
     /// header once listed only seven states with a stale
     /// pre-synthesis mapping sentence — this pin keeps the comment
-    /// from drifting from the declarations again). Zero DDL semantic
+    /// from drifting from the declarations again). The upsert
+    /// guard's guarded set
+    /// ([`crate::persist::writer::MEDIA_TASK_GUARDED_STATES`]) is
+    /// pinned alongside: `paused` sits in BOTH lists by design
+    /// (active: restart recovery resumes it; guarded: the teardown's
+    /// row survives stale detached phase writes) — editing either
+    /// list alone fails here. Zero DDL semantic
     /// change: the row comment inside the DDL string may evolve under
     /// the pre-release discipline, the column shape never.
     #[test]
@@ -418,6 +424,48 @@ mod tests {
         );
         // And the active face never claims a terminal.
         assert!(!active.contains(&"error") && !active.contains(&"done"));
+        // Guard-side pin: `paused` deliberately sits in BOTH lists
+        // (active: restart recovery resumes it; guarded: the upsert
+        // guard refuses stale live-phase overwrites of the paused
+        // row), error/done are guarded only, the live-phase states
+        // are active only — either list edited alone fails here.
+        let guarded = crate::persist::writer::MEDIA_TASK_GUARDED_STATES;
+        assert!(
+            guarded.contains(&"paused") && active.contains(&"paused"),
+            "paused must stay in both the active and the guarded set"
+        );
+        for state in ["error", "done"] {
+            assert!(guarded.contains(&state), "{state} must stay guarded");
+            assert!(
+                !active.contains(&state),
+                "{state} is terminal, never active"
+            );
+        }
+        for state in [
+            "queued",
+            "resolving",
+            "downloading",
+            "recording",
+            "processing",
+            "verifying",
+            "finalizing",
+        ] {
+            assert!(active.contains(&state), "{state} must stay active");
+            assert!(
+                !guarded.contains(&state),
+                "{state} is a live phase, never guarded"
+            );
+        }
+        // Neither list may grow a stray state either: deduped union
+        // still reconstructs the full set.
+        let mut union: Vec<&str> = active.to_vec();
+        union.extend_from_slice(guarded);
+        union.sort_unstable();
+        union.dedup();
+        assert_eq!(
+            union, want,
+            "active + guarded (deduped) must stay the full ten-state set"
+        );
     }
 
     #[test]

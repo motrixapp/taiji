@@ -52,9 +52,10 @@ pub use rows::{
     TaskCookieRow, TorrentFileRow, TorrentProgressRow, TorrentRow, TorrentSnapshot, TrackerRow,
 };
 pub use runner::PersistWriter;
-// The media active-state domain (the startup recovery read face's
-// declaration — re-exported for the schema comment-consistency pin).
-pub use write_media::MEDIA_TASK_ACTIVE_STATES;
+// The media state-domain declarations (the startup recovery read
+// face's active set + the upsert guard's guarded set — re-exported
+// for the schema comment-consistency pin).
+pub use write_media::{MEDIA_TASK_ACTIVE_STATES, MEDIA_TASK_GUARDED_STATES};
 // The unified task_cookie faces: the sweep report
 // types ride the public face (the bootstrap alert/log consumers).
 pub use write_cookie::{TaskCookieSweepEntry, TaskCookieSweepReport};

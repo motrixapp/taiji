@@ -1651,3 +1651,123 @@ async fn media_archive_upsert_lookup_clear_lifecycle() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+// ---- media_task upsert guard ----
+
+/// 18-field media_task row fixture (field order mirrors the
+/// write_media.rs read face); state is the caller's axis.
+fn media_task_row(gid: &str, state: &str) -> MediaTaskRow {
+    MediaTaskRow {
+        gid: gid.into(),
+        kind: "hls".into(),
+        manifest_url: "http://x/m.m3u8".into(),
+        state: state.into(),
+        phase_detail_json: None,
+        variant_json: None,
+        selector_json: Some("best".into()),
+        output_name: Some("clip.mp4".into()),
+        bridge_json: None,
+        staging_dir: "/tmp/s".into(),
+        output_path: "/tmp/o".into(),
+        manifest_norm_digest: vec![1, 2, 3],
+        total_done: 0,
+        config_json: "{}".into(),
+        error_code: None,
+        error_msg: None,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+/// The upsert guard across the whole guarded set (paused/error/
+/// done — MEDIA_TASK_GUARDED_STATES): a stale detached live-phase
+/// write landing after the row reached a guarded state is a
+/// `SkippedUnchanged` and the stored row survives, and only the
+/// explicit exits (the paused→queued unpause job, the error/done
+/// reopen face) let the plain upsert write again.
+#[tokio::test]
+async fn media_task_upsert_guard_refuses_stale_phase_overwrite_of_paused() {
+    let path = tmp_db("media-task-guard");
+    let (handle, join) = ok(PersistWriter::spawn(path.clone()).await, "spawn");
+
+    // `paused`: the teardown's row survives a stale `processing`
+    // write (a genuinely different payload — the guard, not the
+    // row-compare, is what skips); the unpause job is the exit.
+    let paused_gid = "80000000000000c1";
+    assert_eq!(
+        ok(
+            handle
+                .upsert_media_task(media_task_row(paused_gid, "paused"))
+                .await,
+            "paused row"
+        ),
+        PersistOutcome::Written
+    );
+    let mut stale = media_task_row(paused_gid, "processing");
+    stale.total_done = 4096;
+    assert_eq!(
+        ok(handle.upsert_media_task(stale).await, "stale over paused"),
+        PersistOutcome::SkippedUnchanged
+    );
+    assert_eq!(
+        ok(handle.load_media_task(paused_gid).await, "load paused").map(|r| r.state),
+        Some("paused".into()),
+        "the paused row survives the stale write"
+    );
+    assert_eq!(
+        ok(handle.unpause_media_task(paused_gid).await, "unpause"),
+        PersistOutcome::Written
+    );
+    assert_eq!(
+        ok(
+            handle
+                .upsert_media_task(media_task_row(paused_gid, "processing"))
+                .await,
+            "write after unpause"
+        ),
+        PersistOutcome::Written
+    );
+
+    // `error`/`done`: same refusal, the reopen face is the exit.
+    for (gid, guarded) in [("80000000000000c2", "error"), ("80000000000000c3", "done")] {
+        let mut row = media_task_row(gid, guarded);
+        if guarded == "error" {
+            row.error_code = Some("taiji.media.staging".into());
+        }
+        assert_eq!(
+            ok(handle.upsert_media_task(row).await, "guarded row"),
+            PersistOutcome::Written,
+            "the {guarded} row lands"
+        );
+        assert_eq!(
+            ok(
+                handle
+                    .upsert_media_task(media_task_row(gid, "verifying"))
+                    .await,
+                "stale over {guarded}"
+            ),
+            PersistOutcome::SkippedUnchanged
+        );
+        assert_eq!(
+            ok(handle.reopen_media_task(gid).await, "reopen"),
+            PersistOutcome::Written,
+            "the {guarded} row reopens"
+        );
+        assert_eq!(
+            ok(
+                handle
+                    .upsert_media_task(media_task_row(gid, "processing"))
+                    .await,
+                "write after reopen"
+            ),
+            PersistOutcome::Written
+        );
+    }
+
+    drop(handle);
+    let _ = ok(
+        tokio::time::timeout(Duration::from_secs(1), join).await,
+        "writer exit",
+    );
+    let _ = std::fs::remove_file(&path);
+}

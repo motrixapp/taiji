@@ -657,7 +657,7 @@ impl PersistHandle {
     }
 
     /// The paused→queued unpause transition (the explicit exit from
-    /// `paused` — the upsert's terminal-degrade guard refuses the
+    /// `paused` — the upsert's guarded-state guard refuses the
     /// plain overwrite).
     pub async fn unpause_media_task(&self, gid: &str) -> Result<PersistOutcome, StoreError> {
         let (tx, rx) = oneshot::channel();

@@ -55,6 +55,23 @@ pub(crate) struct ReservedEntry {
     pub paused: bool,
 }
 
+/// Finalization landing of [`QueueMan::retire_active`] /
+/// [`QueueMan::retire_seeding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetireOutcome {
+    /// Terminal: recorded into the DownloadResult table.
+    Result,
+    /// Requeued to the waiting front with the given paused intent
+    /// (pause -> true; restart -> false).
+    Requeued { paused: bool },
+    /// Requeued **unpaused** because the carried pause request predates
+    /// the latest unpauseAll ([`QueueMan::bump_pause_epoch`]) — the
+    /// late teardown landing must not resurrect an intent the user
+    /// already revoked. The landing side also owes the row rewrite
+    /// ('paused' -> queued-state) the original pause path wrote.
+    RequeuedUnpauseSuperseded,
+}
+
 /// Active-task record (the request-flag projection of an aria2 active
 /// RequestGroup).
 #[derive(Debug, Clone, Default)]
@@ -62,6 +79,12 @@ pub(crate) struct ActiveRecord {
     /// Pause request sent (finalization -> requeue to front paused,
     /// RequestGroupMan.cc).
     pub pause_requested: bool,
+    /// The [`QueueMan::pause_intent_epoch`] at the moment the pause
+    /// request landed. A finalization that observes
+    /// `pause_epoch < pause_intent_epoch` carries a pause intent that a
+    /// later unpauseAll already revoked — the late landing must not
+    /// resurrect it (see [`RetireOutcome::RequeuedUnpauseSuperseded`]).
+    pub pause_epoch: u64,
     /// Remove request sent (finalization -> DownloadResult; halt
     /// clears pause — RequestGroup.cc setHaltRequested internally does
     /// setPauseRequested(false)).
@@ -98,8 +121,11 @@ impl ActiveRecord {
 pub(crate) struct SeedingRecord {
     /// Pause request sent (finalization -> requeue to front paused; the
     /// engine stop is the token cancel, the same pause face as the
+    /// active domain's). `pause_epoch` mirrors [`ActiveRecord`]'s — the
+    /// unpauseAll supersede check is shared.
     /// active domain).
     pub pause_requested: bool,
+    pub pause_epoch: u64,
     /// Remove request sent (finalization -> Removed result; halt clears
     /// pause — the same override order as [`ActiveRecord`]).
     pub remove_requested: bool,
@@ -367,6 +393,10 @@ pub(crate) struct QueueMan {
     results: VecDeque<DownloadResultEntry>,
     max_results: usize,
     num_stopped_total: u64,
+    /// Monotonic generation of "revoke all in-flight pause intents".
+    /// [`ActiveRecord::pause_epoch`]/[`SeedingRecord::pause_epoch`]
+    /// snapshot this at request time; finalization compares.
+    pause_intent_epoch: u64,
 }
 
 impl QueueMan {
@@ -383,7 +413,18 @@ impl QueueMan {
             results: VecDeque::new(),
             max_results: MAX_DOWNLOAD_RESULT,
             num_stopped_total: 0,
+            pause_intent_epoch: 0,
         }
+    }
+
+    /// Bump the pause-intent epoch: every still-in-flight pause request
+    /// (recorded against an older epoch) is hereby revoked — a
+    /// finalization landing after this point requeues the task
+    /// **unpaused** instead of resurrecting the cleared intent. Called
+    /// by the unpauseAll command arm before its three-face sweep; the
+    /// per-task unpause goes through the face-local flag clears instead.
+    pub(crate) fn bump_pause_epoch(&mut self) {
+        self.pause_intent_epoch += 1;
     }
 
     // ---- waiting queue ----
@@ -585,6 +626,7 @@ impl QueueMan {
         match self.active.get_mut(&gid) {
             Some(rec) if !rec.pause_requested && !rec.remove_requested => {
                 rec.pause_requested = true;
+                rec.pause_epoch = self.pause_intent_epoch;
                 true
             }
             _ => false,
@@ -598,16 +640,30 @@ impl QueueMan {
     /// DownloadResult (numStoppedTotal++, table trimmed). Returns the
     /// same as `ActiveRecord::requeue_paused`; the Result path returns
     /// None.
-    pub(crate) fn retire_active(&mut self, gid: Gid, result: DownloadResultEntry) -> Option<bool> {
-        let rec = self.active.remove(&gid)?;
+    pub(crate) fn retire_active(&mut self, gid: Gid, result: DownloadResultEntry) -> RetireOutcome {
+        let Some(rec) = self.active.remove(&gid) else {
+            return RetireOutcome::Result;
+        };
+        // unpauseAll supersede check: the pause request predates the
+        // latest unpauseAll, so the intent it carries was already
+        // revoked — land unpaused (never resurrect the cleared flag).
+        if rec.pause_requested
+            && !rec.remove_requested
+            && !rec.restart_requested
+            && rec.pause_epoch < self.pause_intent_epoch
+        {
+            self.reserved
+                .push_front(ReservedEntry { gid, paused: false });
+            return RetireOutcome::RequeuedUnpauseSuperseded;
+        }
         match rec.requeue_paused() {
             Some(paused) => {
                 self.reserved.push_front(ReservedEntry { gid, paused });
-                Some(paused)
+                RetireOutcome::Requeued { paused }
             }
             None => {
                 self.record_result(result);
-                None
+                RetireOutcome::Result
             }
         }
     }
@@ -857,6 +913,7 @@ impl QueueMan {
             gid,
             SeedingRecord {
                 pause_requested: rec.pause_requested,
+                pause_epoch: rec.pause_epoch,
                 remove_requested: rec.remove_requested,
                 slot_released: false,
             },
@@ -910,6 +967,7 @@ impl QueueMan {
         match self.seeding.get_mut(&gid) {
             Some(rec) if !rec.pause_requested && !rec.remove_requested => {
                 rec.pause_requested = true;
+                rec.pause_epoch = self.pause_intent_epoch;
                 true
             }
             _ => false,
@@ -1174,16 +1232,32 @@ impl QueueMan {
     /// Detach from the seeding registry and dispatch per the record:
     /// pause -> requeue to front paused (Some(true)); otherwise ->
     /// DownloadResult. The seed-domain twin of [`Self::retire_active`].
-    pub(crate) fn retire_seeding(&mut self, gid: Gid, result: DownloadResultEntry) -> Option<bool> {
-        let rec = self.seeding.remove(&gid)?;
+    pub(crate) fn retire_seeding(
+        &mut self,
+        gid: Gid,
+        result: DownloadResultEntry,
+    ) -> RetireOutcome {
+        let Some(rec) = self.seeding.remove(&gid) else {
+            return RetireOutcome::Result;
+        };
+        // The same supersede check as retire_active (the seed-domain
+        // twin; begin_seeding carried the epoch across the transfer).
+        // No restart face on the seeding record (the dispatch below
+        // documents that arm as unreachable).
+        if rec.pause_requested && !rec.remove_requested && rec.pause_epoch < self.pause_intent_epoch
+        {
+            self.reserved
+                .push_front(ReservedEntry { gid, paused: false });
+            return RetireOutcome::RequeuedUnpauseSuperseded;
+        }
         match rec.requeue_paused() {
             Some(paused) => {
                 self.reserved.push_front(ReservedEntry { gid, paused });
-                Some(paused)
+                RetireOutcome::Requeued { paused }
             }
             None => {
                 self.record_result(result);
-                None
+                RetireOutcome::Result
             }
         }
     }
@@ -1373,8 +1447,66 @@ mod tests {
         // No free slots -> no more activations.
         assert!(q.fillup(5).is_empty());
         // Finalize one -> activate one more.
-        assert_eq!(q.retire_active(g(0x8000), done(g(0x8000))), None);
+        assert_eq!(
+            q.retire_active(g(0x8000), done(g(0x8000))),
+            RetireOutcome::Result
+        );
         assert_eq!(q.fillup(5), vec![g(0x8005)]);
+    }
+
+    /// The unpauseAll supersede check (deterministic, queue-level — the
+    /// e2e intermittence that motivated it only reproduced on loaded
+    /// Linux hosts): a pause request recorded against an older
+    /// pause_intent epoch lands **unpaused** after an unpauseAll bump,
+    /// instead of resurrecting the revoked intent. Three independent
+    /// members so no arm inherits another's queue state.
+    #[test]
+    fn unpause_all_supersedes_inflight_pause_landing() {
+        let mut q = QueueMan::new();
+        for i in 1..=3u64 {
+            q.insert_reserved(entry(g(i), false), None);
+        }
+        q.fillup(3);
+
+        // Control: a pause request recorded against the CURRENT epoch
+        // (the bump happened before the request) still lands paused.
+        q.bump_pause_epoch();
+        assert!(q.request_pause(g(1)));
+        assert_eq!(
+            q.retire_active(g(1), done(g(1))),
+            RetireOutcome::Requeued { paused: true }
+        );
+
+        // Superseded: pause, then an unpauseAll epoch bump (the pause
+        // request is now stale), then the late teardown landing.
+        assert!(q.request_pause(g(2)));
+        q.bump_pause_epoch();
+        assert_eq!(
+            q.retire_active(g(2), done(g(2))),
+            RetireOutcome::RequeuedUnpauseSuperseded
+        );
+        let snap = q.reserved_snapshot();
+        let landed = snap
+            .iter()
+            .find(|e| e.gid == g(2))
+            .unwrap_or_else(|| panic!("g2 must land in the reserved queue"));
+        assert_eq!(
+            (landed.gid, landed.paused),
+            (g(2), false),
+            "the late landing must not resurrect the revoked pause intent"
+        );
+
+        // Restart still wins over the supersede (the existing
+        // precedence: an explicit reactivation request is not a pause).
+        assert!(q.request_pause(g(3)));
+        q.bump_pause_epoch();
+        if let Some(rec) = q.active_record_mut(g(3)) {
+            rec.restart_requested = true;
+        }
+        assert_eq!(
+            q.retire_active(g(3), done(g(3))),
+            RetireOutcome::Requeued { paused: false }
+        );
     }
 
     /// Table-driven: paused entries skipped, order preserved (the
@@ -1416,12 +1548,15 @@ mod tests {
         q.insert_reserved(entry(g(3), false), None);
         // pause: set the request + finalize requeue to front paused.
         assert!(q.request_pause(g(1)));
-        assert_eq!(q.retire_active(g(1), done(g(1))), Some(true));
+        assert_eq!(
+            q.retire_active(g(1), done(g(1))),
+            RetireOutcome::Requeued { paused: true }
+        );
         // The front paused entry is skipped (order preserved); later
         // ready entries fill normally (same rule as aria2: pending
         // entries do not block fillup).
         assert_eq!(q.fillup(1), vec![g(2)]);
-        assert_eq!(q.retire_active(g(2), done(g(2))), None);
+        assert_eq!(q.retire_active(g(2), done(g(2))), RetireOutcome::Result);
         assert_eq!(q.reserved_snapshot().len(), 2);
         assert_eq!(
             q.reserved_snapshot()[0].gid,
@@ -1449,7 +1584,7 @@ mod tests {
         }
         assert_eq!(
             q.retire_active(g(1), done(g(1))),
-            Some(false),
+            RetireOutcome::Requeued { paused: false },
             "restart requeues unpaused"
         );
         assert_eq!(
@@ -1476,7 +1611,7 @@ mod tests {
         // Detached finalization: result = Complete (seed-release
         // finalization, not an error); the slot is released.
         let detached = done(g(1));
-        assert_eq!(q.retire_active(g(1), detached), None);
+        assert_eq!(q.retire_active(g(1), detached), RetireOutcome::Result);
         assert_eq!(q.fillup(1), vec![g(2)], "slot released → queue fills");
         assert_eq!(q.num_stopped_total(), 1);
         let stored = q.results().next().unwrap_or_else(|| panic!("result"));
@@ -1504,7 +1639,7 @@ mod tests {
                 e.completed_length = 0;
                 e
             }),
-            None
+            RetireOutcome::Result
         );
         assert_eq!(
             q.results().next().unwrap_or_else(|| panic!("r")).status,
@@ -1529,8 +1664,8 @@ mod tests {
         q.insert_reserved(entry(g(1), false), None);
         q.insert_reserved(entry(g(2), false), None);
         assert_eq!(q.fillup(2), vec![g(1), g(2)]);
-        assert_eq!(q.retire_active(g(1), done(g(1))), None);
-        assert_eq!(q.retire_active(g(2), done(g(2))), None);
+        assert_eq!(q.retire_active(g(1), done(g(1))), RetireOutcome::Result);
+        assert_eq!(q.retire_active(g(2), done(g(2))), RetireOutcome::Result);
         assert_eq!(q.num_stopped_total(), 2);
         assert!(q.remove_result(g(1)));
         assert!(!q.remove_result(g(1)), "second remove must fail");
@@ -1671,7 +1806,7 @@ mod tests {
         q.insert_reserved(entry(g(1), false), None);
         q.insert_reserved(entry(g(2), true), None);
         assert_eq!(q.fillup(1), vec![g(1)]);
-        assert_eq!(q.retire_active(g(1), done(g(1))), None);
+        assert_eq!(q.retire_active(g(1), done(g(1))), RetireOutcome::Result);
         assert_eq!(q.find(g(1)), Some(Location::Result));
         assert_eq!(q.find(g(2)), Some(Location::ReservedPaused));
         assert_eq!(q.find(g(99)), None);
@@ -1890,7 +2025,7 @@ mod tests {
         // Ended-first race shape: retire from active finalizes without
         // the seeding registry ever being entered; a late transfer
         // attempt stays a no-op.
-        assert_eq!(q.retire_active(g(2), done(g(2))), None);
+        assert_eq!(q.retire_active(g(2), done(g(2))), RetireOutcome::Result);
         assert!(!q.begin_seeding(g(2)));
         assert_eq!(q.seeding_len(), 1);
         assert_eq!(q.results().map(|r| r.gid).collect::<Vec<_>>(), vec![g(2)]);
@@ -1922,7 +2057,7 @@ mod tests {
         // (the actor's consume overrides the result to Removed).
         assert_eq!(
             q.retire_seeding(g(1), done(g(1))),
-            None,
+            RetireOutcome::Result,
             "remove does not requeue"
         );
         assert!(q.reserved_snapshot().is_empty());
@@ -1935,7 +2070,10 @@ mod tests {
             Some((true, false)),
             "the pause flag rides the transfer"
         );
-        assert_eq!(q.retire_seeding(g(2), done(g(2))), Some(true));
+        assert_eq!(
+            q.retire_seeding(g(2), done(g(2))),
+            RetireOutcome::Requeued { paused: true }
+        );
         let snap = q.reserved_snapshot();
         assert_eq!(
             (snap[0].gid, snap[0].paused),
@@ -1967,7 +2105,7 @@ mod tests {
         assert_eq!(q.admit_next_seed(2), None);
         // A resident leaves (seed criteria met) -> the front is admitted
         // within the same round (release-then-backfill, no idle tick).
-        assert_eq!(q.retire_seeding(g(1), done(g(1))), None);
+        assert_eq!(q.retire_seeding(g(1), done(g(1))), RetireOutcome::Result);
         assert_eq!(q.admit_next_seed(2), Some(g(3)));
         assert_eq!(q.seeding_len(), 2);
         assert!(q.seed_wait_gids().is_empty());
@@ -2030,7 +2168,10 @@ mod tests {
         );
         // The rechecking resident still finalizes through the registry
         // (pause requeue; the remove override wins as with active).
-        assert_eq!(q.retire_seeding(g(2), done(g(2))), Some(true));
+        assert_eq!(
+            q.retire_seeding(g(2), done(g(2))),
+            RetireOutcome::Requeued { paused: true }
+        );
         assert_eq!(
             (
                 q.reserved_snapshot()[0].gid,
@@ -2120,7 +2261,7 @@ mod tests {
         assert_unique(&q);
         // retire / promote paths (the check admission moves the entry
         // check_pending → checking — still exactly one membership).
-        assert_eq!(q.retire_seeding(g(1), done(g(1))), None);
+        assert_eq!(q.retire_seeding(g(1), done(g(1))), RetireOutcome::Result);
         assert_eq!(q.admit_next_seed(0), Some(g(2)));
         assert_eq!(q.remove_checking(g(5)), Some(false));
         q.insert_reserved(entry(g(5), false), Some(0));

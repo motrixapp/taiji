@@ -184,6 +184,7 @@ impl BanLedger {
                 until,
             },
         );
+        self.failures.remove(&ip);
         true
     }
 
@@ -552,6 +553,39 @@ mod tests {
         assert!(
             ledger.is_banned(a, now).is_none(),
             "expired entry not restored"
+        );
+    }
+
+    /// A violation ban clears any pending failure queue — both ban paths
+    /// share the "counting restarts after a ban" invariant (the
+    /// hash-failure path clears at its own ban; the violation path must
+    /// not leave a stale queue behind to re-ban on the first failure
+    /// after expiry).
+    #[test]
+    fn violation_ban_clears_stale_failure_queue() {
+        let mut ledger = BanLedger::new(fixed(300));
+        let a = ip([192, 0, 2, 11]);
+        let now = 1_000_000;
+        // Two in-window failures (below threshold, the queue non-empty).
+        assert_eq!(
+            ledger.record_hash_failure(a, now),
+            HashFailureDecision::Counted { failures: 1 }
+        );
+        assert_eq!(
+            ledger.record_hash_failure(a, now + 60),
+            HashFailureDecision::Counted { failures: 2 }
+        );
+        // The violation ban takes the same IP: new ban ...
+        assert!(ledger.record_violation(a, "viol", now + 120));
+        // ... and the stale failure queue is dropped with it.
+        assert!(!ledger.failures.contains_key(&a));
+        // Past the violation ban's expiry (until = now+120+300): a fresh
+        // hash failure counts from 1 instead of tripping the old 2+1
+        // history straight into Banned.
+        assert_eq!(
+            ledger.record_hash_failure(a, now + 120 + 301),
+            HashFailureDecision::Counted { failures: 1 },
+            "counting restarts after a violation ban (stale queue cleared)"
         );
     }
 

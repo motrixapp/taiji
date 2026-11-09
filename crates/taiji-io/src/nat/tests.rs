@@ -2044,11 +2044,15 @@ async fn ssdp_stream_single_error_continues() {
     assert_eq!(*seen.lock().unwrap_or_else(|p| p.into_inner()), vec![1, 3]);
 }
 
-/// Epoch poisoning breaker table (pure state machine; the
+/// Epoch poisoning breaker table, short tier (pure state machine; the
 /// [`natpmp::EPOCH_POISON_STRIKES`]-th regression within the short
 /// [`natpmp::EPOCH_POISON_WINDOW`] window = the poisoned terminal state;
 /// sparse regressions reset the count — legitimate occasional reboots are
-/// unaffected).
+/// unaffected). The guard is two-tier: the long tier
+/// ([`natpmp::EPOCH_POISON_LONG_STRIKES`] regressions per
+/// [`natpmp::EPOCH_POISON_LONG_WINDOW`]) has its own tests below; these
+/// sequences never fill it before the short tier trips (the last
+/// regression of the second sequence fills both tiers at once).
 #[test]
 fn epoch_poison_guard_table() {
     // Constant lock-in (local policy; see the constant docs).
@@ -2083,6 +2087,67 @@ fn epoch_poison_guard_table() {
     assert!(
         guard.observe_regression(t0 + Duration::from_secs(243)),
         "4 consecutive within window still trips after reset"
+    );
+}
+
+/// Long tier (rate limit): regressions paced just past the short window
+/// reset the short count on every strike (each gap >= 60s), yet the
+/// [`natpmp::EPOCH_POISON_LONG_STRIKES`]-th regression within one
+/// [`natpmp::EPOCH_POISON_LONG_WINDOW`] still trips the breaker — a slow
+/// forged cadence can no longer keep the recreate loop alive forever.
+#[test]
+fn epoch_poison_guard_slow_cadence_trips_long_window() {
+    // Constant lock-in (local policy; see the constant docs).
+    assert_eq!(natpmp::EPOCH_POISON_LONG_WINDOW, Duration::from_secs(3600));
+    assert_eq!(natpmp::EPOCH_POISON_LONG_STRIKES, 6);
+
+    let t0 = std::time::Instant::now();
+    // 70s apart: every gap exceeds the short window (the short count
+    // resets each time), all inside the first long window.
+    let step = Duration::from_secs(70);
+    let mut guard = natpmp::EpochPoisonGuard::default();
+    for i in 0..5u32 {
+        assert!(
+            !guard.observe_regression(t0 + step * i),
+            "regression at t0 + {i} x 70s stays below the long-tier strike count"
+        );
+    }
+    assert!(
+        guard.observe_regression(t0 + step * 5),
+        "6th regression within the long window (t0 + 350s) = poisoning"
+    );
+    assert!(guard.poisoned());
+    assert!(guard.observe_regression(t0 + step * 6), "terminal state");
+}
+
+/// Long-tier window roll: the window is fixed, opened by its first
+/// regression; a regression at/after its end (the >= boundary) rolls it
+/// over and counts as the new window's first strike — a real gateway's
+/// occasional reboots never accumulate across windows into a trip.
+#[test]
+fn epoch_poison_guard_long_window_rolls() {
+    let t0 = std::time::Instant::now();
+    let step = Duration::from_secs(70);
+    let mut guard = natpmp::EpochPoisonGuard::default();
+    for i in 0..5u32 {
+        assert!(!guard.observe_regression(t0 + step * i));
+    }
+    // The 6th lands on the long-window end (t0 + 1h): the window rolls
+    // instead of filling.
+    let t1 = t0 + natpmp::EPOCH_POISON_LONG_WINDOW;
+    assert!(
+        !guard.observe_regression(t1),
+        "a regression at/after the long-window end rolls the window, no trip"
+    );
+    assert!(!guard.poisoned());
+    // The rolled window counts from that regression (strike 1): four more
+    // stay below the strike count, its own 6th trips.
+    for i in 1..5u32 {
+        assert!(!guard.observe_regression(t1 + step * i));
+    }
+    assert!(
+        guard.observe_regression(t1 + step * 5),
+        "the rolled window fills at its own 6th regression"
     );
 }
 

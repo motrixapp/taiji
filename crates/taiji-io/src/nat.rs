@@ -11,7 +11,8 @@
 //! never reaches the wire on either protocol (NAT-PMP lifetime 0 = delete,
 //! IGD lease 0 = permanent); a success reply with external port 0 fails the
 //! round; a too-small granted lifetime falls back to the requested value;
-//! epoch regressions inside a short window poison NAT-PMP for the session.
+//! epoch regressions filling the short window or the long-window rate limit
+//! poison NAT-PMP for the session.
 //!
 //! Upstream anchor mapping: docs/design/io.md
 
@@ -985,9 +986,10 @@ impl NatActor {
     }
 
     /// Epoch accounting for NAT-PMP replies (§3.6); a regression schedules
-    /// the §3.7 jittered recreate. Regressions filling the short window =
-    /// epoch poisoning -> trip the breaker and disable NAT-PMP (cuts off
-    /// the permanent recreate loop driven by forged replies).
+    /// the §3.7 jittered recreate. Regressions filling the short window or
+    /// the long-window rate limit (`natpmp::EpochPoisonGuard`) = epoch
+    /// poisoning -> trip the breaker and disable NAT-PMP (cuts off the
+    /// permanent recreate loop driven by forged replies).
     fn observe_pmp_reply(&mut self, reply: &Reply) {
         let now = Instant::now();
         if self.epoch.observe(reply.epoch_secs(), now.into()) {

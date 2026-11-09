@@ -837,6 +837,40 @@ mod tests {
         );
     }
 
+    /// Deliberate one-shot latch: a decrease after the first Hold does not
+    /// clear `settled`. The flag is the endpoint of the slow-start duration
+    /// metric — task start to the first steady state, a one-time event
+    /// (`http_task.rs` takes a single sample behind its `slowstart_done`
+    /// guard). Pinned so a later "fix" does not turn it into a resettable
+    /// state flag.
+    #[test]
+    fn settled_survives_decrease() {
+        let window = EVAL_WINDOW;
+        let fx = Fixture::healthy(MIB, 1.0e9);
+        let mut ctrl = AimdController::new(AimdConfig::new(8));
+        let mut clock = Clock::new();
+        prime(&mut ctrl, &mut clock, window);
+        // Grow(2->4) -> Grow(4->8) -> Hold(8) at cap: the first Hold settles.
+        assert_eq!(
+            run_windows(&mut ctrl, &mut clock, &fx, window, 3),
+            vec![
+                AimdDecision::Grow { from: 2, to: 4 },
+                AimdDecision::Grow { from: 4, to: 8 },
+                AimdDecision::Hold { n: 8 },
+            ]
+        );
+        assert!(ctrl.is_settled());
+        // Post-settle congestion (source-level 429): 8 -> floor(8*3/4) = 6.
+        assert_eq!(
+            ctrl.note_congestion(CongestionKind::Throttled, clock.tick(Duration::ZERO)),
+            AimdDecision::Decrease { from: 8, to: 6 }
+        );
+        assert!(
+            ctrl.is_settled(),
+            "a decrease does not clear the one-shot settled latch"
+        );
+    }
+
     /// AimdBook settled face: a single source's first Hold makes
     /// settled_any true; false during the Grow phase (the ledger-level
     /// source of truth for the slowstart_settled snapshot field).

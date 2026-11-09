@@ -261,11 +261,13 @@ Validation and robustness:
   device. Explicit configuration is unaffected.
 - PMP reply hardening: external port 0 in a success reply is rejected; a
   too-small granted lifetime falls back to the requested value (the
-  renewal-cadence poisoning surface); epoch regressions inside a short
-  window trip `natpmp::EpochPoisonGuard`, which disables NAT-PMP once
-  the strikes fill (cutting off forged-reply-driven permanent recreate
-  loops). Opcode/source-address/internal-port attribution checks were
-  already in place.
+  renewal-cadence poisoning surface); epoch regressions trip
+  `natpmp::EpochPoisonGuard`, which disables NAT-PMP once either tier
+  fills — 4 consecutive inside a 60s short window, or 6 inside a 1h long
+  window (a rate limit for forgers pacing just past the short window;
+  local policy, no RFC anchor) — cutting off forged-reply-driven
+  permanent recreate loops. Opcode/source-address/internal-port
+  attribution checks were already in place.
 - `NatHandle::map` tries each protocol independently: a single-protocol
   failure no longer short-circuits, so UDP always enters wanted and
   stays reachable through backoff retries.

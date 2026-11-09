@@ -233,6 +233,7 @@ jobs:
           set -euo pipefail
           files=(dist/*)
           echo "attaching ${#files[@]} artifacts: ${files[*]}"
+          test "${#files[@]}" -ge 7
           if ! gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --draft \
@@ -250,7 +251,9 @@ jobs:
           to codesign + notarize + staple, then publish. Layout +
           SHA256SUMS per packaging/README.md; build determinism per §5."
           fi
+          # Unquoted glob: the shell expands every artifact path —
+          # the previous printf form globbed the bare working dir into
+          # 'dist/dist' and matched nothing.
           gh release upload "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --clobber \
-          $(printf 'dist/%s ' *)
+            --clobber dist/*

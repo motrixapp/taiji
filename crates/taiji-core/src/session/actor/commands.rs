@@ -391,6 +391,19 @@ impl SessionActor {
                 let _ = reply.send(Ok(CommandReply::Accepted));
             }
             C::UnpauseAll => {
+                // Revoke every in-flight pause intent first: the epoch
+                // bump marks all still-undelivered pause requests
+                // (active/seeding teardowns in flight, recorded against
+                // an older epoch) as superseded — their late landing
+                // requeues UNPAUSED instead of resurrecting the revoked
+                // intent (queue::RetireOutcome::RequeuedUnpauseSuperseded;
+                // the landing side also rewrites the row to queued via
+                // the restart face). The old "transient window
+                // self-heals" assumption was wrong: on slow hosts the
+                // teardown lands after this arm finished and the member
+                // stayed paused forever (the CI-caught intermittence —
+                // see the unpause_all e2e regression test).
+                self.queue.bump_pause_epoch();
                 // In-recheck tasks: clear the pause intent (activation
                 // resumes as soon as they return to the queue) — on both
                 // check faces (the parked-face mirror of
@@ -403,12 +416,8 @@ impl SessionActor {
                 // requeue to the paused queue front — is fixed at the
                 // Ended consume regardless of a flag clear, the same
                 // posture as the active face's mid-teardown members
-                // (which this arm never rescued either; aria2's
-                // unpauseAll clears reservedGroups_ only). The window is
-                // transient and self-heals: the member surfaces in the
-                // reserved face within milliseconds, where this sweep —
-                // or a single unpause — reaches it. Clearing the flag
-                // instead would desynchronize the registry from the
+                // (whose rescue is the epoch bump above). Clearing the
+                // flag instead would desynchronize the registry from the
                 // driver's own pause decision (the teardown reads the
                 // media pause flag, not the registry) and finalize the
                 // task into results on a mere unpause-all.

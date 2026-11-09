@@ -11,6 +11,15 @@
 //! Upstream anchor mapping: docs/design/core.md
 
 use super::*;
+use crate::session::queue::RetireOutcome;
+
+fn requeued_paused(outcome: RetireOutcome) -> Option<bool> {
+    match outcome {
+        RetireOutcome::Requeued { paused } => Some(paused),
+        RetireOutcome::RequeuedUnpauseSuperseded => Some(false),
+        RetireOutcome::Result => None,
+    }
+}
 
 impl SessionActor {
     /// Startup bootstrap: PersistWriter ready -> LoadTorrentsAtStartup
@@ -888,8 +897,9 @@ impl SessionActor {
                     // 'checking' persisted -> the restart bootstrap re-admits
                     // into check_pending (the verification itself does
                     // not cross sessions; the intent does).
-                    self.begin_deferred_recheck(gid, requeued).await;
-                    if requeued.is_some() {
+                    self.begin_deferred_recheck(gid, requeued_paused(requeued))
+                        .await;
+                    if !matches!(requeued, RetireOutcome::Result) {
                         self.persist_queue_renumber().await;
                     }
                 }
@@ -931,8 +941,9 @@ impl SessionActor {
             self.persist_after_end(gid, status, None, flags, None).await;
             // The shutdown fallback arm ties in on the same face; see
             // the Ended branch above.
-            self.begin_deferred_recheck(gid, requeued).await;
-            if requeued.is_some() {
+            self.begin_deferred_recheck(gid, requeued_paused(requeued))
+                .await;
+            if !matches!(requeued, RetireOutcome::Result) {
                 self.persist_queue_renumber().await;
             }
         }

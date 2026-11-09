@@ -1014,15 +1014,11 @@ async fn pause_all_covers_parked_check_pending_members() {
 /// side reactivation (dead tracker stays active). Pre-fix t3's intent
 /// survived -> requeue paused left it stuck in the waiting queue.
 ///
-/// **Temporarily ignored — a REAL intermittent bug this test exposes on
-/// the Linux CI host** (never on macOS): after unpauseAll, two parked
-/// check_pending members stayed Paused for the full 90s budget
-/// (timeout diagnostics in the assert below dump the final state).
-/// The UnpauseAll sweep itself is synchronous, so the intent is being
-/// re-established or missed across an interleaved recheck-completion
-/// transition — needs a dedicated Linux debugging session. Un-ignore
-/// when fixed; the test is the guard.
-#[ignore = "real intermittent bug on Linux: unpauseAll leaves parked check_pending members Paused (see the test docblock); un-ignore when fixed"]
+/// Fixed: the intermittence was in-flight pause requests landing late
+/// (teardown completion after the unpauseAll sweep) and resurrecting
+/// the revoked intent — closed by the pause-intent epoch
+/// (queue::RetireOutcome::RequeuedUnpauseSuperseded; the deterministic
+/// queue-level guard is unpause_all_supersedes_inflight_pause_landing).
 #[tokio::test]
 async fn unpause_all_clears_parked_check_pending_intent() {
     let db = tmp_db("p125-unpauseall");

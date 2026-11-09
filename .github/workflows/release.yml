@@ -1,3 +1,20 @@
+# taiji release — build (unsigned) + attach, split from signing.
+#
+# Pipeline shape (aligned with the Motrix / ffmpeg-static pattern):
+#   release.yml: build matrix → single attach job → DRAFT release
+#   sign-macos.yml: human-dispatched, environment-gated macOS
+#   codesign + notarization that replaces the macos assets in place.
+#
+# Artifacts are deliberately UNSIGNED at this stage; macOS signing is a
+# separate privileged workflow (sign-macos.yml) — never in the same job
+# that compiles untrusted source.
+#
+# Efficiency practices per github/awesome-copilot skills/
+# github-actions-efficiency: no cancel-in-progress on a release ref
+# (a tagged build is never wasted mid-flight), job timeouts, least
+# privilege (read at the top; write only on the attach job), actions
+# pinned to 40-char commit SHAs, full matrix breadth kept (all seven
+# platforms are a shipped commitment, not accident).
 name: release
 
 on:
@@ -6,10 +23,15 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build-release:
+  build:
+    name: build (${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
@@ -17,155 +39,218 @@ jobs:
           - platform: macos-arm64
             target: aarch64-apple-darwin
             runs-on: macos-latest
+            bin: taiji
+            archive: tar.gz
             artifact: taiji-sidecar-macos-arm64.tar.gz
           - platform: macos-x64
             target: x86_64-apple-darwin
             runs-on: macos-latest
+            bin: taiji
+            archive: tar.gz
             artifact: taiji-sidecar-macos-x64.tar.gz
           - platform: linux-x64
             target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-22.04
+            bin: taiji
+            archive: tar.gz
             artifact: taiji-sidecar-linux-x64.tar.gz
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            bin: taiji
+            archive: tar.gz
+            artifact: taiji-sidecar-linux-arm64.tar.gz
           - platform: windows-x64
             target: x86_64-pc-windows-msvc
             runs-on: windows-latest
+            bin: taiji.exe
+            archive: zip
             artifact: taiji-sidecar-windows-x64.zip
           - platform: windows-arm64
             target: aarch64-pc-windows-msvc
             runs-on: windows-latest
+            bin: taiji.exe
+            archive: zip
             artifact: taiji-sidecar-windows-arm64.zip
-          - platform: linux-arm64
-            target: aarch64-unknown-linux-gnu
-            runs-on: ubuntu-22.04-arm
-            artifact: taiji-sidecar-linux-arm64.tar.gz
           - platform: android-arm64
             target: aarch64-linux-android
             runs-on: ubuntu-22.04
+            bin: taiji
+            archive: tar.gz
             artifact: taiji-sidecar-android-arm64.tar.gz
 
     runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkgout v4.1.1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.1.1
+        with:
+          persist-credentials: false
 
       # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
       # caused two-way fmt/dead-code drift; upgrades need an explicit commit and
-      # a full pass of the local gate
-      - uses: dtolnay/rust-toolchain@1.98.0
+      # a full pass of the local gate.
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.7.13
         with:
           prefix-key: "v1-rust-${{ matrix.platform }}"
           shared-key: "build-release-${{ matrix.target }}"
 
-      # Android arm64 build is done as a cross build on an ubuntu-22.04
-      # x64 runner. Using android-actions/setup-android@v3 to install
-      # NDK, we cross-compile to target aarch64-linux-android.
-      # Also set CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER etc.
-      # ubuntu-22.04's default JDK is 11, but the Android cmdline-tools
-      # require JDK 17+; install Temurin 17 first.
-      - name: Set up JDK 17 for Android cmdline-tools
+      # Android arm64 cross build on an ubuntu-22.04 x64 host.
+      #
+      # Pinned NDK download (no Java, no sdkmanager): version + sha1 are
+      # lifted verbatim from Google's repository manifest
+      #   https://dl.google.com/android/repository/repository2-3.xml
+      # (remotePackage ndk;30.0.16248370, stable channel, host-os=linux
+      # archive, checksum type=sha1). Upgrades are an explicit commit:
+      # bump NDK_VERSION together with NDK_SHA1, re-read from that
+      # manifest — the pinned-NDK discipline mirrors the pinned
+      # rust-toolchain above.
+      - name: Install pinned Android NDK (no Java)
         if: matrix.platform == 'android-arm64'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Install Android NDK for android-arm64 cross build
-        if: matrix.platform == 'android-arm64'
-        uses: android-actions/setup-android@v3
+        env:
+          NDK_VERSION: r30
+          NDK_SHA1: 5107f898313790e449e87eee2183d9a20602dee9
+        run: |
+          set -euo pipefail
+          url="https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+          curl -sSL --retry 5 --retry-connrefused -o /tmp/ndk.zip "$url"
+          echo "${NDK_SHA1}  /tmp/ndk.zip" | sha1sum -c -
+          sudo unzip -q /tmp/ndk.zip -d /opt
+          ndk_home="/opt/android-ndk-${NDK_VERSION}"
+          test -x "${ndk_home}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          {
+            echo "ANDROID_NDK_HOME=${ndk_home}"
+            echo "ANDROID_NDK_ROOT=${ndk_home}"
+          } >> "$GITHUB_ENV"
 
       # Build determinism policy (packaging/README.md §5): RUSTFLAGS
-      # pinned to remap-path-prefix, and --locked build to freeze deps.
-      # via Cargo.lock. linux-x64 runs on ubuntu-22.04 to promise glibc ≥2.35.
-      # macos-x64 is built as a cross compile on a macOS Apple Silicon (arm64)
-      # runner with target x86_64-apple-darwin. The Apple toolchain supports
-      # cross-compiling cleanly (rust target x86_64-apple-darwin requires no
-      # separate toolchain installation).
+      # pinned to remap-path-prefix and a --locked build (Cargo.lock).
+      # linux legs run on ubuntu-22.04 hosts (glibc >= 2.35 floor);
+      # macos-x64 cross compiles on an Apple-Silicon host; windows-arm64
+      # cross compiles through MSVC.
       - name: Build taiji release
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/taiji
-          # For Android cross build, set CC/AR/RANLIB/LINKER from NDK
-          # (linker uses clang for aarch64-linux-android).
+          # Android cross-compile face (only consulted for the
+          # aarch64-linux-android target; empty elsewhere).
           CC_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
           CXX_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++
           AR_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
           RANLIB_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-          CARGO_TARGET_AARCH64_LINUX_ANDROID_AR: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
 
-      - name: Assemble VERSION.json and SHA256SUMS (layout per packaging/README.md)
+      # Layout per packaging/README.md §1: exactly four items in
+      # taiji-sidecar-<platform>/ — the binary, VERSION.json (version
+      # derived from the tag, never hard-coded), THIRD-PARTY-NOTICES.md
+      # (crate@version summary from Cargo.lock, workspace members
+      # filtered out), SHA256SUMS over the layout (excluding itself).
+      - name: Assemble layout, VERSION.json, THIRD-PARTY-NOTICES.md, SHA256SUMS
         shell: bash
         run: |
-          mkdir -p taiji-sidecar-${{ matrix.platform }}
-          if [[ "${{ matrix.platform }}" == "windows-x64" || "${{ matrix.platform }}" == "windows-arm64" ]]; then
-            cp target/${{ matrix.target }}/release/taiji.exe taiji-sidecar-${{ matrix.platform }}/
-          else
-            cp target/${{ matrix.target }}/release/taiji taiji-sidecar-${{ matrix.platform }}/
-          fi
-          if [[ "${{ matrix.platform }}" == "windows-x64" || "${{ matrix.platform }}" == "windows-arm64" ]]; then
-            exe_name=taiji.exe
-          else
-            exe_name=taiji
-          fi
-          echo '{' >> VERSION.json
-          echo '  "version": "0.1.0",' >> VERSION.json
-          echo '  "version_string": "taiji/0.1.0",' >> VERSION.json
-          echo '  "git_sha": "'"${{ github.sha }}"'",' >> VERSION.json
-          echo '  "git_dirty": false,' >> VERSION.json
-          echo '  "build_time_utc": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'",' >> VERSION.json
-          echo '  "target": "'"${{ matrix.target }}"'",' >> VERSION.json
-          echo '  "platform_layout": "taiji-sidecar-${{ matrix.platform }}",' >> VERSION.json
-          echo '  "rustc": "'"$(rustc --version | head -1)"'",' >> VERSION.json
-          echo '  "profile": "release",' >> VERSION.json
-          echo '  "rustflags": "--remap-path-prefix=/workspace=/taiji",' >> VERSION.json
-          echo '  "cargo_locked": true,' >> VERSION.json
-          echo '  "platform_matrix": ["macos-arm64","macos-x64","linux-arm64","linux-x64","windows-arm64","windows-x64","android-arm64"]' >> VERSION.json
-          echo '}' >> VERSION.json
-          cp VERSION.json taiji-sidecar-${{ matrix.platform }}/
-          cd taiji-sidecar-${{ matrix.platform }}
-          # crate list summary from Cargo.lock (name + version) and license
-          # GPL-2.0-or-later of the taiji source itself. This is a
-          # machine-readable summary; full license text is expanded in
-          # the M5 release process (e.g. via cargo about/cargo deny).
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          dir="taiji-sidecar-${{ matrix.platform }}"
+          mkdir -p "${dir}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "${dir}/"
+          cat > "${dir}/VERSION.json" <<EOF
+          {
+            "version": "${ver}",
+            "version_string": "taiji/${ver}",
+            "git_sha": "${{ github.sha }}",
+            "git_dirty": false,
+            "build_time_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "target": "${{ matrix.target }}",
+            "platform_layout": "${dir}",
+            "rustc": "$(rustc --version | head -1)",
+            "profile": "release",
+            "rustflags": "--remap-path-prefix=<repo>=/taiji",
+            "cargo_locked": true,
+            "platform_matrix": ["macos-arm64","macos-x64","linux-x64","linux-arm64","windows-x64","windows-arm64","android-arm64"]
+          }
+          EOF
           {
             echo "## Third Party Notices"
             echo ""
-            echo "This project is licensed under GPL-2.0-or-later."
-            echo "This distribution includes third-party crates as listed"
-            echo "below (name@version)."
+            echo "taiji is licensed under GPL-2.0-or-later. This"
+            echo "distribution statically links the third-party crates"
+            echo "below (name@version, resolved from the pinned"
+            echo "Cargo.lock). Full per-crate license text is expanded"
+            echo "in the M5 release process (cargo about / cargo deny)."
             echo ""
-            grep -E '^name = |^version = ' ../Cargo.lock | paste -d'@' - - | grep '@' | tail -n 2000
-          } > THIRD-PARTY-NOTICES.md
-          sha256sum ${exe_name} VERSION.json THIRD-PARTY-NOTICES.md > SHA256SUMS
-          cd ..
-          if [[ "${{ matrix.platform }}" == "windows-x64" || "${{ matrix.platform }}" == "windows-arm64" ]]; then
-            7z a ${{ matrix.artifact }} ./taiji-sidecar-${{ matrix.platform }}/*
+            grep -E '^name = |^version = ' Cargo.lock \
+              | paste -d'@' - - \
+              | sed 's/name = //; s/version = //; s/"//g' \
+              | grep -v '^taiji' || true
+          } > "${dir}/THIRD-PARTY-NOTICES.md"
+          (
+            cd "${dir}"
+            # sha256sum exists on all three host images (macOS via
+            # coreutils); the sum manifest covers the layout minus
+            # itself.
+            sha256sum "${{ matrix.bin }}" VERSION.json THIRD-PARTY-NOTICES.md > SHA256SUMS
+          )
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            7z a "${{ matrix.artifact }}" "./${dir}"/*
           else
-            tar -czf ${{ matrix.artifact }} ./taiji-sidecar-${{ matrix.platform }}/*
+            tar -czf "${{ matrix.artifact }}" "./${dir}"/*
           fi
-          sha256sum ${{ matrix.artifact }} >> SHA256SUMS
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      # actions/upload-artifact v4.6.2 — handoff to the attach job is
+      # digest-bound by upload-artifact's own zip manifest.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.platform }}-${{ github.sha }}
+          name: ${{ matrix.platform }}
           path: ${{ matrix.artifact }}
-          retention-days: 90
-      - name: Create release with artifact
-        shell: bash
+          retention-days: 7
+          if-no-files-found: error
+
+  # Single non-matrix job owns the release: no create/create race, one
+  # place with write permission, one set of release notes. Draft on
+  # purpose — a person (or sign-macos.yml) inspects and publishes.
+  attach:
+    name: attach (draft release)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create the draft release and upload every artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --draft \
-            --prerelease \
-            --title "taiji ${{ github.ref_name }}" \
-            --target main \
-            --repo motrixapp/taiji \
-            --notes "taiji ${{ github.ref_name }} release build, aligned with Motrix platform matrix (macos-arm64, macos-x64, linux-x64, windows-x64). Build determinism policy (packaging/README.md §5): build with `--locked` (Cargo.lock) and `RUSTFLAGS=--remap-path-prefix=/workspace=/taiji`. linux-x64 is built on ubuntu-22.04 to promise glibc ≥2.35. windows-x64 artifact is a zip file; macOS/Linux tar.gz." \
-            "${{ matrix.artifact }}#taiji-sidecar-${{ matrix.platform }}" \
-            || true
-          gh release upload "${{ github.ref_name }}" \
-            --repo motrixapp/taiji \
-            "${{ matrix.artifact }}#taiji-sidecar-${{ matrix.platform }}" \
-            || true
+          set -euo pipefail
+          files=(dist/*)
+          echo "attaching ${#files[@]} artifacts: ${files[*]}"
+          if ! gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --draft \
+              --target "${GITHUB_SHA}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "taiji ${GITHUB_REF_NAME}" \
+              --notes "Release build from tag ${GITHUB_REF_NAME}.
+
+          Platform matrix aligned with Motrix: macos-arm64, macos-x64
+          (cross on Apple Silicon), linux-x64 / linux-arm64
+          (ubuntu-22.04, glibc >= 2.35), windows-x64 / windows-arm64
+          (MSVC cross), android-arm64 (pinned NDK cross).
+
+          macOS assets are unsigned at this stage — run sign-macos.yml
+          to codesign + notarize + staple, then publish. Layout +
+          SHA256SUMS per packaging/README.md; build determinism per §5."
+          fi
+          gh release upload "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber \
+          $(printf 'dist/%s ' *)

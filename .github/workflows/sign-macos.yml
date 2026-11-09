@@ -1,0 +1,222 @@
+# taiji macOS signing + notarization — split from the release build on
+# purpose (the Motrix / ffmpeg-static posture): the job that compiles
+# untrusted source never touches signing credentials, and the job that
+# holds credentials never compiles anything.
+#
+# Flow (human-initiated, environment-gated):
+#   1. fetch   (unprivileged) — pull the unsigned macos-arm64/x64
+#      assets from the draft release, verify them against their own
+#      SHA256SUMS, hand them to the sign job as artifacts.
+#   2. sign    (privileged, macos-release-signing environment) —
+#      isolated keychain, hardened-runtime codesign with a secure
+#      timestamp, notarytool notarization, stapler staple + validate,
+#      repack with a fresh SHA256SUMS. No checkout of the repo.
+#   3. replace (write) — clobber the release assets with the signed
+#      ones.
+#
+# Required repository configuration (one-time, by the owner):
+#   - environment "macos-release-signing" with required reviewers
+#   - secrets in that environment:
+#       MAC_CERTS            base64 P12 (Developer ID Application)
+#       MAC_CERTS_PASSWORD   P12 passphrase
+#       API_KEY              App Store Connect notary .p8 (base64)
+#       API_KEY_ID           key id
+#       API_KEY_ISSUER_ID    issuer id
+#   - variable (optional, pinning): EXPECTED_MACOS_TEAM_ID
+name: sign-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'The draft release tag to sign (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sign-macos-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    name: fetch unsigned macos assets
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Guard — canonical repo, dispatch from main only
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "motrixapp/taiji" ]] || { echo "not the canonical repo"; exit 1; }
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]] || { echo "dispatch from main only"; exit 1; }
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+
+      - name: Download the two macos assets and verify against SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p unsigned && cd unsigned
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'taiji-sidecar-macos-*.tar.gz'
+          for t in taiji-sidecar-macos-*.tar.gz; do
+            d="${t%.tar.gz}"
+            tar -xzf "$t"
+            # Integrity binding: the layout's own SHA256SUMS is the
+            # contract the build job wrote — a mismatched download
+            # never reaches the keychain.
+            (cd "${d}" && sha256sum --check --ignore-missing SHA256SUMS)
+            codesig_note=$(cd "${d}" && grep -E '^taiji$|^taiji\.exe$' SHA256SUMS || true)
+            [[ -n "$codesig_note" ]] || { echo "SHA256SUMS does not cover the binary in ${d}"; exit 1; }
+          done
+
+      # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-macos
+          path: unsigned/
+          retention-days: 3
+          if-no-files-found: error
+
+  sign:
+    name: codesign + notarize + staple
+    needs: fetch
+    runs-on: macos-latest
+    timeout-minutes: 30
+    environment: macos-release-signing
+    steps:
+      # Deliberately NO checkout: this job builds nothing from source.
+      - name: Download the unsigned binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
+        with:
+          name: unsigned-macos
+
+      - name: Import the Developer ID certificate into an isolated keychain
+        env:
+          MAC_CERTS: ${{ secrets.MAC_CERTS }}
+          MAC_CERTS_PASSWORD: ${{ secrets.MAC_CERTS_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${MAC_CERTS}" && test -n "${MAC_CERTS_PASSWORD}"
+          # 0600 temp material in a 0700 dir; cleaned in the always step.
+          KC_DIR="$(mktemp -d)"
+          echo "KC_DIR=${KC_DIR}" >> "$GITHUB_ENV"
+          echo "KEYCHAIN=${KC_DIR}/signing.keychain-db" >> "$GITHUB_ENV"
+          printf '%s' "${MAC_CERTS}" | base64 --decode > "${KC_DIR}/certs.p12"
+          chmod 600 "${KC_DIR}/certs.p12"
+          KC_PASS="$(openssl rand -hex 32)"
+          security create-keychain -p "${KC_PASS}" "${KEYCHAIN}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN}"
+          security unlock-keychain -p "${KC_PASS}" "${KEYCHAIN}"
+          security import "${KC_DIR}/certs.p12" -P "${MAC_CERTS_PASSWORD}" \
+            -k "${KEYCHAIN}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "${KC_PASS}" "${KEYCHAIN}"
+          # Temporarily put the isolated keychain in the search list
+          # (original list restored in cleanup).
+          security list-keychains -d user > "${KC_DIR}/original-keychains.txt"
+          security list-keychains -d user -s "${KEYCHAIN}" \
+            $(sed 's/"//g' "${KC_DIR}/original-keychains.txt" | tr '\n' ' ')
+          # Resolve and export the identity for the signing steps.
+          IDENTITY="$(security find-identity -v -p codesigning "${KEYCHAIN}" \
+            | grep 'Developer ID Application' | head -1 \
+            | sed 's/.*"\(.*\)"/\1/')"
+          test -n "${IDENTITY}"
+          echo "IDENTITY=${IDENTITY}" >> "$GITHUB_ENV"
+
+      - name: Pin the certificate's Team ID (optional, when the variable is set)
+        if: vars.EXPECTED_MACOS_TEAM_ID != ''
+        run: |
+          set -euo pipefail
+          team="$(security find-certificate -a -p "${KEYCHAIN}" \
+            | openssl x509 -noout -subject 2>/dev/null | true)"
+          team_id="$(security find-identity -v -p codesigning "${KEYCHAIN}" \
+            | grep -o '([A-Z0-9]\{10\})' | head -1 | tr -d '()')"
+          echo "resolved TeamID: ${team_id:-<none>}; expected: ${EXPECTED_MACOS_TEAM_ID}"
+          test "${team_id}" = "${EXPECTED_MACOS_TEAM_ID}"
+
+      # Hardened runtime + secure timestamp are notarization
+      # prerequisites for a Developer ID binary.
+      - name: codesign (hardened runtime, secure timestamp)
+        run: |
+          set -euo pipefail
+          for d in taiji-sidecar-macos-*; do
+            codesign --force --options runtime --timestamp \
+              --keychain "${KEYCHAIN}" -s "${IDENTITY}" "${d}/taiji"
+            codesign --verify --strict --verbose=2 "${d}/taiji"
+          done
+
+      - name: notarize (notarytool) and staple
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_KEY_ID: ${{ secrets.API_KEY_ID }}
+          API_KEY_ISSUER_ID: ${{ secrets.API_KEY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${API_KEY}" && test -n "${API_KEY_ID}" && test -n "${API_KEY_ISSUER_ID}"
+          key_file="${KC_DIR}/AuthKey_${API_KEY_ID}.p8"
+          printf '%s' "${API_KEY}" | base64 --decode > "${key_file}"
+          chmod 600 "${key_file}"
+          for d in taiji-sidecar-macos-*; do
+            ditto -c -k --keepParent "${d}/taiji" "${d}/taiji.zip"
+            xcrun notarytool submit "${d}/taiji.zip" \
+              --key "${key_file}" --key-id "${API_KEY_ID}" \
+              --issuer "${API_KEY_ISSUER_ID}" --wait
+            xcrun stapler staple "${d}/taiji"
+            xcrun stapler validate "${d}/taiji"
+            rm "${d}/taiji.zip"
+            # Fresh manifest over the signed layout.
+            (cd "${d}" && shasum -a 256 taiji VERSION.json THIRD-PARTY-NOTICES.md > SHA256SUMS)
+            tar -czf "${d}.tar.gz" "./${d}"
+          done
+
+      - name: Clean up keychain and key material
+        if: always()
+        run: |
+          set -u
+          if [ -f "${KC_DIR:-/nonexistent}/original-keychains.txt" ]; then
+            security list-keychains -d user -s \
+              $(sed 's/"//g' "${KC_DIR}/original-keychains.txt" | tr '\n' ' ') || true
+          fi
+          security delete-keychain "${KEYCHAIN:-/nonexistent}" || true
+          rm -rf "${KC_DIR:-/nonexistent}"
+
+      # actions/upload-artifact v4.6.2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() == false
+        with:
+          name: signed-macos
+          path: taiji-sidecar-macos-*.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  replace:
+    name: replace release assets with the signed ones
+    needs: sign
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Download the signed artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.1.8
+        with:
+          name: signed-macos
+
+      - name: Clobber the macos assets on the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            taiji-sidecar-macos-arm64.tar.gz taiji-sidecar-macos-x64.tar.gz
+          echo "signed assets replaced; the release can be published after inspection"

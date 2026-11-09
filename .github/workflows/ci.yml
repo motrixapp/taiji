@@ -5,9 +5,26 @@ on:
     branches: [main]
   pull_request:
 
+# Efficiency practices per github/awesome-copilot skills/
+# github-actions-efficiency: cancel the superseded in-flight run on the
+# same ref (a 25-minute gates pipeline per stale push is pure waste);
+# least privilege at the top (no job here needs write).
+#
+# Deliberately NO path filters: governance tests read docs/*.md
+# (spec_matrix -> docs/spec.md, budget_key_registration ->
+# docs/rpc-api.md), so a docs-only push is a validation-relevant push —
+# narrowing triggers here would hide required validation.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gates:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       # The full debug build of this workspace + the GiB-scale e2e
       # fixtures exceed the runner's stock free space (two consecutive
@@ -53,6 +70,7 @@ jobs:
       matrix:
         os: [macos-26, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
@@ -74,6 +92,7 @@ jobs:
       matrix:
         crate: [taiji-rpc, taiji]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       # Pinned toolchain, aligned with local (2026-10-13): stable rollover once

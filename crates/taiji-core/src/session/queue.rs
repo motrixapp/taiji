@@ -1486,7 +1486,10 @@ mod tests {
             RetireOutcome::RequeuedUnpauseSuperseded
         );
         let snap = q.reserved_snapshot();
-        let landed = snap.iter().find(|e| e.gid == g(2)).unwrap();
+        let landed = snap
+            .iter()
+            .find(|e| e.gid == g(2))
+            .unwrap_or_else(|| panic!("g2 must land in the reserved queue"));
         assert_eq!(
             (landed.gid, landed.paused),
             (g(2), false),

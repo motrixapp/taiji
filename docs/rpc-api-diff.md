@@ -94,9 +94,9 @@ hereafter "the fork"). Governance rules:
   always echoes the accepted value face (empty string = unset) — the
   Motrix-alignment round-trip — so these aria2-name keys are taiji-only at the
   default cross-validation shape: `all-proxy` / `https-proxy` (per-task proxy
-  slots, ; the global face records the value — no global
+  slots; the global face records the value — no global
   proxy-default consume seam), `async-dns` / `enable-async-dns6` (resolver
-  shape no-op value faces, ), `bt-exclude-tracker` (no exclusion face
+  shape no-op value faces), `bt-exclude-tracker` (no exclusion face
   — the value face records the Motrix tracker-manager placeholder), `pause`
   (no global pause template face; the reference has no changeGlobal bit — the
   Motrix completed-task-startup-guard value face), `dht-entry-point`
@@ -229,7 +229,7 @@ hereafter "the fork"). Governance rules:
   zero differences). On the CLI command line, unknown options are **errors** in
   taiji (same as the fork; when the feature is off, `--metalink-*` errors and names
   the feature).
-- **Three-way option classification** (a single source for acceptance stances; four
+- **Option classification** (a single source for acceptance stances; the four
   tables in `taiji-core::session::options`):
   1. `ARIA2_OPTION_NAMES` — accepted aria2 names (name-by-name cross-validation
      against the fork's `prefs.cc`);
@@ -310,7 +310,7 @@ hereafter "the fork"). Governance rules:
 - **`select-file` execution-surface completeness**: for acceptance-surface
   differences see the `select-file` entry above (final ruling: addTorrent /
   addUri(magnet) / changeOption Reserved(Paused); changeOption on Active and non-BT
-  tasks = explicit rejection). This card completes the execution/persistence/
+  tasks = explicit rejection). This entry completes the execution/persistence/
   projection surfaces: (1) http(s) `.torrent` URL tasks of addUri accept
   `select-file` on the same surface (add-surface syntax validation identical to the
   magnet arm; the fetch-upgrade product `TorrentJob.selected_files` is passed
@@ -372,12 +372,12 @@ hereafter "the fork"). Governance rules:
 
 - **Media option family (unified registration, 8 keys → 10 with the
   second batch)**: the first-wired flag family enters the unified
-  registration — `media-variant-policy` (P90) / `media-audio-lang` /
+  registration — `media-variant-policy` / `media-audio-lang` /
   `media-subtitles` / `media-segment-concurrency` /
-  `media-staging-quota-gib` / `media-staging-dir` (P91) /
-  `media-allow-private-key-url` (P92 — since P92 governs both SSRF-line
+  `media-staging-quota-gib` / `media-staging-dir` /
+  `media-allow-private-key-url` (the same gate governs both SSRF-line
   faces: key URIs **and** media-segment/init URLs, the early-draft name
-  carries the widened scope) / `media-ffmpeg-path` (P93) /
+  carries the widened scope) / `media-ffmpeg-path` /
   `media-archive` + `media-info-json` (see the dedicated entry
   below). Accepted + echoed on getGlobalOption/changeGlobalOption (value
   validation through the taiji-media parse faces — an invalid value
@@ -397,8 +397,8 @@ hereafter "the fork"). Governance rules:
   the download archive — the Done close-out records the task's two
   fingerprints into the `media_archive` table (the normalized-URL digest +
   a **URL-free** digest of the fetched manifest's canonical structure —
-  the HLS P90 playlist digests verbatim, on DASH the content form
-  `mpd_content_digest` whose canonical text omits the entry URL the P90
+  the HLS playlist digests verbatim, on DASH the content form
+  `mpd_content_digest` whose canonical text omits the entry URL the
   `mpd_digest` binds; the schema annotation marks the rows' sensitivity
   as a browsing-history equivalent), and the two duplicate checkpoints
   run: ① the URL digest at activation (zero outbound — a hit never even
@@ -433,7 +433,8 @@ hereafter "the fork"). Governance rules:
   state) / synthesis `[1,16]`. Defaults: seeds **16** (two-state note —
   the unlimited default 0 presupposes the  session-level
   connection budget; unmerged at implementation time, the default
-  converges temporarily to 16 and the  card flips it back),
+  converges temporarily to 16 and flips back once the session-level
+  connection budget lands),
   checks 2 (pread+hash IO/CPU overlap conservative value, the
   engine-internal verify pool's layered disk load counted in),
   synthesis 2 (an ffmpeg process is heavy; the layered counterpart of
@@ -483,9 +484,9 @@ hereafter "the fork"). Governance rules:
   (single-counter) active groups; the divergence direction is
   taiji-only-by-design (no four-pool summary extension). Anchor:
   `taiji-core::session::actor::summary` (`emit_summary`).
-- **Registration wording** (the media option family's registration text) is
-  delivered with the card report for the coordination session to file (the
-  P73/P76 precedent); this document carries the diff declaration.
+- **Registration wording**: the media option family's registration text
+  lands through the repository's ordinary change-review process; this
+  document carries the normative diff declaration.
 
 ## 4. Task surface (tellStatus / tell* / getFiles / getUris / getServers / getPeers)
 
@@ -689,7 +690,7 @@ differences all fall under the following entries:
   `torrent_handle::prioritize_files` on the duplicate handle; (4) the Motrix
   frontend has no UX dependency on it (the duplicate-add path goes through explicit
   reselection via changeOption select-file / re-adding). If Motrix later raises an
-  "append download" need, it will be a separate card under `taiji.*` extension
+  "append download" need, it will be a separate change under `taiji.*` extension
   design. Anchor: `taiji-core::session::actor::tasks` (the `identity_is_duplicate`
   explicit error source of add_uri/add_torrent).
 
@@ -828,8 +829,8 @@ differences all fall under the following entries:
 - **Media error codes → aria2 numeric mapping**: the media
   §14 error-code line threads through the numeric face — every
   `taiji.media.*` code maps to 1 (UNKNOWN_ERROR; no aria2 counterpart — the
-  canonical string code rides the message verbatim), including the P91
-  `staging` and P92 `ssrf_blocked`/`key_invalid` annotations and this card's
+  canonical string code rides the message verbatim), including the
+  `staging` and `ssrf_blocked`/`key_invalid` annotations and this entry's
   first wirings `template_unsafe`/`probe_expired`/`not_media`; the one shared
   row `taiji.option.invalid` keeps 28. Anchor: `taiji-rpc::error`
   (`media_numeric_code` + the row-list test).

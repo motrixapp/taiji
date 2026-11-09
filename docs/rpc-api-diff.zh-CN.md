@@ -259,7 +259,7 @@
   `taiji_http::cookies::{CookieJar, CookieStore::seed}`。
 - **`select-file` 执行面完备性**：接受面差异见上方 `select-file` 条目
   （终裁：addTorrent / addUri（magnet） / changeOption Reserved（Paused）；
-  对活动任务与非 BT 任务 changeOption = 显式拒绝）。本卡补全执行/
+  对活动任务与非 BT 任务 changeOption = 显式拒绝）。本条目补全执行/
   持久化/投影三面：（1） addUri 的 http（s） `.torrent` URL 任务在同一面
   接受 `select-file`（添加面语法校验与 magnet 臂相同；抓取升级产物
   `TorrentJob.selected_files` 自同源透传，激活时经 `SetFileSelection`
@@ -306,12 +306,12 @@
   `taiji-core::session::actor::commands`（`get_option`/`task_option_echo`）。
 
 - **媒体选项族（统一注册，8 键 → 第二批后 10 键）**：首批接线的旗标族
-  进入统一注册 —— `media-variant-policy`（P90）/ `media-audio-lang` /
+  进入统一注册 —— `media-variant-policy` / `media-audio-lang` /
   `media-subtitles` / `media-segment-concurrency` /
-  `media-staging-quota-gib` / `media-staging-dir`（P91）/
-  `media-allow-private-key-url`（P92 —— P92 同时治理两条 SSRF 线：键
+  `media-staging-quota-gib` / `media-staging-dir` /
+  `media-allow-private-key-url`（同一道门同时治理两条 SSRF 线：键
   URI **与** media-segment/init URL，早期草案名携带了扩大后的范围）/
-  `media-ffmpeg-path`（P93）/ `media-archive` + `media-info-json`（见
+  `media-ffmpeg-path` / `media-archive` + `media-info-json`（见
   下方专属条目）。getGlobalOption/changeGlobalOption 接受 + 回显（值
   校验走 taiji-media 解析面 —— 全局面上的非法值按
   gatherChangeableGlobalOption 宽容规则忽略，而 addMedia 每任务面为
@@ -325,8 +325,8 @@
 - **媒体产物面（taiji 扩展 —— aria2 无档案/导出对应物）**：
   `media-archive`（默认 `false`）开启下载档案 —— Done 收尾把任务的
   两个指纹记入 `media_archive` 表（规范化 URL 摘要 + 所抓 manifest
-  规范结构的一个**无 URL** 摘要 —— HLS 的 P90 播放清单逐字摘要；DASH
-  上是内容形态 `mpd_content_digest`，其规范文本省略 P90 `mpd_digest`
+  规范结构的一个**无 URL** 摘要 —— HLS 播放清单逐字摘要；DASH
+  上是内容形态 `mpd_content_digest`，其规范文本省略 `mpd_digest`
   所绑定的入口 URL；schema 注记把行的敏感度标注为浏览记录等价物），
   两个去重检查点运行：① 激活时的 URL 摘要（零外发 —— 命中连 manifest
   都不抓取），② Resolving 中的 manifest 摘要（同一内容在切换 CDN/URL/
@@ -351,7 +351,7 @@
   先例；读侧访问器是同域第二道栅）。值域：seeds `[0,4096]`（0 =
   无限制）/ checks `[1,16]`（无无限状态）/ synthesis `[1,16]`。默认值：
   seeds **16**（两态注记 —— 无限制默认 0 以会话级连接预算为前提；实现
-  时尚未合并，默认值暂收敛为 16，由该卡片翻回）、checks 2（pread+hash
+  时尚未合并，默认值暂收敛为 16，待其合入后翻回）、checks 2（pread+hash
   的 IO/CPU 重叠保守值，计入引擎内部 verify 池的分层磁盘负载）、
   synthesis 2（ffmpeg 进程沉重；`media-segment-concurrency` 的分层对应
   物 —— 那个管网络相位，不是本预算）。热重载 = changeGlobalOption
@@ -384,8 +384,8 @@
   键，见下方条目）。aria2 为其（单计数器）活动组打印摘要；分叉方向 =
   taiji 有意独有（不做四池摘要扩展）。锚点：
   `taiji-core::session::actor::summary`（`emit_summary`）。
-- **注册措辞**（媒体选项族的注册文本）随卡片报告交付，由协调会归档
-  （P73/P76 先例）；本文档承载差分声明。
+- **注册措辞**：媒体选项族的注册文本经仓库常规变更评审流程落地；
+  本文档承载规范差分声明。
 
 ## 4. 任务面（tellStatus / tell* / getFiles / getUris / getServers / getPeers）
 
@@ -545,7 +545,7 @@
   （qBittorrent 等）通过对重复 handle 调 `torrent_handle::prioritize_files`
   完成；（4） Motrix 前端对它无 UX 依赖（重复添加路径走 changeOption
   select-file 显式重选 / 重新添加）。若 Motrix 日后提出 "追加下载"
-  需求，将是 `taiji.*` 扩展设计下的单独卡片。锚点：
+  需求，将是 `taiji.*` 扩展设计下的单独变更。锚点：
   `taiji-core::session::actor::tasks`（add_uri/add_torrent 的
   `identity_is_duplicate` 显式错误源）。
 
@@ -656,7 +656,7 @@
 
 - **媒体错误码 → aria2 数字映射**：媒体 §14 错误码线穿透数字面 ——
   每个 `taiji.media.*` 码映射到 1（UNKNOWN_ERROR；无 aria2 对应物 ——
-  规范字符串码逐字搭载消息），包括 P91 `staging` 与 P92
+  规范字符串码逐字搭载消息），包括 `staging` 与
   `ssrf_blocked`/`key_invalid` 注记及本卡首批接线 `template_unsafe`/
   `probe_expired`/`not_media`；唯一共享行 `taiji.option.invalid` 保持
   28。锚点：`taiji-rpc::error`（`media_numeric_code` + 行清单测试）。

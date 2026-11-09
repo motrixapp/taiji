@@ -91,13 +91,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p taiji-sidecar-${{ matrix.platform }}
-          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          if [[ "${{ matrix.platform }}" == "windows-x64" || "${{ matrix.platform }}" == "windows-arm64" ]]; then
             cp target/${{ matrix.target }}/release/taiji.exe taiji-sidecar-${{ matrix.platform }}/
           else
             cp target/${{ matrix.target }}/release/taiji taiji-sidecar-${{ matrix.platform }}/
           fi
-          rustc -vV > /tmp/rustc-vv.txt
-          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          if [[ "${{ matrix.platform }}" == "windows-x64" || "${{ matrix.platform }}" == "windows-arm64" ]]; then
             exe_name=taiji.exe
           else
             exe_name=taiji
@@ -114,13 +113,26 @@ jobs:
           echo '  "profile": "release",' >> VERSION.json
           echo '  "rustflags": "--remap-path-prefix=/workspace=/taiji",' >> VERSION.json
           echo '  "cargo_locked": true,' >> VERSION.json
-          echo '  "platform_matrix": ["macos-arm64","macos-x64","linux-x64","windows-x64"]' >> VERSION.json
+          echo '  "platform_matrix": ["macos-arm64","macos-x64","linux-arm64","linux-x64","windows-arm64","windows-x64","android-arm64"]' >> VERSION.json
           echo '}' >> VERSION.json
           cp VERSION.json taiji-sidecar-${{ matrix.platform }}/
           cd taiji-sidecar-${{ matrix.platform }}
+          # crate list summary from Cargo.lock (name + version) and license
+          # GPL-2.0-or-later of the taiji source itself. This is a
+          # machine-readable summary; full license text is expanded in
+          # the M5 release process (e.g. via cargo about/cargo deny).
+          {
+            echo "## Third Party Notices"
+            echo ""
+            echo "This project is licensed under GPL-2.0-or-later."
+            echo "This distribution includes third-party crates as listed"
+            echo "below (name@version)."
+            echo ""
+            grep -E '^name = |^version = ' ../Cargo.lock | paste -d'@' - - | grep '@' | tail -n 2000
+          } > THIRD-PARTY-NOTICES.md
           sha256sum ${exe_name} VERSION.json THIRD-PARTY-NOTICES.md > SHA256SUMS
           cd ..
-          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+          if [[ "${{ matrix.platform }}" == "windows-x64" || "${{ matrix.platform }}" == "windows-arm64" ]]; then
             7z a ${{ matrix.artifact }} ./taiji-sidecar-${{ matrix.platform }}/*
           else
             tar -czf ${{ matrix.artifact }} ./taiji-sidecar-${{ matrix.platform }}/*

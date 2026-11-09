@@ -63,6 +63,14 @@ jobs:
       # x64 runner. Using android-actions/setup-android@v3 to install
       # NDK, we cross-compile to target aarch64-linux-android.
       # Also set CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER etc.
+      # ubuntu-22.04's default JDK is 11, but the Android cmdline-tools
+      # require JDK 17+; install Temurin 17 first.
+      - name: Set up JDK 17 for Android cmdline-tools
+        if: matrix.platform == 'android-arm64'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - name: Install Android NDK for android-arm64 cross build
         if: matrix.platform == 'android-arm64'
         uses: android-actions/setup-android@v3

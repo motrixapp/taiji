@@ -20,7 +20,7 @@ jobs:
             artifact: taiji-sidecar-macos-arm64.tar.gz
           - platform: macos-x64
             target: x86_64-apple-darwin
-            runs-on: macos-13
+            runs-on: macos-latest
             artifact: taiji-sidecar-macos-x64.tar.gz
           - platform: linux-x64
             target: x86_64-unknown-linux-gnu
@@ -70,6 +70,10 @@ jobs:
       # Build determinism policy (packaging/README.md §5): RUSTFLAGS
       # pinned to remap-path-prefix, and --locked build to freeze deps.
       # via Cargo.lock. linux-x64 runs on ubuntu-22.04 to promise glibc ≥2.35.
+      # macos-x64 is built as a cross compile on a macOS Apple Silicon (arm64)
+      # runner with target x86_64-apple-darwin. The Apple toolchain supports
+      # cross-compiling cleanly (rust target x86_64-apple-darwin requires no
+      # separate toolchain installation).
       - name: Build taiji release
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:

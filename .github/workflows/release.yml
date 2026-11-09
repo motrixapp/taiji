@@ -30,6 +30,18 @@ jobs:
             target: x86_64-pc-windows-msvc
             runs-on: windows-latest
             artifact: taiji-sidecar-windows-x64.zip
+          - platform: windows-arm64
+            target: aarch64-pc-windows-msvc
+            runs-on: windows-latest
+            artifact: taiji-sidecar-windows-arm64.zip
+          - platform: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            runs-on: ubuntu-22.04-arm
+            artifact: taiji-sidecar-linux-arm64.tar.gz
+          - platform: android-arm64
+            target: aarch64-linux-android
+            runs-on: ubuntu-22.04
+            artifact: taiji-sidecar-android-arm64.tar.gz
 
     runs-on: ${{ matrix.runs-on }}
     steps:
@@ -47,6 +59,14 @@ jobs:
           prefix-key: "v1-rust-${{ matrix.platform }}"
           shared-key: "build-release-${{ matrix.target }}"
 
+      # Android arm64 build is done as a cross build on an ubuntu-22.04
+      # x64 runner. Using android-actions/setup-android@v3 to install
+      # NDK, we cross-compile to target aarch64-linux-android.
+      # Also set CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER etc.
+      - name: Install Android NDK for android-arm64 cross build
+        if: matrix.platform == 'android-arm64'
+        uses: android-actions/setup-android@v3
+
       # Build determinism policy (packaging/README.md §5): RUSTFLAGS
       # pinned to remap-path-prefix, and --locked build to freeze deps.
       # via Cargo.lock. linux-x64 runs on ubuntu-22.04 to promise glibc ≥2.35.
@@ -54,6 +74,14 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/taiji
+          # For Android cross build, set CC/AR/RANLIB/LINKER from NDK
+          # (linker uses clang for aarch64-linux-android).
+          CC_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
+          CXX_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++
+          AR_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          RANLIB_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_AR: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
 
       - name: Assemble VERSION.json and SHA256SUMS (layout per packaging/README.md)
         shell: bash

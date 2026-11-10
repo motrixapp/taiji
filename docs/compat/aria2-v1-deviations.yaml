@@ -1,0 +1,445 @@
+# ==============================================================================
+# taiji ↔ aria2 (v1) 偏差台账 / deviations ledger
+#   文件:docs/compat/aria2-v1-deviations.yaml
+#
+# 【用途】
+#   taiji 与 aria2 v1 基线(上游 aria2 1.37.0 及 Motrix fork)之间全部已声明偏差的
+#   权威登记表。每一处 taiji ↔ aria2 行为差异都必须以条目形式在此登记;
+#   未登记的漂移(unregistered drift)一律禁止,一律视为回归。
+#
+# 【消费方式】
+#   - 当前阶段:文档消费 —— 评审 / PR 审查 / 审计对照,人工读取。
+#   - Phase C 起:差分测试(aria2_compat_live_diff.rs 一脉)读取本台账,按条目 id
+#     逐条豁免 —— 只有命中本台账 id 的观测差异才允许通过;台账之外的差异一律红。
+#
+# 【修改规则】
+#   - 新增偏差 = 必须先在本台账登记,并在 PR 里逐条说明(为何是偏差、锚点在哪、
+#     影响面多大);未登记先上线即属禁止的漂移。
+#   - 移除条目同样必须开 PR 并逐条说明(该偏差为何不再成立:已收敛 / 已回退 /
+#     登记有误)。禁止任何静默增删;PR 描述必须能逐条对应到本文件的 diff。
+#
+# 【条目结构】每条固定五字段:
+#   id    稳定标识 —— 差分测试按此豁免;一经差分测试引用即不得改名
+#   kind  known-deviation | taiji-extension | fold | test-gating 四选一
+#   where 主锚点( taiji 侧 path:lines )
+#   what  偏差声明(这处分歧是什么、为何声明)
+#   refs  证据链(源码注释 / aria2 对等源码 / pin 测试 / 审计报告 / 提交号 / 文档锚)
+#   条目按 kind 分组排列:known-deviation → taiji-extension → fold → test-gating。
+#   where 格式:一律单段 `taiji/…:<起>-<止>`(或单行号),全表无多段/逗号缩写。
+#   路径约定(refs 为人工证据链,允许短路径;机器消费只依赖 id/kind/where):
+#     - `taiji/…`                              工作区根(motrix-app)相对路径;
+#     - `docs/…`、`crates/…`                   taiji 仓库根相对路径;
+#     - `<crate>/src/…`(如 taiji-rpc/src/…)   = taiji/crates/<crate>/src/…;
+#     - `aria2-1.37.0/…`                       工作区根的 aria2 参考树(与 taiji/ 平级),
+#                                              aria2 侧裸名(如 RpcMethodImpl.cc)按其 src/ 解析;
+#     - 裸文件名                                按提及处上下文解析(多为该条 where 的文件
+#                                              或其 crate,跨 crate 提及处均带中文限定词),
+#                                              机器不解析 refs;
+#     - `taiji-implicit-state-machines-zh.md`   工作区根审计报告。
+#
+# 【统计快照】2026-11-10 创建,共 46 条:
+#   known-deviation 15 · taiji-extension 27 · fold 2 · test-gating 2
+#   2026-11-10 复核修订:where 收敛单段格式(extension-events,原双锚点逗号缩写);
+#   修正 5 处 refs 悬空路径(taiji/src/… ×4、taiji/tests/… ×1,实际位于
+#   taiji/crates/taiji/… 下,已逐处对行核实引文);known-deviation 组加注 2 条对齐锚
+#   口径。条目数、分组与五字段结构不变。
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# kind: known-deviation(15 条)—— taiji 与 aria2 之间的已声明行为分歧
+#   组内口径注(2026-11-10 复核):其中 2 条(seed-check-sticky-latch、
+#   peer-status-am-choking-live-bool)为对齐锚(alignment pin)——行为与 aria2 一致、
+#   无线上分歧,登记的是"拒绝 taiji 侧自然实现/审计建议"的决策;Phase C 按 id 豁免
+#   预计不会命中它们,属预期(条目上方有加注)。
+# ------------------------------------------------------------------------------
+
+# 加注(2026-11-10 复核):本条为对齐锚(alignment pin)而非现行行为分歧——行为面
+# 与 aria2 一致,pin 测试锁住的正是 aria2 checkStarted_ 语义;登记目的是固化"拒绝
+# taiji 侧自然实现/审计建议"的决策。Phase C 差分豁免按 id 预计不会命中本条,属预期
+# (决策记录);如需另立 kind 须走 PR 修订 kind 枚举,不在台账内自行扩张。
+- id: seed-check-sticky-latch
+  kind: known-deviation
+  where: "taiji/crates/taiji-domain/src/seed.rs:195-207"
+  what: >-
+    SeedCheck 的 started 锁存有意粘滞:首个 Finished tick 置闩并 reset 后,相位回退(Finished→Running)既不清闸也不再 reset,Running tick 继续评估、seed-time 锚定首次完成时刻——刻意保持 aria2 checkStarted_ 语义,拒绝"回退即复位"的自然实现(审计报告 D6 的复位建议被此偏差决策否决)。
+  refs: >-
+    pin 测试 seed.rs:688-742(seed_check_latch_is_sticky_across_phase_regression,注释明确 "Clearing the latch would restart seed-time after every regress-and-complete cycle, diverging from aria2; pinned against such a 'fix'");tick 实现 seed.rs:195-207;对等源码 aria2-1.37.0/src/SeedCheckCommand.cc:71-82(checkStarted_ 首个 downloadFinished tick 置位,永不回清);审计报告 taiji-implicit-state-machines-zh.md:2308-2321(D6 建议回退复位)与 :307(高危#12);该 pin 测试由提交 59dae99d(#8)加入(git log -S 验证)
+
+# 加注(2026-11-10 复核):本条为对齐锚(alignment pin)而非现行行为分歧——live-bool
+# 读法对齐 aria2 语义,回归测试锁的是"不读簿记 Option"这一决策本身。Phase C 差分豁免
+# 按 id 预计不会命中本条,属预期(决策记录)。
+- id: peer-status-am-choking-live-bool
+  kind: known-deviation
+  where: "taiji/crates/taiji-engine/src/query.rs:269-272"
+  what: >-
+    peerStatus 的 am_choking 有意读 live 的 am_unchoked 位(!ps.am_unchoked),不读 last_unchoke 簿记 Option——对齐 aria2 live-bool 语义(直读当前 choke 位),re-choke 后残留的 last_unchoke 不得掩盖真实 choke 状态。
+  refs: >-
+    query.rs:269-272 注释 "Live bool (aria2 RpcMethodImpl.cc reads the current am-choking state; a stale last_unchoke after a re-choke must still read true)";回归锚 tests.rs:7730-7788(peer_snapshots_am_choking_reads_unchoke_state,C 行=回归锚点);aria2-1.37.0/src/RpcMethodImpl.cc:774(KEY_AM_CHOKING 直读 peer->amChoking());提交 f5f17ac9(fix/high-risk-implicit-state-machines 分支,标题 "peerStatus am_choking reads the live am_unchoked bit (aria2 live-bool semantics)",git show 验证)及 main 上 squash 合入的 b1f26d08(#9,同名 bullet);审计报告 :201(修前分歧记录:RPC 读 Option、轮次维护 bool)、:2498(建议#4)
+
+- id: task-cookie-rpc-family
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:37"
+  what: >-
+    fork 专属任务级 cookie 方法对 addUriWithCookies/setTaskCookies 以 Motrix 为基线接受,但承诺为 taiji.* 规范名单(上游 aria2 无此面;compat 面不投影 aria2.* 别名,同名调用落 No such method);setTaskCookies 的 require-task-cookies 偏好位门槛被放宽(本侧 HTTP 任务恒带存储),声明为差异。
+  refs: >-
+    docs/rpc-api-diff.md §1:37(2026-10-04 用户反转决策与差分锚);methods.rs:113-121;解析面 taiji-rpc/src/rpc_cookies.rs(声明锚);fork 侧 RpcMethodFactory.cc 存在此对面(差分测试 :884 注释 "fork-specific task-level cookie RPC surface; absent upstream")
+
+- id: unauth-write-fail-closed
+  kind: known-deviation
+  where: "taiji/crates/taiji-rpc/src/dispatch.rs:359-366"
+  what: >-
+    未设 --rpc-secret 时所有写方法 fail-closed("unauthenticated write requires --rpc-secret"),查询面与 system.list* 不限——aria2 无 secret 时写方法照常执行(仅靠回环监听);声明的安全收紧偏差。
+  refs: >-
+    dispatch.rs:240-259(门禁理由注释:无 secret 时 token 层恒真,回环监听挡不住同机浏览器跨源,per-task hook+任意 dir 可升级为任意路径写)、:359-366;docs/rpc-api-diff.md §1:45(a security enhancement)
+
+- id: rpc-group-conflict-hard-error
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:46"
+  what: >-
+    下载模式(未开 --enable-rpc)收到 RPC 组选项(rpc-listen-port/rpc-secret/rpc-user/rpc-passwd/rpc-aria2-compat)时硬错退出码 2(clap 用法错误同流同码,文案指向 --enable-rpc)——上游 silently 存而不用;收紧性声明。
+  refs: >-
+    docs/rpc-api-diff.md §1:46("Silent no-op removed (a tightening declaration)";锚 = taiji::main rpc_group_conflict + crates/taiji/tests/download_rpc_e2e.rs conflict arms)
+
+- id: getversion-face
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:49-60"
+  what: >-
+    getVersion 差异面:version 带 taiji/<semver> 前缀(Motrix 引擎识别载体,fork 为裸 1.37.0);enabledFeatures 只列真实能力(诚实面),fork 列表含自建面——两列表不承诺相等,仅承诺每项真实。
+  refs: >-
+    docs/rpc-api-diff.md §2:49-60(两列表不承诺相等、只承诺每项真实);锚 taiji-rpc::dispatch::view ENABLED_FEATURES
+
+- id: bt-tracker-rpc-union
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:72-74"
+  what: >-
+    --bt-tracker 经 changeGlobalOption 全局修改时,fork 静默忽略该键;taiji 以并集累积导入并回显——声明的值面偏差(Motrix 对齐往返)。
+  refs: >-
+    docs/rpc-api-diff.md §3:72-74;CLI 面 taiji/crates/taiji/src/main.rs:635-643(idle 模式注入会话并持久化 global_tracker 表、并集累积跨重启);差分锚 aria2_compat_live_diff.rs:247("bt-tracker (the fork silently ignores")
+
+- id: bt-sequential-download-projection
+  kind: known-deviation
+  where: "taiji/crates/taiji-core/src/session/options.rs:1167-1177"
+  what: >-
+    aria2 同名选项 bt-sequential-download 被接受但语义是调度策略投影(单一权威源 taiji.setSchedulerPolicy,true/false 投影 sequential/rarest_first,双入口回显一致)——aria2 存为独立选项;投影面差异声明。
+  refs: >-
+    options.rs:1167-1177("aria2 stores it as an independent option, taiji keeps the policy as the single truth — projection-face diff declared")
+
+- id: proxy-single-slot
+  kind: known-deviation
+  where: "taiji/crates/taiji/src/http.rs:222-233"
+  what: >-
+    --http-proxy 映射到单一 --all-proxy 传输槽服务所有 scheme——aria2 的槽只覆盖 http:// 流量;本侧无每协议分槽,声明差异;与 --all-proxy 共存显式拒绝(exit 2);socks5(h) 暂不支持亦为声明的传输限制。
+  refs: >-
+    http.rs:222-233(两处 "a declared transport limitation"/"Declared difference";与 --all-proxy 共存=显式拒绝 exit 2 单一代理源)
+
+- id: change-uri-noop-gap
+  kind: known-deviation
+  where: "taiji/crates/taiji-core/src/session/actor/commands.rs:3018-3041"
+  what: >-
+    changeUri 的文件条目 URI 操作为声明的 no-op:本侧无文件条目 URI 账本(BEP19 webseed 不消费),一切形状恒回 [0,0](上游 BT add 得 [0,N]、HTTP 真实删改计数);gid/fileIndex 域检查与 verbatim 报错文案仍逐字对齐上游臂序。
+  refs: >-
+    commands.rs:3018-3041("The file-entry URI operation is a declared no-op … always 0 … this pass stays [0,0]");docs/rpc-api-diff.md §1:47(scheme A 收口、gap declaration、跟踪编辑改走 scheme B 扩展);臂序对照 RpcMethodImpl.cc
+
+- id: add-torrent-initial-verify
+  kind: known-deviation
+  where: "taiji/crates/taiji-core/src/session/actor/tasks.rs:2810-2834"
+  what: >-
+    addTorrent 指向目录中已完整的外部载荷(逐文件长度匹配、未暂停、有会话库)时调度初始全量校验('checking'→量测位图回写进度行→重新入队激活,完整即转做种)——fork 靠既有存储探测/控制文件恢复;sqlite 位图续存面与 fork 控制文件机制结构不同的补齐面,声明差异。
+  refs: >-
+    tasks.rs:2810-2834(含动机:修前外源种子从零重下的实测;暂停接受不触发、部分载荷保持从零、无持久化跳过三条边界);docs/rpc-api-diff.md §1:41("a catch-up surface for a storage-shape difference")
+
+- id: verified-cache-eviction-outcome
+  kind: known-deviation
+  where: "taiji/crates/taiji-store/src/verified.rs:207-211"
+  what: >-
+    VerifiedStore 新增 PieceAbortedUnverified 结果:缓存溢出逐出的 piece 不落盘、整片重置重取——aria2 的逐出会写盘,无此结果;注释明言 intentional divergence。
+  refs: >-
+    verified.rs:207-211("aria2 has no such outcome (its eviction writes to disk) — an intentional divergence");同枚举 :212-218 v2 块级拒绝为 SPEC §4.3 核心收益(BEP52 面)
+
+- id: v6-preferred-candidate-key
+  kind: known-deviation
+  where: "taiji/crates/taiji-engine/src/run/ecology.rs:806-813"
+  what: >-
+    DHT/peer 候选排序键链(compare_peer)插入 v6_preferred 偏好键——上游无此键,声明的有意分歧;v6 不可用时该键恒等中性。
+  refs: >-
+    ecology.rs:803-813("v6 preference key (intentional divergence, see CandidateRow::v6_preferred — absent upstream; constantly equal and neutral when v6 is unavailable)")
+
+- id: getglobaloption-echo-subset
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:64-90"
+  what: >-
+    getGlobalOption 回显面方向差:fork 回显完整全局选项表(~130 键、仅已定义 pref),taiji 回显 Phase A 承诺子集+扩展(~30 键起、后续经审计表扩张);taiji 恒回显接受值面(空串=未设)——fork 对 NO_DEFAULT 键未设置时不回显;不承诺补齐全表回显。
+  refs: >-
+    docs/rpc-api-diff.md §3:64-67(echo-subset direction)、:86-90(accepted-value faces 审计);差分测试注释 aria2_compat_live_diff.rs:209-218(2026-10-28 实测:默认启动回显 132 个已定义键,NO_DEFAULT pref 仅命令行设过才出现)与预算表 :198-235(38 键逐键裁定)
+
+- id: metalink-seam-differences
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:697-836"
+  what: >-
+    addMetalink 差异族(白名单声明面):同 (dir,out) 后到条目跳过+警告、调用方 out/checksum 整体剥除、同文档 magnet/metaurl 去重跳过、BT 计划不消费条目哈希、部分失败回执文案差、taiji.metalink.timeout 600s 预算前缀、版本面与解析边界差、metalink 缝名(aria2 1.37.0 prefs.cc 无名)——多数无确定性 fork 对应面,只锚声明文档防漂移。
+  refs: >-
+    docs/rpc-api-diff.md §6:697-836(含 :721 "Later entries with the same (dir,out) are skipped"、:740 "Caller-supplied out/checksum stripped wholesale"、:820 taiji.metalink.timeout);差分白名单 metalink 族条目 aria2_compat_live_diff.rs:170-195(含声明面条目不 live 驱动的治理说明 :172-174);缝名守护 metalink.rs:1083-1095
+
+# ------------------------------------------------------------------------------
+# kind: taiji-extension(27 条)—— aria2 无对应面的 taiji 扩展(选项/RPC/事件/机制)
+# ------------------------------------------------------------------------------
+
+- id: http-max-per-host-extension
+  kind: taiji-extension
+  where: "taiji/crates/taiji-core/src/session/options.rs:227-241"
+  what: >-
+    taiji 扩展选项 --http-max-per-host(aria2 无此选项):会话级每主机连接上限,默认 64,经 HostCap 初始化;属 startup-only(changeGlobalOption 不收,重启生效),运行时调整走 addUri 同名选项对共享 cap last-set-wins;getGlobalOption 回显生效值防漂移。
+  refs: >-
+    options.rs:227-241 自述 "taiji extension; default taiji_http::perhost::DEFAULT_MAX_PER_HOST = 64";常量见 taiji-http/src/perhost.rs:28;CLI 面 taiji/crates/taiji/src/http.rs:380-392;回显覆盖 options.rs:699-705;差分测试 taiji-only echo 预算表 aria2_compat_live_diff.rs:252-255;docs/rpc-api-diff.md §3:81-85
+
+- id: taiji-extension-methods
+  kind: taiji-extension
+  where: "taiji/crates/taiji-domain/src/methods.rs:81-128"
+  what: >-
+    17 个 taiji.* 扩展 RPC 方法:moveStorage/renameFile/banAddr/unbanAddr/listBans/setSchedulerPolicy/getSchedulerPolicy/setFilePriority/setStreamingPlayhead/getDiskTier/setDiskTier/getCapabilities/createTorrent/addTracker/removeTracker/addUriWithCookies/setTaskCookies——双模式下同名呈现,compat 面不投影 aria2.* 别名。
+  refs: >-
+    方法注册表 taiji-domain/src/methods.rs:81-128;docs/rpc-api-diff.md §1:38(17 names 逐名列举);read_only 判定单源 RPC_METHOD_INFO(dispatch.rs:240-250)
+
+- id: media-line-methods
+  kind: taiji-extension
+  where: "taiji/crates/taiji-domain/src/methods.rs:130-147"
+  what: >-
+    媒体线 5 个扩展方法 taiji.addMedia/probeMedia/getMediaFormats/stopRecording/clearMediaArchive(点分扩展字面量,无裸名/别名形态);probeMedia 返回不透明 token+TTL 10min,全局在途上限 2+按源 1/s 限速。
+  refs: >-
+    methods.rs:130-147(含 addMedia 直下任务零新面规则、probeMedia token+TTL、clearMediaArchive 破坏性整表清理 fail-closed 注释);docs/rpc-api-diff.md §1:40;媒体错误码族投影 error.rs:306-338
+
+- id: force-recheck-rpc
+  kind: taiji-extension
+  where: "taiji/crates/taiji-domain/src/methods.rs:35-40"
+  what: >-
+    裸名 forceRecheck 注册(taiji.forceRecheck/aria2.forceRecheck/裸名三形态同名同义)——上游 aria2 1.37.0 与 fork 均无 recheck RPC,是把 --check-integrity/重添加救济面 RPC 化的能力扩展;校验期行态 'checking'+TellStatus status=active,completedLength 按已验块×piece_length 投影(aria2 校验期无独立状态值,同向声明)。
+  refs: >-
+    methods.rs:35-40("Neither upstream aria2 nor the fork has this name (aria2 1.37.0 has no recheck RPC) — a taiji capability extension");docs/rpc-api-diff.md §1:39;差分矩阵排除 aria2_compat_live_diff.rs:63-73
+
+- id: rpc-namespace-compat-single-face
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/src/dispatch.rs:152-185"
+  what: >-
+    RPC 命名空间机制:规范名 taiji.*,--rpc-aria2-compat(默认 false)开启后才接受 aria2.* 别名、六事件推 aria2.onXxx、listMethods/listNotifications 呈现 aria2 面——任一时刻只有一个 API 面,禁止双发。
+  refs: >-
+    dispatch.rs:152-185(注释 "the `--rpc-aria2-compat` alias mode is gated at this single point — one API face at a time");taiji/crates/taiji/src/main.rs:599-618("Only one API face exists at a time; dual emission is forbidden");docs/rpc-api-diff.md §1:35
+
+- id: bare-name-acceptance
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/src/dispatch.rs:168-185"
+  what: >-
+    裸名(无前缀 addUri)始终被接受并收敛到冻结裸名——aria2/fork 对裸名报 "No such method";taiji 超集:同一方法接受 taiji.X 别名(恒开)、aria2.X 别名(compat 开)与裸名三形态;点分扩展字面量无前缀别名形态。
+  refs: >-
+    dispatch.rs:155-162(解析顺序与"三形态"说明)、:168-185;docs/rpc-api-diff.md §1:44(fork 对裸名报 No such method);差分白名单条目 bare-name-acceptance(aria2_compat_live_diff.rs:147)
+
+- id: getglobalstat-pool-meters
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/src/dispatch/view.rs:85-93"
+  what: >-
+    getGlobalStat 扩展四池在途计量键 numSeeding/numChecking/numSynthesizing(等待 FIFO 不计入)——aria2 无这些键。
+  refs: >-
+    view.rs:85-93("taiji extension keys (aria2's getGlobalStat has no such keys): the four-pool in-flight meters");aria2 对侧字段集 aria2-1.37.0/src/aria2api.cc:511-523(downloadSpeed/uploadSpeed/numActive/numWaiting/numStopped 五字段,numStoppedTotal 在 RPC 层另算)
+
+- id: status-http-subdict
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/src/dispatch/view.rs:465-502"
+  what: >-
+    tellStatus 的 http 子字典(finalUrl/connections/extentsActive/blocksDone/blocksTotal/encoding/renamePending/sources)整体为 taiji 扩展——aria2 status 无此键。
+  refs: >-
+    view.rs:465-474("Difference declaration: this dict as a whole is a taiji extension (aria2 has no such key — the diff is whitelisted)");差分白名单 status-http-subdict(aria2_compat_live_diff.rs:163)与断言 :1253
+
+- id: status-bt-superset-keys
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/src/dispatch/view.rs:504-539"
+  what: >-
+    bittorrent 子字典在 aria2 gatherBitTorrentMetadata 字段全集之上扩展 metaVersion/v2InfoHash/private 三键(BEP52 v2 信息面)。
+  refs: >-
+    view.rs:504-539(gatherBitTorrentMetadata 全集之上 "Fields beyond aria2 (taiji extension convention)");差分白名单 status-bt-superset(aria2_compat_live_diff.rs:165)
+
+- id: utp-transport
+  kind: taiji-extension
+  where: "taiji/crates/taiji-io/src/utp.rs:1-9"
+  what: >-
+    BEP-29 µTP 传输整体实现(20 字节头+扩展链+选择性 ACK 位图、LEDBAT 拥塞控制、连接驱动状态机、监听器)——aria2 无 µTP 实现,协议事实唯一参考是 BEP-29(非上游代码)。
+  refs: >-
+    utp.rs:1-9("aria2 has no uTP implementation, so BEP-29 is the sole reference");udp_demux.rs:41、utp/packet.rs:8 同款说明;选项接入面 options.rs:203-212(--bt-peer-connection-type 四态拨号计划)
+
+- id: nat-pmp-client
+  kind: taiji-extension
+  where: "taiji/crates/taiji-io/src/nat/natpmp.rs:1-4"
+  what: >-
+    RFC 6886 NAT-PMP 客户端(编解码/EpochTracker/事务客户端)——aria2 无 NAT-PMP 实现,无上游代码参考,每个字节布局与超时常量都锚 RFC 条款;另有 --bt-enable-upnp UPnP 供给面(aria2 亦无)。
+  refs: >-
+    natpmp.rs:1-4;UPnP 面对照 options.rs:1187-1194(bt-enable-upnp "extension: NAT provisioning face (aria2 has no UPnP)")
+
+- id: super-seeding-bep16
+  kind: taiji-extension
+  where: "taiji/crates/taiji-domain/src/seed.rs:392-408"
+  what: >-
+    BEP16 超级做种开关(SeedPolicy.super_seeding,默认 off;不做全位图、按片指派传播)——aria2 无此选项;刻意不承诺 RPC/CLI 选项命名,经 config_json 内部面(PersistedTaskConfig.super_seeding)加载并原样过恢复链。
+  refs: >-
+    seed.rs:392-408("aria2 has no such option — **no RPC/CLI option naming commitment**; the switch loads via the config_json internal face (PersistedTaskConfig::super_seeding)");簿记 taiji_bt::superseed::SuperSeedBook、引擎调度 engine.rs 主循环(同注释)
+
+- id: http-scheduling-family
+  kind: taiji-extension
+  where: "taiji/crates/taiji/src/http.rs:160-188"
+  what: >-
+    HTTP 调度扩展选项族 --http-stall-window(默认 15s 停滞窃取检测窗)/--http-scheduler=dynamic|static/--http-block-size(默认 4MiB,任务内不可变)/--http-max-chunk(默认 32MiB)——aria2 均无;非法值经会话侧解析器拒任务(taiji.option.invalid)。
+  refs: >-
+    http.rs:160-188(逐项标注 "taiji extension … aria2 has no such option");docs/rpc-api-diff.md §3:74-76(0.2 扩展键:HTTP scheduling group §8);e2e 测试 taiji/crates/taiji/tests/http_e2e.rs:1041、:1087
+
+- id: http2-tuning-family
+  kind: taiji-extension
+  where: "taiji/crates/taiji/src/http.rs:393-440"
+  what: >-
+    协议/h2 扩展选项族 --http-protocol=auto|h1|h2、--http2-adaptive-window、--http2-stream-window、--http2-connection-window、--http2-max-connections(1..=8)、--http2-keep-alive-interval——aria2 无对应选项。
+  refs: >-
+    http.rs:393-440(逐项 "aria2 has no such option",含 K 语义注记)
+
+- id: ftps-support
+  kind: taiji-extension
+  where: "taiji/crates/taiji/src/http.rs:449-457"
+  what: >-
+    --ftp-ssl=none|auth|implicit FTPS 能力(默认 auth=显式 TLS)——aria2 无 FTPS 能力,声明的能力扩展;另 --ftp-pasv=false(主动模式 PORT)未实现,任务拒绝,亦为声明差异。
+  refs: >-
+    http.rs:449-453("aria2 has no FTPS capability — a declared capability extension");对照 :454-457(--ftp-pasv=false 主动模式未实现的声明差异)
+
+- id: four-pool-budgets
+  kind: taiji-extension
+  where: "taiji/crates/taiji/src/main.rs:1442-1489"
+  what: >-
+    四池预算模型扩展选项 --max-concurrent-seeds(0..=4096,两态默认 16/0)、--max-concurrent-checks(1..=16,默认 2)、--media-synthesis-concurrency(1..=16,默认 2)——aria2 无;收窄不清抢在途,changeGlobalOption 热改。
+  refs: >-
+    main.rs:1442-1489(逐项 "four-pool model; aria2 has no such option",含两态默认注记);docs/rpc-api-diff.md §3:77-78(Four-pool budget trio);投影见 getGlobalStat 扩展键(view.rs:85-93)
+
+- id: media-option-family
+  kind: taiji-extension
+  where: "taiji/crates/taiji-core/src/session/options.rs:242-259"
+  what: >-
+    媒体族会话默认选项统一注册挂全局选项面(--media-variant-policy/--media-audio-lang/--media-subtitles/--media-segment-concurrency/--media-staging-quota-gib 等 10 键)——fork 无任何媒体面;addMedia 任务逐任务合并缺省键,changeGlobalOption 对之后新增任务生效。
+  refs: >-
+    options.rs:242-259;差分预算表 media 族 10 键 aria2_compat_live_diff.rs:260-279(注释 "the fork has no media surface at all");docs/rpc-api-diff.md §3 media 族声明
+
+# 加注(2026-11-10 复核):where 原为双锚点逗号缩写 "events.rs:124,358-359",为保持
+# 全表 where 单段 `taiji/…:起-止` 格式,收敛于 recovery 事件锚 358-359(该两行正是
+# taiji.recoveryStarted/taiji.recoveryCompleted 常量定义);media 事件锚 events.rs:124
+# (MEDIA_PHASE_EVENT_METHOD)完整保留于 refs。
+- id: extension-events
+  kind: taiji-extension
+  where: "taiji/crates/taiji-core/src/session/events.rs:358-359"
+  what: >-
+    扩展事件 taiji.recoveryStarted/taiji.recoveryCompleted(永不切 compat)与 taiji.media.phaseChanged(旁路 compat 六事件表,listNotifications 不增长;媒体告警以 warning 键搭同一面)——aria2 六事件之外的新增推送面。
+  refs: >-
+    events.rs:124(MEDIA_PHASE_EVENT_METHOD)、:358-359(recoveryStarted/Completed);docs/rpc-api-diff.md §1:42(经 taiji.getCapabilities 的 notifications 列声明)
+
+- id: size-suffix-g
+  kind: taiji-extension
+  where: "taiji/crates/taiji-core/src/session/options.rs:2828-2847"
+  what: >-
+    尺寸字面量解析在 aria2 getRealSize(K/M 后缀、base 1024)之上扩展 g/G 后缀——大尺寸选项共享同一解析器的超集,保持单一一致值面。
+  refs: >-
+    options.rs:2828-2847("taiji extension: the g/G suffix (getRealSize only takes K/M …)");aria2 对侧 Util.cc:1827(getRealSize 定义)
+
+- id: bt-tracker-file-import
+  kind: taiji-extension
+  where: "taiji/crates/taiji/src/main.rs:644-653"
+  what: >-
+    --bt-tracker-file(ngosang/trackerslist 文件导入,每行一 URL、#注释/空行跳过、1MiB 上限,缺失/超限告警降级不阻塞启动)——aria2 无此选项,Phase A 承诺面。
+  refs: >-
+    main.rs:644-653("aria2 has no such option");options.rs:1178-1182(DECLARED_OPTION_DIFFS: "extension: ngosang/trackerslist import (no aria2 option; Phase A promised surface)")
+
+- id: declared-extension-option-keys
+  kind: taiji-extension
+  where: "taiji/crates/taiji-core/src/session/options.rs:1178-1209"
+  what: >-
+    选项面声明扩展/改名键族(权威表 DECLARED_OPTION_DIFFS):bt-tracker-file、bt-peer-connection-type、bt-enable-upnp、bt-enable-nat-pmp、max-connection(Motrix UX 别名映射 bt-max-peers)、client-ban-prefixes、bt-metadata-web-sources、http-incomplete-suffix、metalink 缝名(metalink-auto-discover/metalink-force-protocol,aria2 1.37.0 prefs.cc 无此名)、bt-lsd↔bt-enable-lpd 改名对——凡 aria2 无此名的接受键必须落表,镜像测试防漂移。
+  refs: >-
+    options.rs:1178-1209(逐项 "no aria2 counterpart/no aria2 option name");metalink.rs:1083-1095(缝名必须走差表白名单、不得混入参考名清单的镜像断言);docs/rpc-api-diff.md §3:68-76(Phase A 改名对与 0.2 扩展键);:154-155(changeOption 拒收 http-max-per-host 语义)
+
+- id: per-task-dht-webseed-switches
+  kind: taiji-extension
+  where: "taiji/crates/taiji-core/src/session/options.rs:1150-1166"
+  what: >-
+    逐任务扩展开关:--bt-disable-dht 式 per-task DHT 旗标(对齐 libtorrent torrent_flags::disable_dht 能力,aria2 无)与 enable-http-seeding(BEP19 url-list 消耗门控;false=清空 webseed 集、url-list 原件保留可无损重开)——aria2 无此二开关(url-list 恒被使用)。
+  refs: >-
+    options.rs:1150-1166(bt-disable-dht 对齐 libtorrent torrent_flags::disable_dht;enable-http-seeding "aria2 has no such switch (url-list is always used)");恢复链接 tasks.rs:260-264;CLI 面 taiji/crates/taiji/src/main.rs:386-387
+
+- id: http-rename-pending-state
+  kind: taiji-extension
+  where: "taiji/crates/taiji-http/src/finalize.rs:33-41"
+  what: >-
+    HTTP 收尾新增 renamePending 持久挂起态:改名重试 3 次仍败=Done+renamePending(意图已在库,启动重试自愈;异尺寸外来文件不覆盖、留待处理)——aria2 无此状态,其 finalize 在创建期解决冲突。
+  refs: >-
+    finalize.rs:33-41(rename 失败 3 次指数退避后 Done+renamePending、意图已入库、幂等收尾;"aria2 has no such state: its finalize resolves conflicts at creation time");投影 view.rs:485(renamePending 键)
+
+- id: dispatch-reissue-window
+  kind: taiji-extension
+  where: "taiji/crates/taiji-engine/src/dispatch.rs:142-164"
+  what: >-
+    派发面重发窗口常量 DISPATCH_REISSUE_WINDOW(2s 地板)与 REISSUE_WINDOW_CEIL(5s 上限,BH_REISSUE_CEIL_SES 可调)为本地策略值——BEP3/aria2/libtorrent 均无独立"重发窗口"常数(aria2 靠 RequestBook 槽超时驱动),结构性差异。
+  refs: >-
+    dispatch.rs:142-152("BEP 3/aria2 have no counterpart constant — aria2's reissue is driven by the RequestBook slot timeout")与 :153-164(上限注释 "BEP 3/aria2/libtorrent have no 'standalone reissue window' constant")
+
+- id: preemptive-unchoke
+  kind: taiji-extension
+  where: "taiji/crates/taiji-engine/src/choke.rs:276-294"
+  what: >-
+    INTERESTED 上升沿+空槽即抢占 unchoke(libtorrent peer_connection.cpp 语义,省一轮延迟)——aria2 fallback 模式立即返回保持轮次节律(aria2 无此语义),仅 libtorrent 模式生效。
+  refs: >-
+    choke.rs:276-294(实现 :294-302 对 ChokeMode::Aria2 直接 return;"aria2 fallback mode returns immediately (aria2 has no such semantics; the fallback keeps the existing round cadence)")
+
+- id: rpc-batch-subcall-caps
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/src/dispatch/payload.rs:30-45"
+  what: >-
+    RPC 批量/子调用安全上限:MAX_BATCH_ITEMS=1000(10MiB 请求内 ~3.5×10⁶ 空项放大 26 倍的封顶)与 MAX_REQUEST_SUBCALLS=10_000(批内 multicall 不受递归守卫计数,防已认证 CPU/actor 占用 DoS)——aria2 无此上限,生态缺口由本侧收紧。
+  refs: >-
+    payload.rs:30-45(算例与 "aria2 has no such cap, an ecosystem gap this side tightens")
+
+- id: media-error-code-mapping
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/src/error.rs:306-338"
+  what: >-
+    taiji.media.* 错误码族(ffmpeg_missing/not_media/manifest_parse/ssrf_blocked 等 18 行)无 aria2 对应行,数值面全部投影 UNKNOWN_ERROR(1),唯一共享行 taiji.option.invalid(28);字符串码 verbatim 随 message 传递。
+  refs: >-
+    error.rs:306-338("The whole taiji.media.* family: no aria2 counterpart row — the generic execution-error face (1), the error message carries the canonical string code verbatim")
+
+# ------------------------------------------------------------------------------
+# kind: fold(2 条)—— 多相位折叠共用一个状态词(行态域零新增,投影面声明)
+# ------------------------------------------------------------------------------
+
+- id: checking-fold
+  kind: fold
+  where: "taiji/crates/taiji-core/src/session/actor/lifecycle.rs:148-167"
+  what: >-
+    内部校验多相位折叠:待检(check_pending FIFO,预算门控)与在检(in-flight recheck)共用持久行一个 'checking' 状态词——重启时 'checking' 行批量进 check_pending 不串行 await,行态保持 'checking';在检相位线上仍投影 aria2 active 语义(active-semantics face)。
+  refs: >-
+    lifecycle.rs:159-163("The row keeps 'checking' (the state covers pending and in-flight alike — the pre-war precedent)");投影面 view.rs:47-57(Checking:tellWaiting check 段投影 'checking',在检投影 active,"existing value domain, zero extension"——taiji 自身行态域零新增);对照 aria2 状态词表 aria2-1.37.0/src/RpcMethodImpl.cc:89-94(仅 active/waiting/paused/removed/error/complete 六词,无 checking/seeding);lifecycle.rs:267-271(seeding 折叠引用 checking 先例)
+
+- id: seeding-fold
+  kind: fold
+  where: "taiji/crates/taiji-core/src/session/actor/tasks.rs:1309-1311"
+  what: >-
+    种子池多相位折叠:驻留做种(seeding resident,引擎在跑)与等种位(seed_wait FIFO,预算满停车)共用一个 'seeding' 状态词——预算满时优雅停止仍写 'seeding' 行;统一投影后驻留者与等种位线上同报 "seeding"(aria2 线上状态词表仅 6 值,'seeding' 为 taiji 扩展值)。
+  refs: >-
+    tasks.rs:1309-1311("'seeding' covers residence and waiting alike, the 'checking' precedent")与 :1293-1321(on_seeding_started 预算满分支);重启路由 lifecycle.rs:267-287(量测位图决定 seed/download 侧);投影面 view.rs:34-46(Seeding = Extended value,aria2 无此词);aria2 状态词表 RpcMethodImpl.cc:89-94
+
+# ------------------------------------------------------------------------------
+# kind: test-gating(2 条)—— 差分测试自身的豁免/门控治理面
+# ------------------------------------------------------------------------------
+
+- id: diff-test-skip-gating
+  kind: test-gating
+  where: "taiji/crates/taiji-rpc/tests/aria2_compat_live_diff.rs:782-794"
+  what: >-
+    差分测试"无假绿"SKIP 门控:参考 aria2 二进制缺席时测试默认红(零比较的运行绝不能声称差分绿,无门控消费的 SKIP 是后门);仅显式设 TAIJI_DIFF_ALLOW_SKIP=1 才降级为 SKIP 绿,并打印机器可读标记 SKIP(taiji.rpc.live-diff) 到 stderr,CI/发布脚本等降级消费方必须检查该标记。
+  refs: >-
+    模块文档 aria2_compat_live_diff.rs:19-31(Explicit skip policy / no fake green);实现 :514-523(note_skip/allow_skip);主测试 :782-794(find_reference 失败→note_skip→断言 allow_skip,缺省红);治理规则同款表述 docs/rpc-api-diff.md:19-25;参考定位 TAIJI_DIFF_ARIA2C 与默认探测布局 :33-39
+
+- id: diff-whitelist-governance
+  kind: test-gating
+  where: "taiji/crates/taiji-rpc/tests/aria2_compat_live_diff.rs:134-196"
+  what: >-
+    差分测试白名单双向治理:每一处观测差异必须命中 WHITELIST 条目(锚文本在编译期对 docs/rpc-api-diff.md 校验,文档掉锚变红);反向治理=两侧已收敛(无实际差异)的白名单条目也变红,删除条目需 PR;forceRecheck(无 fork 对应面)与 shutdown 族、system.multicall 一起按声明方向排除出参数矩阵;taiji-only echo 键有独立预算表 TAIJI_ONLY_ECHO_AUDIT(live 集与表逐成员相等)。
+  refs: >-
+    aria2_compat_live_diff.rs:12-17(白名单外零差异+反向治理)、:63-73(MATRIX_EXCLUDED,forceRecheck 的排除方向注释)、:118-123(DOC include_str! 编译期嵌入)、:134-196(WHITELIST 锚表)、:198-235(TAIJI_ONLY_ECHO_AUDIT 预算=38 键);docs/rpc-api-diff.md:5-11(治理规则:PR+用户批准、锚点双向完备)

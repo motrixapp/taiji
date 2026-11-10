@@ -7727,6 +7727,79 @@ async fn streaming_dispatch_no_duplicate_when_all_inflight() {
         );
     }
 
+    /// am_choking reads the live unchoke state (`am_unchoked`), not the
+    /// last-unchoke bookkeeping: a peer that was unchoked in an earlier
+    /// round and has since lost its slot keeps a stale `last_unchoke`
+    /// residual and must still read am_choking=true (aria2
+    /// RpcMethodImpl.cc reads the live am-choking bool; the same source
+    /// as tick's telemetry). The choke-mirror gauge
+    /// (`count_peer_gauges`) follows the same rule.
+    #[test]
+    fn peer_snapshots_am_choking_reads_unchoke_state() {
+        use taiji_bt::utp::Transport;
+        let mut face = adv_face(4);
+        let mk_meta = |id: u8| PeerMeta {
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, id)),
+            port: 51417,
+            inbound: false,
+            peer_id: [id; 20],
+            crypto: taiji_bt::mse::CryptoLevel::Plain,
+            transport: Transport::Tcp,
+            up: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            down: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            upload_only: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let t0 = Instant::now();
+        // Three regulator rows: A never unchoked (the BEP3 connect
+        // default), B in the live unchoke set, C yielded its slot in an
+        // earlier round and was re-choked (the stale last_unchoke
+        // residual stays — it is the choke round's sort key, never
+        // cleared).
+        for (cuid, id) in [(31u64, 1u8), (32, 2), (33, 3)] {
+            face.peer_cuids.push(cuid);
+            face.peer_state_row(cuid).meta = Some(mk_meta(id));
+        }
+        {
+            let b = face.peer_state_row(32);
+            b.am_unchoked = true;
+            b.last_unchoke = Some(t0);
+        }
+        {
+            let c = face.peer_state_row(33);
+            c.am_unchoked = false;
+            c.last_unchoke = Some(t0);
+        }
+        let snaps = crate::query::peer_snapshots(std::slice::from_mut(&mut face), false);
+        let by_id = |id: u8| {
+            snaps
+                .iter()
+                .find(|s| s.peer_id == [id; 20])
+                .unwrap_or_else(|| panic!("peer {id} must be in the snapshots"))
+        };
+        // A: never unchoked (both fields idle) -> choked.
+        assert!(by_id(1).am_choking, "never unchoked -> am_choking");
+        // B: in the live unchoke set -> not choking.
+        assert!(!by_id(2).am_choking, "currently unchoked -> !am_choking");
+        // C: the regression anchor — a stale last_unchoke residual must
+        // not mask the re-choke (the pre-fix last_unchoke.is_none() read
+        // reported am_choking=false here).
+        assert!(
+            by_id(3).am_choking,
+            "a re-choked peer with a stale last_unchoke -> am_choking"
+        );
+        // The choke-mirror gauge follows the same source: A and C choked;
+        // the transport split pins the denominator (all three rows
+        // visible, all outbound tcp).
+        let (tcp_in, tcp_out, utp_in, utp_out, choked) =
+            crate::query::count_peer_gauges(std::slice::from_ref(&face));
+        assert_eq!(
+            (tcp_in, tcp_out, utp_in, utp_out),
+            (0, 3, 0, 0),
+            "all three peers visible to the gauge as outbound tcp"
+        );
+        assert_eq!(choked, 2, "choked gauge = A + C (the same live-bool source)");
+    }
+
     /// Completion hooks release the dispatch scratch and the stat_man
     /// bucket view — when written_count reaches the need,
     /// `recheck_face_completion` releases at a single point (capacity to

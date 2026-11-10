@@ -412,8 +412,10 @@ pub(super) struct PeerState {
     /// matches both.
     pub(super) down_window: Option<RateWindow>,
     /// Our most recent unchoke instant toward the peer (formerly
-    /// `last_unchoke`; None = never unchoked = the am_choking
-    /// reading).
+    /// `last_unchoke`). Sort-key bookkeeping only — the choke round
+    /// feeds it as `last_am_unchoking`; it is NOT the am_choking
+    /// reading (a stale Some after a re-choke must not read as
+    /// unchoked — that live bool is carried by `am_unchoked`).
     pub(super) last_unchoke: Option<Instant>,
     /// Our unchoke state toward the peer (formerly `am_unchoked`;
     /// false = BEP3's connect default choke. The round-decision

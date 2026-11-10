@@ -168,7 +168,7 @@ pub(super) fn count_peer_gauges(faces: &[FaceState]) -> (u64, u64, u64, u64, u64
                 (Transport::Utp, true) => utp_in += 1,
                 (Transport::Utp, false) => utp_out += 1,
             }
-            if ps.last_unchoke.is_none() {
+            if !ps.am_unchoked {
                 choked += 1;
             }
         }
@@ -266,7 +266,10 @@ pub(super) fn peer_snapshots(
                 // Inbound connections report port 0 (aria2 isIncomingPeer branch).
                 port: if meta.inbound { 0 } else { meta.port },
                 bitfield: bits,
-                am_choking: ps.last_unchoke.is_none(),
+                // Live bool (aria2 RpcMethodImpl.cc reads the current
+                // am-choking state; a stale last_unchoke after a re-choke
+                // must still read true — the same face as tick's am_unchoked).
+                am_choking: !ps.am_unchoked,
                 peer_choking: false,
                 download_speed: down_speed,
                 upload_speed: up_speed,

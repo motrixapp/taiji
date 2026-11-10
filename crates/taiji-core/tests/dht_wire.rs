@@ -1183,6 +1183,98 @@ async fn hot_disable_then_reenable_is_reversible_and_idempotent() {
     let _ = std::fs::remove_dir_all(dest);
 }
 
+/// Repeated-cycle soak (idempotent gates as stateless crossings): a
+/// DHT-on engine runs three full enable→disable rounds, each command
+/// doubled so both idempotent branches are crossed repeatedly (enable on
+/// the already-on wiring, disable on the already-off one) — every call
+/// must return Ok and the crossings must accumulate no state. After the
+/// final disable the engine must still exit within 15s: the tail
+/// halt-save early-returns on empty wiring, so a cycle-leaked zombie DHT
+/// engine or a wedged gate would hang teardown and fail here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hot_toggle_repeated_cycles_remain_idempotent() {
+    let (_node_b, node_b_addr, node_b_shutdown) = spawn_dht_node(fast_engine_cfg()).await;
+    let port = reserve_tcp_port().await;
+    let dht_cfg = DhtWireConfig {
+        enabled: true,
+        entry_points_v4: vec![format!("127.0.0.1:{}", node_b_addr.port())],
+        entry_points_v6: Vec::new(),
+        engine: fast_engine_cfg(),
+        announce_interval: Duration::from_millis(600),
+    };
+    let root = CancellationToken::new();
+    let cfg = EngineConfig {
+        preset_progress: None, // default None, zero behavior delta
+        tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        peer_id: PEER_ID_ENGINE,
+        announce: String::new(),
+        listen_port: port,
+        piece_len: PIECE_LEN,
+        layout: ok(
+            Layout::plan_v1_padded(
+                &[PlanEntry {
+                    path: std::path::PathBuf::from("blob.bin"),
+                    length: u64::from(PIECE_LEN),
+                    padding: false,
+                }],
+                PIECE_LEN,
+            ),
+            "layout",
+        ),
+        dest: tmp_dir("hot-toggle-cycles"),
+        seed_after_complete: false,
+        seed: taiji_core::seed::SeedPolicy::default(),
+        writer_factory: None,
+        disk_policy: taiji_store::disk_policy::DiskPolicy::default(),
+        faces: vec![v1_face_config()],
+        crypto: taiji_bt::mse::CryptoPolicy::optional(),
+        dht: dht_cfg,
+        private: false,
+        peer_exchange: false,
+        metadata_serve: None,
+        limiter: None,
+        hook: None,
+        nat: None,
+        stats: None,
+        webseeds: Vec::new(),
+    };
+    let dest = cfg.dest.clone();
+    let (handle, engine) = DownloadEngine::spawn_controlled(
+        cfg,
+        taiji_core::engine::TrackerWireConfig::default(),
+        &root,
+        taiji_bt::utp::PeerConnectionType::default(),
+    );
+    // Three full rounds; the doubled enable/disable in each round crosses
+    // both idempotent gates every time (round 1's first enable lands on the
+    // startup-enabled wiring; rounds 2-3 re-warm the cold wiring after the
+    // prior halt-save).
+    for round in 1..=3u8 {
+        ok(handle.enable_dht().await, &format!("round {round}: enable"));
+        ok(
+            handle.enable_dht().await,
+            &format!("round {round}: enable (idempotent)"),
+        );
+        ok(
+            handle.disable_dht().await,
+            &format!("round {round}: disable"),
+        );
+        ok(
+            handle.disable_dht().await,
+            &format!("round {round}: disable (idempotent)"),
+        );
+    }
+    root.cancel();
+    let joined = tokio::time::timeout(Duration::from_secs(15), engine).await;
+    assert!(
+        joined.is_ok(),
+        "engine must exit within 15s after the final disable (the tail \
+         halt-save early-returns on empty wiring)"
+    );
+    node_b_shutdown.cancel();
+    let _ = std::fs::remove_dir_all(dest);
+}
+
 /// BEP 27 hard-gate regression (runtime enable on a private engine is
 /// always rejected — libtorrent torrent.cpp `priv()` cannot be overridden
 /// by flags/session switches); the disable face is not gated (no DHT to

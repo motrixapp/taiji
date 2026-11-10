@@ -265,16 +265,17 @@ async fn same_config_clients_share_keepalive_pool_across_task_lifecycles() {
 }
 
 /// Wall-clock improvement (loose upper bound to avoid flakes): each
-/// connection's first request pays a 40ms connect tax (a loopback
-/// stand-in for real handshakes). With per-task pools every task pays >=
-/// 40ms (16 connections pay in parallel, tasks accumulate serially);
-/// with the shared pool only the first task pays. 10 tasks must finish
-/// in < 240ms — 60% of the 10×40 = 400ms per-task floor, leaving room
-/// for scheduling noise and an occasional reuse-health reconnect.
+/// connection's first request pays a 120ms connect tax (a loopback
+/// stand-in for real handshakes; sized well above CI-runner scheduling
+/// jitter). With per-task pools every task pays >= 120ms (16 connections
+/// pay in parallel, tasks accumulate serially); with the shared pool only
+/// the first task pays. 10 tasks must finish in < 720ms — 60% of the
+/// 10×120 = 1200ms per-task floor, leaving room for scheduling noise and
+/// an occasional reuse-health reconnect.
 #[tokio::test]
 async fn shared_pool_amortizes_connect_tax_wall_clock() {
     const TASKS: usize = 10;
-    const TAX: Duration = Duration::from_millis(40);
+    const TAX: Duration = Duration::from_millis(120);
     let (base, _obs) = spawn_origin(TAX).await;
     let cfg = bench_cfg();
     let start = Instant::now();

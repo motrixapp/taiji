@@ -1447,14 +1447,16 @@ note_spawn/note_exit pairing is unaffected. The wait for a contended
 permit is observed as a zero-byte rate sample with the cap_waited bit
 (input to the cap-contention window exclusion).
 
-### Fatal channels vs the 412 restart channel
+### The fatal slot vs the 412 restart signal
 
-Three worker-exit channels, consumed by the task driver tick:
+One worker-exit slot (`WorkerRig::fatal`, written via `set_fatal`),
+consumed by the task driver tick. The slot is priority-ordered with
+first-writer-wins within a rank, so two workers hitting different fatal
+faces on different sources inside one tick cannot race the consumption
+order; shadowed/superseded signals are logged, never silently dropped:
 
-- `fatal_no_source` (atomic flag): acquire returned NoSource with
-  pool slack — all sources removed; task-level failure.
-- `fatal_protocol` (`(HttpError, String)` slot): deterministic
-  protocol contradictions — `RangeIgnored` (download-time 200 after
+- `Fatal::Protocol` (rank 2; `(HttpError, String)`) — deterministic
+  protocol contradictions: `RangeIgnored` (download-time 200 after
   the probe confirmed range support = capability drift) and `BadRange`
   (a 206 whose content-range echo start is mismatched, missing or
   pathological; the client layer's `validate_range_echo` converges all
@@ -1467,10 +1469,12 @@ Three worker-exit channels, consumed by the task driver tick:
   keeping the fatal face narrowed to the start dimension. Multi-source
   per-source isolation would need coordinator message extensions;
   explicit failure is the fail-closed direction.
-- `fatal_restart` (atomic flag): `PreconditionFailed` (412, If-Match
+- `Fatal::Restart` (rank 1): `PreconditionFailed` (412, If-Match
   rejected). 412 is a self-healing deterministic fact — the driver
   clears the bitmap and re-downloads from zero after a re-probe;
-  unlike the fatal slot it is not terminal.
+  unlike `Fatal::Protocol` it is not terminal.
+- `Fatal::NoSource` (rank 0): acquire returned NoSource with pool
+  slack — all sources removed; task-level failure.
 
 ### Stolen extents and the heartbeat ring
 

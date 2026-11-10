@@ -101,11 +101,11 @@ use taiji_http::transport::{HttpBodyTransport, HttpRangeTransport};
 // face): loop body / shrink claims / AIMD snapshot application / heartbeat
 // sink chain are consumed here; task telemetry and persistence glue stay in
 // core via injection seams (WorkerTelemetry adapter / WorkerOpts projection
-// / fatal channels).
+// / fatal slot).
 use taiji_http::worker::{
-    BACKOFF_PERMIT_RELEASE_THRESHOLD, EXTENT_RETRY_BACKOFF_RESET, PoolWarmth, SourceTaggedSink,
-    WorkerOpts, WorkerRig, WorkerTelemetry, WorkerTransport, launch_worker, slowstart_reached,
-    stagger_delay, supervisor_directives,
+    BACKOFF_PERMIT_RELEASE_THRESHOLD, EXTENT_RETRY_BACKOFF_RESET, Fatal, PoolWarmth,
+    SourceTaggedSink, WorkerOpts, WorkerRig, WorkerTelemetry, WorkerTransport, launch_worker,
+    slowstart_reached, stagger_delay, supervisor_directives,
 };
 use taiji_store::error::StoreError;
 use taiji_store::persist::{HttpTaskRow, PersistHandle, PersistOutcome, TaskCookieRow};
@@ -3031,7 +3031,6 @@ async fn drive_segmented(
         SchedulerMode::Static => taiji_http::pool::WorkerPool::fixed(sources.len(), run.opts.split),
     });
     let pool_token = CancellationToken::new();
-    let fatal_no_source = Arc::new(AtomicBool::new(false));
     // Worker loop parameters (the effective values after import folding,
     // constant within the attempt): slotted credentials + the Retry-After
     // clamp face, injected into the protocol loop via the WorkerOpts
@@ -3057,9 +3056,7 @@ async fn drive_segmented(
         count,
         ftp_cfg: run.opts.to_ftp_config(),
         base_ctx: ctx.clone(),
-        fatal_no_source: Arc::clone(&fatal_no_source),
-        fatal_protocol: Arc::new(StdMutex::new(None)),
-        fatal_restart: Arc::new(AtomicBool::new(false)),
+        fatal: Arc::new(StdMutex::new(None)),
         // The stall-steal execution loop assembly point: dynamic-only (the
         // heartbeat producer + park steal requests); the static control
         // baseline is untouched.
@@ -3364,47 +3361,52 @@ async fn drive_segmented(
                 }
             }
         }
-        // Deterministic protocol-contradiction fatal consumption (before
-        // the supervisor — once fatal is set no more workers are pulled,
-        // zero superfluous requests inside the close-out window). The lock
-        // guard never crosses an await: taken then released. The
-        // structured failure mapping (canonical code + refinement
-        // dimension) is finalized on this side — the protocol slot only
-        // carries the raw HttpError + diagnostic text.
-        let fatal_b2 = crate::lock(&rig.fatal_protocol).take();
-        if let Some((failure, message)) = fatal_b2 {
+        // Fatal-slot consumption (before the supervisor — once fatal is
+        // set no more workers are pulled, zero superfluous requests inside
+        // the close-out window). The lock guard never crosses an await:
+        // taken then released. The slot carries only the raw signal
+        // ([`Fatal`]; the protocol arm holds the raw HttpError +
+        // diagnostic text); the structured failure mapping (canonical
+        // code + refinement dimension) is finalized on this side. The
+        // three outcomes are the historical per-channel outcomes kept
+        // verbatim; the slot's rank order (see `Fatal::rank`) decides
+        // which signal wins a same-tick race — exactly the channel the
+        // driver would have consumed first before the merge.
+        let fatal = crate::lock(&rig.fatal).take();
+        if let Some(fatal) = fatal {
             // The "fatal once = done, zero superfluous requests" promise is
             // honored here (detached workers would otherwise keep claiming
             // extents and sending requests).
             teardown_segmented!();
-            return fail(
-                run.persist.as_ref(),
-                mirror,
-                EngineFailure::of_http_error(&failure),
-                message,
-            )
-            .await;
-        }
-        // 412 content-change restart consumption (torn down in the fatal
-        // order — detached workers stop claiming items, the `.part`
-        // occupancy registry releases synchronously), then handed to the
-        // outer loop to clear the bitmap and re-probe from zero. Before the
-        // supervisor (no more worker pulls once set).
-        if rig.fatal_restart.load(Ordering::Relaxed) {
-            teardown_segmented!();
-            return DriveStop::ContentRestart;
-        }
-        // Task-level negative close-out: a worker hit the all-sources-
-        // removed face (acquire -> `NoSource`).
-        if fatal_no_source.load(Ordering::Relaxed) {
-            teardown_segmented!();
-            return fail(
-                run.persist.as_ref(),
-                mirror,
-                EngineFailure::bare("taiji.http.no_source"),
-                "all sources removed with work remaining".into(),
-            )
-            .await;
+            return match fatal {
+                // Deterministic protocol-contradiction terminal failure.
+                Fatal::Protocol(failure, message) => {
+                    fail(
+                        run.persist.as_ref(),
+                        mirror,
+                        EngineFailure::of_http_error(&failure),
+                        message,
+                    )
+                    .await
+                }
+                // 412 content change: torn down above in the fatal order —
+                // detached workers stop claiming items, the `.part`
+                // occupancy registry releases synchronously — then handed
+                // to the outer loop to clear the bitmap and re-probe from
+                // zero (self-healing, not terminal).
+                Fatal::Restart => DriveStop::ContentRestart,
+                // Task-level negative close-out: a worker hit the
+                // all-sources-removed face (acquire -> `NoSource`).
+                Fatal::NoSource => {
+                    fail(
+                        run.persist.as_ref(),
+                        mirror,
+                        EngineFailure::bare("taiji.http.no_source"),
+                        "all sources removed with work remaining".into(),
+                    )
+                    .await
+                }
+            };
         }
         // Handle closing (close-out order): once all workers exit,
         // withdraw the coordinator handle clones inside the throttled sink
@@ -7328,7 +7330,7 @@ mod tests {
         };
         let wopts = opts.worker_opts();
         let pool = Arc::new(taiji_http::pool::WorkerPool::new(2, 1));
-        let fatal_no_source = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(StdMutex::new(None));
         let rig = WorkerRig {
             gid: gid.to_string(),
             http_metrics: Arc::new(taiji_io::metrics::MetricsRegistry::new()),
@@ -7346,9 +7348,7 @@ mod tests {
             count: blocks,
             ftp_cfg: opts.to_ftp_config(),
             base_ctx: RequestCtx::default(),
-            fatal_no_source: Arc::clone(&fatal_no_source),
-            fatal_protocol: Arc::new(StdMutex::new(None)),
-            fatal_restart: Arc::new(AtomicBool::new(false)),
+            fatal: Arc::clone(&fatal),
             steal: true,
         };
         let sources = vec![
@@ -7412,8 +7412,8 @@ mod tests {
             "the whole grid settles exactly once (first writer wins; no misses, no duplicates)"
         );
         assert!(
-            !fatal_no_source.load(Ordering::Relaxed),
-            "this fixture has no source-elimination face"
+            crate::lock(&fatal).is_none(),
+            "this fixture has no fatal face (no source elimination / protocol / restart)"
         );
 
         drop(coord);
@@ -7446,7 +7446,7 @@ mod tests {
         let Some(host) = HostCap::host_key(&url) else {
             panic!("host key");
         };
-        let fatal_no_source = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(StdMutex::new(None));
         // A cross-task shared registry (the cap scope is engine-global): cap 1 —
         // whether A holds the slot while parked is observably felt by B.
         let per_host = HostCap::new(1);
@@ -7511,9 +7511,7 @@ mod tests {
             count: 1,
             ftp_cfg: opts.to_ftp_config(),
             base_ctx: RequestCtx::default(),
-            fatal_no_source: Arc::clone(&fatal_no_source),
-            fatal_protocol: Arc::new(StdMutex::new(None)),
-            fatal_restart: Arc::new(AtomicBool::new(false)),
+            fatal: Arc::clone(&fatal),
             steal: true,
         };
         let mut set_a = JoinSet::new();
@@ -7584,9 +7582,7 @@ mod tests {
             count: 2,
             ftp_cfg: opts.to_ftp_config(),
             base_ctx: RequestCtx::default(),
-            fatal_no_source,
-            fatal_protocol: Arc::new(StdMutex::new(None)),
-            fatal_restart: Arc::new(AtomicBool::new(false)),
+            fatal,
             steal: true,
         };
         let mut set_b = JoinSet::new();
@@ -7932,7 +7928,7 @@ mod tests {
         live.blocks_total.store(1, Ordering::Relaxed);
         let pool = Arc::new(taiji_http::pool::WorkerPool::new(1, 1));
         let token = CancellationToken::new();
-        let fatal_no_source = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(StdMutex::new(None));
         let opts = HttpTaskOpts::default();
         let wopts = opts.worker_opts();
         let rig = WorkerRig {
@@ -7952,9 +7948,7 @@ mod tests {
             count: 1,
             ftp_cfg: opts.to_ftp_config(),
             base_ctx: RequestCtx::default(),
-            fatal_no_source,
-            fatal_protocol: Arc::new(StdMutex::new(None)),
-            fatal_restart: Arc::new(AtomicBool::new(false)),
+            fatal,
             steal: true,
         };
         let sources = vec![taiji_segment::traits::PlanSource {
@@ -8069,7 +8063,7 @@ mod tests {
         live.blocks_total.store(1, Ordering::Relaxed);
         let pool = Arc::new(taiji_http::pool::WorkerPool::new(1, 1));
         let token = CancellationToken::new();
-        let fatal_no_source = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(StdMutex::new(None));
         let opts = HttpTaskOpts::default();
         let wopts = opts.worker_opts();
         let rig = WorkerRig {
@@ -8089,9 +8083,7 @@ mod tests {
             count: 1,
             ftp_cfg: opts.to_ftp_config(),
             base_ctx: RequestCtx::default(),
-            fatal_no_source,
-            fatal_protocol: Arc::new(StdMutex::new(None)),
-            fatal_restart: Arc::new(AtomicBool::new(false)),
+            fatal,
             steal: true,
         };
         let sources = vec![taiji_segment::traits::PlanSource {
@@ -8231,7 +8223,7 @@ mod tests {
         reporter.set(Some(coord.clone()));
         let pool = Arc::new(taiji_http::pool::WorkerPool::with_start(1, 8, 8));
         let token = CancellationToken::new();
-        let fatal_no_source = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(StdMutex::new(None));
         let opts = HttpTaskOpts::default();
         let wopts = opts.worker_opts();
         let rig = WorkerRig {
@@ -8251,9 +8243,7 @@ mod tests {
             count: blocks,
             ftp_cfg: opts.to_ftp_config(),
             base_ctx: RequestCtx::default(),
-            fatal_no_source,
-            fatal_protocol: Arc::new(StdMutex::new(None)),
-            fatal_restart: Arc::new(AtomicBool::new(false)),
+            fatal,
             steal: true,
         };
         let sources = vec![taiji_segment::traits::PlanSource {
@@ -8417,7 +8407,7 @@ mod tests {
         reporter.set(Some(coord.clone()));
         let pool = Arc::new(taiji_http::pool::WorkerPool::with_start(1, 8, 2));
         let token = CancellationToken::new();
-        let fatal_no_source = Arc::new(AtomicBool::new(false));
+        let fatal = Arc::new(StdMutex::new(None));
         let opts = HttpTaskOpts::default();
         let wopts = opts.worker_opts();
         let rig = WorkerRig {
@@ -8437,9 +8427,7 @@ mod tests {
             count: blocks,
             ftp_cfg: opts.to_ftp_config(),
             base_ctx: RequestCtx::default(),
-            fatal_no_source,
-            fatal_protocol: Arc::new(StdMutex::new(None)),
-            fatal_restart: Arc::new(AtomicBool::new(false)),
+            fatal,
             steal: true,
         };
         let sources = vec![taiji_segment::traits::PlanSource {

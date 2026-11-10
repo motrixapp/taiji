@@ -16,18 +16,16 @@
 //! - [`WorkerOpts`]: request identity (per-transport-family credential
 //!   slots) and the failure-arm `Retry-After` clamp — the protocol-face
 //!   projection of host runtime options;
-//! - fatal channels: `WorkerRig::fatal_no_source`/`fatal_restart`
-//!   (atomic flags) and `WorkerRig::fatal_protocol` (an
-//!   `(HttpError, String)` slot) — a worker sets its flag and exits; the
-//!   task driver consumes it as task-level failure/restart (structured
-//!   failure mapping is host-side: canonical codes are frozen via
-//!   [`HttpError::code`]).
+//! - fatal slot: `WorkerRig::fatal` (a single [`Fatal`] slot written via
+//!   [`set_fatal`] — priority-ordered, first writer wins within a rank) —
+//!   a worker sets it and exits; the task driver consumes it as
+//!   task-level failure/restart (structured failure mapping is
+//!   host-side: canonical codes are frozen via [`HttpError::code`]).
 //!
 //! Upstream anchor mapping: docs/design/http.md
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -274,6 +272,111 @@ impl SegmentSink for SourceTaggedSink {
     }
 }
 
+/// Task-level fatal signal (the single worker-exit slot consumed by the
+/// task driver tick). One slot, not one channel per signal: with
+/// independent channels, two workers can hit different fatal faces on
+/// different sources inside one driver tick and the consumption order
+/// silently decides the task outcome (the "three-slot first writer
+/// wins" race); the single slot resolves that race deterministically —
+/// [`set_fatal`] orders writes by rank (first writer wins within a
+/// rank), and the ranks mirror the historical consumption order
+/// exactly, so every single-signal scenario keeps its outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fatal {
+    /// Deterministic protocol contradiction (terminal task failure):
+    /// `RangeIgnored` (download-time 200 after the probe confirmed
+    /// range support = capability drift) and `BadRange` (download-time
+    /// 206 echo with a mismatched/missing/pathological start,
+    /// [`HttpError::BadRange`] — same family as range_ignored) carry
+    /// the raw [`HttpError`] plus the diagnostic message (the
+    /// structured failure mapping is finalized host-side). End-point
+    /// deviation does not enter this variant: start-matching long
+    /// deviations are tolerated by the read loop (over-send books
+    /// success, under-send retries as partial progress), so the fatal
+    /// face stays narrowed to the start dimension. NOT the 412
+    /// content-restart face (412 is content drift, self-healing after
+    /// a re-probe; an echo mismatch / capability drift is a protocol
+    /// contradiction, not a content change — terminal failure).
+    /// Multi-source note: per-source isolation (deterministic removal
+    /// and takeover by the remaining sources) would need coordinator
+    /// message extensions; explicit failure is the fail-closed
+    /// direction (no silence, no hang).
+    Protocol(HttpError, String),
+    /// Content change (self-healing): [`HttpError::PreconditionFailed`]
+    /// — the If-Match precondition was rejected (412). The task driver
+    /// tears down, then restarts from the new content (the outer loop
+    /// clears the bitmap and re-downloads from zero, exactly once
+    /// within the outer loop's budget). Division of labor vs
+    /// [`Fatal::Protocol`]: 412 is a self-healing deterministic fact
+    /// (re-probe and re-download the new content), not a terminal
+    /// failure.
+    Restart,
+    /// All-sources-removed negative closure: acquire returned
+    /// [`HttpError::NoSource`] with pool slack — task-level failure
+    /// (same code as the existing no_source semantics).
+    NoSource,
+}
+
+impl Fatal {
+    /// Consumption priority rank (the tiebreak of the single slot):
+    /// Protocol (2) > Restart (1) > NoSource (0) — identical to the
+    /// historical consumption order of the three independent channels
+    /// (protocol slot checked first, then the restart flag, then the
+    /// no-source flag), so which signal wins a same-tick race matches
+    /// what the driver would have consumed first anyway.
+    fn rank(&self) -> u8 {
+        match self {
+            Fatal::Protocol(..) => 2,
+            Fatal::Restart => 1,
+            Fatal::NoSource => 0,
+        }
+    }
+
+    /// Log-safe identity (variant kind + canonical [`HttpError::code`]).
+    /// The Protocol arm's message embeds the raw origin URI and never
+    /// enters logs (outbound URIs pass `redact_uri` by the crate rule,
+    /// docs/design/http.md) — this label is what the shadow/supersede
+    /// diagnostics print; the winning signal's own write site already
+    /// logged its full context.
+    fn log_label(&self) -> String {
+        match self {
+            Fatal::Protocol(e, _) => format!("protocol({})", e.code()),
+            Fatal::Restart => "restart".to_string(),
+            Fatal::NoSource => "no_source".to_string(),
+        }
+    }
+}
+
+/// Single-slot fatal write point (a worker calls this exactly once
+/// before exiting): a strictly higher-rank incoming signal supersedes
+/// the held one; an equal- or lower-rank signal is shadowed and the
+/// first writer is kept (stable diagnostics: two sources each reporting
+/// a Protocol contradiction keep the first error observed, not the last
+/// writer's). Both shadow and supersede are logged — a dropped signal
+/// is never silent, and the log labels are URI-free (variant kind +
+/// canonical code, `Fatal::log_label`; the Protocol message carries the
+/// raw origin URI and stays out of logs). The lock guard never crosses
+/// an await (short critical section; poisoning is fatal by policy via
+/// `crate::lock`).
+pub fn set_fatal(slot: &StdMutex<Option<Fatal>>, incoming: Fatal) {
+    let mut guard = crate::lock(slot);
+    match guard.take() {
+        Some(held) if held.rank() >= incoming.rank() => {
+            warn!(target: "taiji::http::worker",
+                held = %held.log_label(), incoming = %incoming.log_label(),
+                "fatal signal shadowed (equal/lower rank); first writer kept");
+            *guard = Some(held);
+        }
+        Some(held) => {
+            warn!(target: "taiji::http::worker",
+                held = %held.log_label(), incoming = %incoming.log_label(),
+                "fatal slot superseded (higher rank)");
+            *guard = Some(incoming);
+        }
+        None => *guard = Some(incoming),
+    }
+}
+
 /// Grid worker assembly (bringing up the registered units of the AIMD
 /// connection execution ring): the task-level handle bundle shared
 /// across workers ([`launch_worker`] clones the needed halves per
@@ -313,37 +416,17 @@ pub struct WorkerRig {
     pub count: u64,
     pub ftp_cfg: FtpConfig,
     pub base_ctx: RequestCtx,
-    /// All-sources-removed negative closure flag (set when acquire
-    /// returns `NoSource`; the task driver tick consumes it as a
-    /// task-level failure — same code as the existing no_source
-    /// semantics).
-    pub fatal_no_source: Arc<AtomicBool>,
-    /// Fatal slot for deterministic protocol contradictions: a worker
-    /// sets it and exits; the task driver tick consumes it as an
-    /// explicit task-level failure (fails once, terminal — no extent
-    /// retry burn). Set for `RangeIgnored` (download-time 200 after
-    /// the probe confirmed range support = capability drift) and
-    /// `BadRange` (download-time 206 echo with a mismatched/missing/
-    /// pathological start, [`HttpError::BadRange`] — same family as
-    /// range_ignored: deterministic protocol contradictions that do
-    /// NOT take the 412 content-restart channel; an echo mismatch is a
-    /// protocol contradiction, not content drift). End-point deviation
-    /// does not enter this channel: start-matching long deviations are
-    /// tolerated by the read loop (over-send books success, under-send
-    /// retries as partial progress), so the fatal face is narrowed to
-    /// the start dimension. Multi-source note: per-source isolation
-    /// (deterministic removal + takeover by the remaining sources)
-    /// would need coordinator message extensions; explicit failure is
-    /// the fail-closed direction (no silence, no hang).
-    pub fatal_protocol: Arc<StdMutex<Option<(HttpError, String)>>>,
-    /// Restart channel for content changes: a worker sets it
-    /// ([`HttpError::PreconditionFailed`] — the If-Match precondition
-    /// was rejected) and exits; the task driver consumes it -> tear
-    /// down, then restart from the new content (the outer loop clears
-    /// the bitmap and re-downloads from zero). Division of labor vs the
-    /// fatal slot: 412 is a self-healing deterministic fact (re-probe
-    /// and re-download the new content), not a terminal failure.
-    pub fatal_restart: Arc<AtomicBool>,
+    /// Task-level fatal slot (single, [`Fatal`]): a worker writes it
+    /// via [`set_fatal`] (priority-ordered, first writer wins within a
+    /// rank) and exits; the task driver tick takes it once and maps
+    /// the variant to the task outcome (protocol contradiction ->
+    /// terminal failure; 412 -> content restart; all sources removed
+    /// -> failure). The historical shape was three independent
+    /// channels (no_source flag / protocol slot / restart flag), which
+    /// let same-tick signals on different sources race the consumption
+    /// order; the merged slot keeps every single-signal outcome
+    /// identical (see `Fatal::rank`).
+    pub fatal: Arc<StdMutex<Option<Fatal>>>,
     /// Stolen-extent worker-side execution ring assembly flag (dynamic
     /// scheduling groups only): true = assemble the heartbeat execution
     /// ring per fetch ([`ExtentHeartbeat`]: heartbeat production /
@@ -447,11 +530,10 @@ pub fn launch_worker(
     let per_host = rig.per_host.clone();
     let pool = Arc::clone(&rig.pool);
     let token = rig.token.clone();
-    let fatal_no_source = Arc::clone(&rig.fatal_no_source);
-    // Fatal slot for deterministic protocol contradictions (RangeIgnored).
-    let fatal_protocol = Arc::clone(&rig.fatal_protocol);
-    // 412 content-change restart channel (PreconditionFailed).
-    let fatal_restart = Arc::clone(&rig.fatal_restart);
+    // Task-level fatal slot (protocol contradiction / 412 content
+    // restart / all-sources-removed; first writer wins per rank via
+    // set_fatal).
+    let fatal = Arc::clone(&rig.fatal);
     let (total_len, bs, count, steal) = (rig.total_len, rig.bs, rig.count, rig.steal);
     // Failure-arm `Retry-After` clamp (RetryPolicy sourced from
     // `--retry-wait`; max_wait ceiling = 30s).
@@ -632,8 +714,8 @@ pub fn launch_worker(
                             // All sources removed with pool slack (the
                             // negative closure): task-level failure
                             // face (the driver tick consumes the fatal
-                            // flag).
-                            fatal_no_source.store(true, Ordering::Relaxed);
+                            // slot).
+                            set_fatal(&fatal, Fatal::NoSource);
                             break;
                         }
                         Err(_) => break, // coordinator stopped; task teardown goes through the coord_join arm.
@@ -815,7 +897,7 @@ pub fn launch_worker(
                             warn!(target: "taiji::http::worker", gid = %gid,
                                 source = source_idx, extent = alloc.seg.extent,
                                 "{note}");
-                            *crate::lock(&fatal_protocol) = Some((e, message));
+                            set_fatal(&fatal, Fatal::Protocol(e, message));
                             break;
                         }
                         // 412 = server content changed (the If-Match
@@ -830,7 +912,7 @@ pub fn launch_worker(
                                 source = source_idx, extent = alloc.seg.extent,
                                 "download got 412 (if-match): server content changed; \
                                  restarting task from zero");
-                            fatal_restart.store(true, Ordering::Relaxed);
+                            set_fatal(&fatal, Fatal::Restart);
                             break;
                         }
                         // (The ADM `mMadeProgress -> mNumFailed=1`
@@ -1052,4 +1134,78 @@ pub fn slowstart_reached(stats: &RuntimeStats, cap: u32) -> bool {
         .map(|(_, n)| u64::from(*n))
         .sum();
     conns >= u64::from(cap.max(1)) * sources as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Slot precedence: Protocol outranks Restart in both write orders
+    /// (the regression pin of the single-slot merge — a later
+    /// higher-rank write supersedes; an earlier higher-rank write is
+    /// kept, so two workers racing different fatal faces no longer
+    /// resolve by which channel the driver reads first).
+    #[test]
+    fn fatal_slot_priority_protocol_beats_restart() {
+        // Low then high: the Protocol write supersedes the held Restart.
+        let slot = StdMutex::new(None);
+        set_fatal(&slot, Fatal::Restart);
+        set_fatal(
+            &slot,
+            Fatal::Protocol(HttpError::RangeIgnored, "range_ignored".into()),
+        );
+        assert_eq!(
+            crate::lock(&slot).as_ref(),
+            Some(&Fatal::Protocol(
+                HttpError::RangeIgnored,
+                "range_ignored".into()
+            ))
+        );
+        // High then low: the held Protocol shadows the incoming Restart.
+        set_fatal(&slot, Fatal::Restart);
+        assert_eq!(
+            crate::lock(&slot).as_ref(),
+            Some(&Fatal::Protocol(
+                HttpError::RangeIgnored,
+                "range_ignored".into()
+            ))
+        );
+    }
+
+    /// Slot precedence: Restart outranks NoSource in both write orders.
+    #[test]
+    fn fatal_slot_priority_restart_beats_no_source() {
+        let slot = StdMutex::new(None);
+        // Low then high: supersede.
+        set_fatal(&slot, Fatal::NoSource);
+        set_fatal(&slot, Fatal::Restart);
+        assert_eq!(crate::lock(&slot).as_ref(), Some(&Fatal::Restart));
+        // High then low: shadow.
+        set_fatal(&slot, Fatal::NoSource);
+        assert_eq!(crate::lock(&slot).as_ref(), Some(&Fatal::Restart));
+    }
+
+    /// Same rank: the first writer is kept — two different Protocol
+    /// contradictions (two sources) keep the first error observed, not
+    /// the last writer's (stable diagnostics; a deliberate change from
+    /// the old slot's last-writer-wins overwrite).
+    #[test]
+    fn fatal_slot_same_rank_first_writer_kept() {
+        let slot = StdMutex::new(None);
+        set_fatal(
+            &slot,
+            Fatal::Protocol(HttpError::RangeIgnored, "first: range_ignored".into()),
+        );
+        set_fatal(
+            &slot,
+            Fatal::Protocol(HttpError::BadRange, "second: bad_range".into()),
+        );
+        assert_eq!(
+            crate::lock(&slot).as_ref(),
+            Some(&Fatal::Protocol(
+                HttpError::RangeIgnored,
+                "first: range_ignored".into()
+            ))
+        );
+    }
 }

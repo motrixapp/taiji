@@ -733,6 +733,12 @@ impl IgdServer {
         )
     }
 
+    /// Switch the behavior mode at runtime (degradation/recovery scenario
+    /// control; same seam as `PmpServer::set_mode`).
+    fn set_mode(&self, mode: IgdMode) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).mode = mode;
+    }
+
     /// NewExternalPort sequence carried by AddPortMapping requests
     /// (assertion surface).
     fn add_port_externals(&self) -> Vec<u16> {
@@ -1492,6 +1498,155 @@ async fn actor_igd_conflict_falls_back_to_any_port() {
     }
     let (adds, anys, _, _) = server.counts();
     assert_eq!((adds, anys), (1, 1));
+    drop(handle);
+    let _ = join.await;
+}
+
+/// Backend/client desync (discard window): when the IGD
+/// discard-and-rediscover breaker drops the cached client after
+/// [`super::IGD_REDISCOVER_AFTER_FAILURES`] consecutive failed rounds, the
+/// internal `backend` stays `Some(Igd)` on purpose (unmap/poll dispatch on
+/// it; `resolve_igd` rebuilds lazily) — but the snapshot must not report
+/// the dead backend as live: `backend` is None for the discard window and
+/// Some(Igd) again once the next round rediscovers. Red (pre-fix) = the
+/// discard-window snapshot still reports Some(Igd).
+#[tokio::test]
+async fn actor_igd_discard_reports_backend_none_until_rediscover() {
+    let server = IgdServer::start(IgdMode::Normal, 3600).await;
+    let config = NatConfig {
+        enable_natpmp: false,
+        enable_upnp: true,
+        igd_device_url: Some(server.device_url.clone()),
+        lease: Duration::from_secs(3600),
+        address_poll: Duration::from_secs(3600),
+        ..NatConfig::default()
+    };
+    let (handle, mut events, join) = super::spawn(config);
+    handle
+        .map_one(Protocol::Tcp, 6881, Duration::from_secs(3600))
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    match events.recv().await {
+        Some(NatEvent::Mapped { .. }) => {}
+        other => panic!("unexpected event: {other:?}"),
+    }
+    let snap = handle.snapshot().await.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(snap.backend, Some(super::Backend::Igd));
+
+    // Six consecutive failed rounds (one note_igd_failure per command; the
+    // discard threshold) — non-718 faults fail add_mapping outright, no
+    // AddAnyPortMapping fallback.
+    server.set_mode(IgdMode::FaultAll(606));
+    for _ in 0..6 {
+        let err = match handle
+            .map_one(Protocol::Tcp, 6881, Duration::from_secs(3600))
+            .await
+        {
+            Err(e) => e,
+            Ok(()) => panic!("faulting igd must fail"),
+        };
+        assert!(matches!(err, super::NatError::Igd(_)), "got {err}");
+    }
+    match events.recv().await {
+        Some(NatEvent::Failed { .. }) => {}
+        other => panic!("unexpected event: {other:?}"),
+    }
+    // The discard window: the cached client is gone, so the derived
+    // backend is None. Mappings stay optimistic (the failure path does not
+    // clear active entries; lease expiry is the reclamation backstop) —
+    // the window surfaces through backend=None, not an emptied mapping set.
+    let snap = handle.snapshot().await.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        snap.backend, None,
+        "a discarded igd client must not surface as the live backend"
+    );
+    assert!(snap.degraded);
+    assert_eq!(
+        snap.mappings.len(),
+        1,
+        "mappings stay optimistic in the window"
+    );
+
+    // Recovery: the next round lazily rediscovers (resolve_igd re-fetches
+    // the description) — the backend is live again and degraded clears.
+    server.set_mode(IgdMode::Normal);
+    handle
+        .map_one(Protocol::Tcp, 6881, Duration::from_secs(3600))
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    let snap = handle.snapshot().await.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(snap.backend, Some(super::Backend::Igd));
+    assert!(!snap.degraded);
+    drop(handle);
+    let _ = join.await;
+}
+
+/// Degraded semantics under partial recovery: one wanted protocol
+/// succeeding while another is still missing is not a recovery — degraded
+/// and last_error must survive until the whole wanted set is live again.
+/// Red (pre-fix) = the UDP success clears degraded/last_error while TCP
+/// remains unmapped.
+#[tokio::test]
+async fn actor_degraded_survives_partial_recovery() {
+    let server = IgdServer::start(IgdMode::FaultAll(606), 3600).await;
+    let config = NatConfig {
+        enable_natpmp: false,
+        enable_upnp: true,
+        igd_device_url: Some(server.device_url.clone()),
+        lease: Duration::from_secs(3600),
+        address_poll: Duration::from_secs(3600),
+        ..NatConfig::default()
+    };
+    let (handle, mut events, join) = super::spawn(config);
+    let err = match handle
+        .map_one(Protocol::Tcp, 6881, Duration::from_secs(3600))
+        .await
+    {
+        Err(e) => e,
+        Ok(()) => panic!("faulting igd must fail"),
+    };
+    assert!(matches!(err, super::NatError::Igd(_)), "got {err}");
+    match events.recv().await {
+        Some(NatEvent::Failed { reason }) => assert!(!reason.is_empty()),
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    // Partial recovery: UDP maps while TCP is still missing — degraded
+    // and its diagnostic survive.
+    server.set_mode(IgdMode::Normal);
+    handle
+        .map_one(Protocol::Udp, 6881, Duration::from_secs(3600))
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    match events.recv().await {
+        Some(NatEvent::Mapped { protocol, .. }) => assert_eq!(protocol, Protocol::Udp),
+        other => panic!("unexpected event: {other:?}"),
+    }
+    let snap = handle.snapshot().await.unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        snap.degraded,
+        "a partial recovery (tcp still missing) must not clear degraded"
+    );
+    assert!(
+        snap.last_error.is_some(),
+        "the failure diagnostic must be retained"
+    );
+    assert_eq!(snap.mappings.len(), 1);
+    assert_eq!(snap.mappings[0].protocol, Protocol::Udp);
+
+    // Full recovery: TCP maps too — now the whole wanted set is live and
+    // degraded clears.
+    handle
+        .map_one(Protocol::Tcp, 6881, Duration::from_secs(3600))
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    match events.recv().await {
+        Some(NatEvent::Mapped { protocol, .. }) => assert_eq!(protocol, Protocol::Tcp),
+        other => panic!("unexpected event: {other:?}"),
+    }
+    let snap = handle.snapshot().await.unwrap_or_else(|e| panic!("{e}"));
+    assert!(!snap.degraded);
+    assert_eq!(snap.mappings.len(), 2);
     drop(handle);
     let _ = join.await;
 }

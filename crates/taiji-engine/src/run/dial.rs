@@ -736,6 +736,16 @@ pub(super) fn attach_webseeds(
                 dial.avail_tx_face[fi].clone(),
             )
         };
+        // Debug-build assembly invariant (the FaceConfig equal-length
+        // guarantee, config.rs): both tables come from one piece count — a
+        // divergence would route every missing-span piece down the failure
+        // path (webseed.rs spawn_fetch's span-miss arm). Catch a broken
+        // assembly at the source instead.
+        debug_assert_eq!(
+            goffs.len(),
+            lens.len(),
+            "webseed face tables diverged (piece_goffs vs piece_bytes)"
+        );
         let peer_id = webseed::webseed_peer_id(url);
         let addr = SocketAddr::new(
             IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2 + i as u8)),

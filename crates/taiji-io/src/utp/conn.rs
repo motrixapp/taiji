@@ -283,6 +283,8 @@ pub(crate) struct Driver {
     /// reset the counter per BEP-29 §"timeouts" (a retransmit counts as
     /// a send).
     last_timeout_event: u64,
+    /// Terminal latch, set only by `shutdown` together with
+    /// `state = State::Closed` (kept in lockstep, see `assert_invariants`).
     closed: bool,
     /// Channel latches: once the application handles are dropped, recv()
     /// returns None forever and the arm must be latched off (otherwise
@@ -419,6 +421,8 @@ impl Driver {
         }
 
         loop {
+            // Every iteration starts phase-consistent (debug builds).
+            self.assert_invariants();
             if self.closed {
                 return;
             }
@@ -641,6 +645,8 @@ impl Driver {
                         self.state = State::Connected;
                         self.on_inbound_stream(&pkt.header, pkt.payload).await;
                     }
+                    // Closed is defensive only: `run` returns right after
+                    // `shutdown`, so a closed driver handles no packets.
                     State::Connected | State::Fin | State::Closed => {
                         self.on_inbound_stream(&pkt.header, pkt.payload).await;
                     }
@@ -1066,6 +1072,8 @@ impl Driver {
                 break;
             }
         }
+        // FIN-queue post-condition (debug builds).
+        self.assert_invariants();
     }
 
     /// Sends every unsent entry in outq: handshake packets bypass the
@@ -1266,6 +1274,9 @@ impl Driver {
             return;
         }
         self.closed = true;
+        // Every teardown path funnels through here: the enum terminal
+        // state moves with the latch (see `assert_invariants`).
+        self.state = State::Closed;
         let _ = self.ch.err.send(match err {
             Some(e) => CloseState::Abnormal(e),
             None => CloseState::Graceful,
@@ -1276,6 +1287,48 @@ impl Driver {
             t.remove(&key);
         }
         debug!(target: LOG_TARGET, to = %self.addr, "uTP connection closed");
+    }
+
+    // ---- Phase invariants (debug builds) ----
+
+    /// Cross-checks the redundant state encodings; every check is a
+    /// `debug_assert!`, so release builds compile this to nothing. The FIN
+    /// phase is spread over `state`, `fin_requested`, `fin_seq` and
+    /// `fin_acked`, the terminal state over `state` and `closed`; they must
+    /// never disagree:
+    /// - `state == Fin` exactly while our FIN is queued (`fin_seq`), except
+    ///   once closed — teardown may happen in any phase;
+    /// - a queued FIN was requested first (`fin_requested` gates the FIN
+    ///   queue in `pump`, and is never cleared);
+    /// - only a queued FIN can be acknowledged (`fin_acked`);
+    /// - the `closed` latch and `State::Closed` move together (both are set
+    ///   only by `shutdown`).
+    ///
+    /// Checked at the top of every `run` iteration and at the end of `pump`
+    /// (the sole FIN-queue site).
+    #[track_caller]
+    fn assert_invariants(&self) {
+        debug_assert!(
+            self.state == State::Closed || (self.state == State::Fin) == self.fin_seq.is_some(),
+            "FIN phase out of sync: state={:?} fin_seq={:?}",
+            self.state,
+            self.fin_seq
+        );
+        debug_assert!(
+            self.fin_seq.is_none() || self.fin_requested,
+            "FIN queued without a request: fin_seq={:?}",
+            self.fin_seq
+        );
+        debug_assert!(
+            !self.fin_acked || self.fin_seq.is_some(),
+            "FIN acknowledged but never queued"
+        );
+        debug_assert_eq!(
+            self.closed,
+            self.state == State::Closed,
+            "closed latch out of sync: state={:?}",
+            self.state
+        );
     }
 }
 
@@ -1303,5 +1356,137 @@ mod bt_recv_ledger {
         );
         recv_ledger_release(fill as usize + 1024);
         assert_eq!(recv_ledger_used(), base, "release returns to baseline");
+    }
+}
+
+#[cfg(test)]
+mod phase_invariants {
+    use super::*;
+
+    const PEER: SocketAddr = SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+        2000,
+    );
+    /// Our receive id (the peer sends with it, BEP-29 §"connection_id").
+    const RECV_ID: u16 = 0x1234;
+    /// Peer (acceptor) SYN-ACK seq; its first stream packet reuses it (the
+    /// SYN-ACK consumes no sequence number, see the module docs).
+    const PEER_SEQ: u16 = 0x4000;
+
+    /// One payload-less peer -> local packet.
+    fn from_peer(ty: PacketType, seq_nr: u16, ack_nr: u16) -> InboundPacket {
+        let h = Header {
+            packet_type: ty,
+            extension: 0,
+            connection_id: RECV_ID,
+            timestamp_micros: 42,
+            timestamp_diff_micros: 0,
+            wnd_size: 64 * 1024,
+            seq_nr,
+            ack_nr,
+        };
+        InboundPacket {
+            from: PEER,
+            data: packet::encode(&h, None, &[]).freeze(),
+        }
+    }
+
+    /// The FIN-phase encodings (`state` / `fin_requested` / `fin_seq` /
+    /// `fin_acked`) and the `closed` latch stay in lockstep across a full
+    /// graceful lifecycle — handshake -> FIN requested -> queued -> acked ->
+    /// peer FIN (read EOF) -> close — and `State::Closed` is the terminal
+    /// state actually reached (it used to be a never-assigned variant).
+    #[tokio::test]
+    async fn fin_phase_invariants_across_lifecycle() {
+        let cfg = UtpConfig::default();
+        let (_in_tx, in_rx) = mpsc::channel(cfg.inbound_channel);
+        let (_write_tx, write_rx) = mpsc::channel(cfg.write_queue_packets);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(16);
+        let (data_tx, _data_rx) = mpsc::channel(cfg.data_queue_packets);
+        let (err_tx, err_rx) = watch::channel(CloseState::Open);
+        let (out_tx, mut out_rx) = mpsc::channel(cfg.outbound_channel);
+        let mut d = Driver::new(
+            cfg,
+            ConnSpec {
+                addr: PEER,
+                role: Role::Initiator {
+                    conn_id_recv: RECV_ID,
+                },
+            },
+            DriverChannels {
+                inbound: in_rx,
+                write: write_rx,
+                ctrl: ctrl_rx,
+                data: data_tx,
+                out: out_tx,
+                err: err_tx,
+            },
+            None,
+        );
+        assert_eq!(d.state, State::SynSent);
+        assert!(!d.closed);
+        d.assert_invariants();
+
+        // run()'s opening flush sends the SYN; the SYN-ACK (ST_STATE acking
+        // seq 1) completes the handshake (BEP-29 §"connection setup").
+        assert!(d.send_new_entries().await, "SYN flushed");
+        d.on_packet(from_peer(PacketType::State, PEER_SEQ, 1)).await;
+        assert_eq!(d.state, State::Connected);
+        d.assert_invariants();
+
+        // FIN requested (the Ctrl::Fin arm) but not yet queued: still
+        // Connected.
+        d.fin_requested = true;
+        d.assert_invariants();
+        // The pump queues the FIN behind all data -> FIN phase.
+        d.pump().await;
+        let Some(fin_seq) = d.fin_seq else {
+            panic!("pump must queue the requested FIN");
+        };
+        assert_eq!(d.state, State::Fin);
+        assert!(!d.fin_acked);
+        d.assert_invariants();
+
+        // The peer acks our FIN (note_acked on the Kind::Fin entry); the FIN
+        // phase holds until close.
+        d.on_packet(from_peer(PacketType::State, PEER_SEQ, fin_seq))
+            .await;
+        assert!(d.fin_acked);
+        assert_eq!(d.state, State::Fin);
+        d.assert_invariants();
+
+        // The peer's FIN (its first stream packet) -> read EOF; the
+        // receive-side FIN lives in eof_pkt/read_eof and leaves `state` alone.
+        d.on_packet(from_peer(PacketType::Fin, PEER_SEQ, fin_seq))
+            .await;
+        assert!(d.read_eof);
+        assert_eq!(d.state, State::Fin);
+        d.assert_invariants();
+
+        // Both directions converged -> graceful close lands in State::Closed.
+        d.maybe_finish().await;
+        assert!(d.closed);
+        assert_eq!(d.state, State::Closed);
+        assert_eq!(*err_rx.borrow(), CloseState::Graceful);
+        d.assert_invariants();
+
+        // Wire trace: SYN, our FIN, then the ack of the peer's FIN.
+        let mut sent = Vec::new();
+        while let Ok(o) = out_rx.try_recv() {
+            match packet::decode(&o.data) {
+                Ok(p) => sent.push(p.header.packet_type),
+                Err(e) => panic!("undecodable outbound packet: {e:?}"),
+            }
+        }
+        assert_eq!(sent, [PacketType::Syn, PacketType::Fin, PacketType::State]);
+
+        // Closed is terminal: a later teardown is a no-op, and the pump gate
+        // keeps the closed driver silent.
+        d.shutdown(Some(UtpError::Reset));
+        assert_eq!(d.state, State::Closed);
+        assert_eq!(*err_rx.borrow(), CloseState::Graceful);
+        d.pump().await;
+        assert!(out_rx.try_recv().is_err(), "a closed driver sends nothing");
+        d.assert_invariants();
     }
 }

@@ -723,7 +723,20 @@ impl<F: RangeFetch> WebseedResponder<F> {
         token: &CancellationToken,
     ) {
         let Some((goff, len)) = piece_span(&self.goffs, &self.lens, index) else {
-            return; // unreachable — the validation face already covers this; defensive arm
+            // Span-table miss: unreachable under today's assembly (both
+            // tables are built from one piece count, config.rs), but a
+            // silent return here would wedge the piece (inflight stays set,
+            // no completion event, no re-dispatch). Report it as a standard
+            // fetch failure instead — spawn_fetch is sync, so a micro task
+            // delivers the event (a send failure = the main loop is gone;
+            // exit silently, the same discipline as the subtask sends below).
+            let done_tx = done_tx.clone();
+            tokio::spawn(async move {
+                let _ = done_tx
+                    .send(PieceDone::Failed(index, "piece span table missing".into()))
+                    .await;
+            });
+            return;
         };
         let fetch = Arc::clone(&self.fetch);
         let url = self.url.clone();
@@ -1128,26 +1141,41 @@ mod tests {
     }
 
     /// Direct-drive responder fixture: a real duplex + the test playing the
-    /// engine side (raw frame io). Geometry: 8 pieces × 8 bytes (linear
-    /// goffs).
+    /// engine side (raw frame io). Default geometry: 8 pieces × 8 bytes
+    /// (linear goffs, via [`spawn_responder`]); [`spawn_responder_geom`]
+    /// takes custom tables.
     struct ResponderFixture {
         local: DuplexStream,
     }
 
-    async fn spawn_responder(fetch: Arc<MockFetch>) -> ResponderFixture {
+    /// Geometry-parameterized fixture form (the span-miss regression feeds a
+    /// deliberately mismatched goffs/lens pair through here).
+    async fn spawn_responder_geom(
+        fetch: Arc<MockFetch>,
+        goffs: Arc<Vec<u64>>,
+        lens: Vec<u64>,
+    ) -> ResponderFixture {
         let (local, remote) = tokio::io::duplex(WEBSEED_DUPLEX_BUF);
-        let goffs = Arc::new((0..8u64).map(|k| k * 8).collect::<Vec<_>>());
         let responder = WebseedResponder::new(
             fetch,
             "http://webseed.test/payload".into(),
             [7u8; 20],
             webseed_peer_id("http://webseed.test/payload"),
             goffs,
-            vec![8u64; 8],
+            lens,
         );
         let token = CancellationToken::new();
         tokio::spawn(responder.run(remote, token));
         ResponderFixture { local }
+    }
+
+    async fn spawn_responder(fetch: Arc<MockFetch>) -> ResponderFixture {
+        spawn_responder_geom(
+            fetch,
+            Arc::new((0..8u64).map(|k| k * 8).collect::<Vec<_>>()),
+            vec![8u64; 8],
+        )
+        .await
     }
 
     /// Engine-side handshake (play the outbound 68 B, read the reply 68 B).
@@ -1469,6 +1497,54 @@ mod tests {
         assert!(
             !wait_eof(&mut fx).await,
             "consecutive failures reset by success: no close"
+        );
+    }
+
+    /// Span-table miss → standard failure, not a wedge: a broken assembly
+    /// invariant (goffs shorter than lens — impossible in production, where
+    /// both tables come from one count). Requests for pieces past goffs
+    /// validate against lens (accepted) but find no span: the fetch layer is
+    /// never touched, and each miss must surface as a Failed done event →
+    /// pending cleared + consecutive-failure counted → 3 misses close the
+    /// stream. Pre-fix this wedged: the spawn_fetch None arm returned
+    /// silently (inflight stayed set, no event, no close) — the wait_eof
+    /// assertion is the regression pin.
+    #[tokio::test]
+    async fn span_table_miss_reports_failure_not_wedge() {
+        let fetch = MockFetch::always_ok();
+        let mut fx =
+            spawn_responder_geom(fetch.clone(), Arc::new(vec![0u64, 8]), vec![8u64; 8]).await;
+        engine_handshake(&mut fx).await;
+        let _ = read_frame_raw(&mut fx).await;
+        let _ = read_frame_raw(&mut fx).await;
+        for index in 5u32..8 {
+            write_frame_raw(
+                &mut fx,
+                &Message::Request {
+                    index,
+                    begin: 0,
+                    length: 8,
+                },
+            )
+            .await;
+            // A failed completion has no wire signal — a settle window per
+            // request so the done events are consumed one by one
+            // (deterministic consecutive semantics, mirroring the failure
+            // tests above).
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        assert_eq!(
+            fetch.started(),
+            0,
+            "the HTTP layer is never touched (no span -> no fetch)"
+        );
+        assert!(
+            read_frame_raw(&mut fx).await.is_none(),
+            "zero Piece replies in the observation window (pending abandoned)"
+        );
+        assert!(
+            wait_eof(&mut fx).await,
+            "3 consecutive span misses close the stream (the failure gate)"
         );
     }
 

@@ -1617,22 +1617,102 @@ pub(super) struct DhtRuntime<'a> {
     pub(super) actual_port: u16,
 }
 
+/// Single write-point for the DHT-on projection: the handshake reserved
+/// bit + the dial attach slot are the two faces that must move together
+/// with the wiring swap in [`handle_set_dht_enabled`]. One call site per
+/// state transition (plus the idempotent self-heal below) — no arm can
+/// update one face and skip the other, the triple-write tearing this
+/// stopgap closes.
+///
+/// The wiring-direction assert pins the mid-state defense (the same
+/// debug-build discipline as `faces.rs` row-key asserts): a non-empty
+/// wiring must never meet an unprojected dial/handshake face — a tear
+/// (only reachable via an interrupted toggle) surfaces immediately in
+/// test builds; release builds carry on into the check-and-self-heal.
+fn project_dht_on(
+    wiring: &[DhtFamilyWiring],
+    faces: &mut [FaceState],
+    dial: &DialCtx,
+    port: u16,
+    port_tx: mpsc::Sender<(u64, u16)>,
+) {
+    debug_assert!(
+        !wiring.is_empty(),
+        "dht-on projection requires non-empty wiring (torn mid-state)"
+    );
+    // Handshake DHT bit (declared on new outbound/inbound handshakes;
+    // existing connections keep their negotiated state for their
+    // lifetime — the same rule as libtorrent apply_settings).
+    for f in faces {
+        f.reserved = f.reserved.with_dht();
+    }
+    // Attach slot (new dials read it at dial assembly).
+    dial.attach_dht.set(Some(AttachDht {
+        local_port: port,
+        port_tx,
+    }));
+}
+
+/// Dual of [`project_dht_on`]: the single write-point for the DHT-off
+/// projection (the handshake bit cleared — new outbound handshakes stop
+/// declaring DHT — and the attach slot emptied).
+fn project_dht_off(wiring: &[DhtFamilyWiring], faces: &mut [FaceState], dial: &DialCtx) {
+    debug_assert!(
+        wiring.is_empty(),
+        "dht-off projection requires empty wiring (torn mid-state)"
+    );
+    for f in faces {
+        f.reserved = f.reserved.without_dht();
+    }
+    dial.attach_dht.set(None);
+}
+
+/// Cold-wiring gate slots cleared explicitly (pumps stop; the next enable
+/// rebuilds the channels) — shared by the disable main path and the
+/// idempotent self-heal (`set_engine(None)` rides a watch send, itself
+/// idempotent, so repeated calls are harmless).
+async fn clear_gates(seam: &DhtRuntimeSeam) {
+    for cold in &seam.cold {
+        cold.gate.set_engine(None).await;
+    }
+}
+
+/// Torn-projection predicate (pure, unit-tested in the file-local tests
+/// mod): `wiring_nonempty` fixes the direction, and the two projection
+/// faces must agree with it — enabled demands `attach_some` plus the
+/// handshake bit on *every* face (enable callers pass the all-faces
+/// reading), disabled demands no attach plus the bit on *no* face
+/// (disable callers pass the any-face reading; hence the directional
+/// `any_reserved_dht` name). Any disagreement = a torn mid-state the
+/// idempotent branches self-heal.
+fn dht_projection_torn(wiring_nonempty: bool, attach_some: bool, any_reserved_dht: bool) -> bool {
+    if wiring_nonempty {
+        !attach_some || !any_reserved_dht
+    } else {
+        attach_some || any_reserved_dht
+    }
+}
+
 /// `EngineCommand::SetDhtEnabled` arm body (a hot switch; the counterpart
 /// of libtorrent `apply_settings(enable_dht)` runtime toggling plus the
 /// per-torrent `torrent_flags::disable_dht` flag flip, src/torrent.cpp).
 ///
 /// - Enable: the BEP27 gate first (a private engine is always refused —
 ///   `torrent.cpp` `priv()` is a hard gate no flag can override);
-///   idempotent (already enabled = Ok); per-family cold wiring warms up
-///   (state restored from dht_state) + the handshake DHT bit + the attach
-///   slot + an immediate announce registration (the stalled-task revival
-///   path = a new discovery source starts; the existing 2s tick continues
-///   per announce_interval).
-/// - Disable: idempotent (already disabled = Ok); halt-save (the routing
-///   table persisted, the same as shutdown semantics), then unwire; the
-///   handshake DHT bit is cleared (new outbound handshakes stop declaring
-///   it), the attach slot emptied, the gate slots zeroed; announces end
-///   with the engine Shutdown (the registry dies with the actor).
+///   idempotent (already enabled = Ok, but check-and-self-heal: a torn
+///   projection from an interrupted historical toggle is re-projected,
+///   so no mid-state can freeze forever behind the Ok); per-family cold
+///   wiring warms up (state restored from dht_state) + the projection
+///   write-point (handshake DHT bit + attach slot, atomically one call)
+///   + an immediate announce registration (the stalled-task revival
+///     path = a new discovery source starts; the existing 2s tick
+///     continues per announce_interval).
+/// - Disable: idempotent (already disabled = Ok, same check-and-heal of
+///   a leftover projection); halt-save (the routing table persisted, the
+///   same as shutdown semantics), then unwire; the projection
+///   write-point clears both faces and the gate slots are zeroed;
+///   announces end with the engine Shutdown (the registry dies with the
+///   actor).
 async fn handle_set_dht_enabled(
     enabled: bool,
     state: &mut EngineLoop,
@@ -1650,6 +1730,22 @@ async fn handle_set_dht_enabled(
             return Err("private torrent: DHT disabled (BEP27)".to_string());
         }
         if !wiring.is_empty() {
+            // Idempotent — but check-and-self-heal, not a blind Ok: a torn
+            // mid-state left by an interrupted historical toggle (wiring
+            // non-empty while the attach slot or the handshake bit lags)
+            // would otherwise freeze forever behind this branch. The check
+            // still reads the wiring slot alone (the idempotent gate's own
+            // source of truth — no second truth added; the attach read is
+            // a plain lock read, `dht.rs` AttachDhtSlot::get).
+            let attach_some = dial.attach_dht.get().is_some();
+            let all_reserved = state.faces.iter().all(|f| f.reserved.supports_dht());
+            if dht_projection_torn(true, attach_some, all_reserved) {
+                warn!(target: "taiji::core::engine", families = wiring.len(),
+                    "dht-on projection torn (attach/handshake lag the wiring) — \
+                     re-projecting");
+                let port = wiring.first().map(|w| w.dht_port).unwrap_or(actual_port);
+                project_dht_on(wiring, &mut state.faces, dial, port, seam.port_tx.clone());
+            }
             return Ok(()); // idempotent: already enabled.
         }
         let mut fresh: Vec<DhtFamilyWiring> = Vec::with_capacity(seam.cold.len());
@@ -1669,18 +1765,12 @@ async fn handle_set_dht_enabled(
         }
         let port = fresh.first().map(|w| w.dht_port).unwrap_or(actual_port);
         *wiring = fresh;
-        // Handshake DHT bit (declared on new outbound/inbound handshakes;
-        // existing connections keep their negotiated state for their
-        // lifetime — the same rule as libtorrent apply_settings).
-        for f in &mut state.faces {
-            f.reserved = f.reserved.with_dht();
-        }
-        // Attach slot + immediate announce registration (the revival path) +
-        // cadence base reset.
-        dial.attach_dht.set(Some(AttachDht {
-            local_port: port,
-            port_tx: seam.port_tx.clone(),
-        }));
+        // Single projection write-point: the handshake DHT bit + the attach
+        // slot move together with the wiring swap (one call, both faces —
+        // no torn window between them).
+        project_dht_on(wiring, &mut state.faces, dial, port, seam.port_tx.clone());
+        // Immediate announce registration (the revival path) + cadence base
+        // reset.
         spawn_dht_announces(wiring, &state.faces, actual_port, actual_port);
         state.last_dht_announce = Instant::now();
         info!(target: "taiji::core::engine",
@@ -1689,6 +1779,20 @@ async fn handle_set_dht_enabled(
         Ok(())
     } else {
         if wiring.is_empty() {
+            // Idempotent — but check-and-self-heal, not a blind Ok: clear any
+            // projection residue (attach slot / handshake bit / gate pumps)
+            // a historical interrupted toggle left behind. Harmless for an
+            // engine that never enabled DHT (all reads are empty; the gate
+            // send is idempotent).
+            let attach_some = dial.attach_dht.get().is_some();
+            let any_reserved = state.faces.iter().any(|f| f.reserved.supports_dht());
+            if dht_projection_torn(false, attach_some, any_reserved) {
+                warn!(target: "taiji::core::engine",
+                    "dht-off projection residue (attach/handshake outlive the \
+                     wiring) — re-projecting");
+                project_dht_off(wiring, &mut state.faces, dial);
+                clear_gates(seam).await;
+            }
             return Ok(()); // idempotent: already disabled.
         }
         // Halt-save (DHTSetup.cc shutdown semantics): Shutdown -> persist
@@ -1696,15 +1800,11 @@ async fn handle_set_dht_enabled(
         dht_halt_save(state, wiring, ev_rx).await;
         wiring.clear(); // the engine Shutdown makes it exit on its own (the join
         // teardown path takes over).
-        for f in &mut state.faces {
-            f.reserved = f.reserved.without_dht();
-        }
-        dial.attach_dht.set(None);
-        // Cold-wiring gate slots cleared explicitly (pumps stop; the next
-        // enable rebuilds the channels).
-        for cold in &seam.cold {
-            cold.gate.set_engine(None).await;
-        }
+        // Single projection write-point (handshake bit + attach slot) + the
+        // cold-wiring gate slots zeroed (pumps stop; the next enable
+        // rebuilds the channels).
+        project_dht_off(wiring, &mut state.faces, dial);
+        clear_gates(seam).await;
         info!(target: "taiji::core::engine",
             "dht unwired at runtime (hot disable; state saved)");
         Ok(())
@@ -1794,4 +1894,41 @@ pub(crate) fn on_block_settled(face: &mut FaceState, index: u32, begin: u32) {
     debug!(target: "taiji::core::engine", piece, begin, cuid,
         "duplicate coordinate settled: cancel sibling in-flight request ");
     let _ = peer.command(taiji_bt::peer::PeerCommand::CancelPiece { id, begin, length });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Enabled-direction tear: wiring non-empty while the attach slot or
+    /// the handshake-bit projection lags (the interrupted-toggle residue).
+    #[test]
+    fn torn_enable_projection_is_detected() {
+        assert!(dht_projection_torn(true, false, true), "attach missing");
+        assert!(
+            dht_projection_torn(true, true, false),
+            "handshake bit lagging"
+        );
+        assert!(dht_projection_torn(true, false, false), "both lagging");
+    }
+
+    /// Disabled-direction tear: wiring empty while the attach slot or the
+    /// handshake-bit projection residue survives.
+    #[test]
+    fn torn_disable_projection_is_detected() {
+        assert!(dht_projection_torn(false, true, false), "attach residue");
+        assert!(
+            dht_projection_torn(false, false, true),
+            "handshake bit residue"
+        );
+        assert!(dht_projection_torn(false, true, true), "both residue");
+    }
+
+    /// Consistent states in both directions pass (no tear): fully-on and
+    /// fully-off.
+    #[test]
+    fn consistent_projections_pass() {
+        assert!(!dht_projection_torn(true, true, true), "fully on");
+        assert!(!dht_projection_torn(false, false, false), "fully off");
+    }
 }

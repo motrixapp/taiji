@@ -214,7 +214,12 @@ pub enum NatError {
 /// Runtime snapshot (reply to the `Snapshot` command).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NatSnapshot {
-    /// Active backend (None = no mapping has succeeded yet).
+    /// Active backend (None = no mapping has succeeded yet; also None while
+    /// the recorded backend's client has been discarded — the IGD
+    /// discard-and-rediscover window / NAT-PMP epoch poisoning — until the
+    /// next mapping round lazily rediscovers. `mappings` stays optimistic in
+    /// that window: failed rounds do not clear active entries, and gateway
+    /// lease expiry is the reclamation backstop).
     pub backend: Option<Backend>,
     /// Gateway external address (from address requests/polling; None =
     /// unknown).
@@ -651,7 +656,14 @@ impl NatActor {
                     %protocol, internal = w.internal_port,
                     external = mapped.external_port,
                     "port mapped");
-                if self.degraded {
+                // Recovered only when the whole wanted set is live again
+                // (the insert above has landed): one protocol succeeding
+                // while another wanted protocol is still missing is a
+                // partial recovery — clearing here would flip the
+                // snapshot's degraded/last_error off while mappings remain
+                // down and re-arm the Failed event edge (an oscillating
+                // re-fire on every subsequent failed round).
+                if self.degraded && self.wanted.keys().all(|p| self.active.contains_key(p)) {
                     self.degraded = false;
                     self.last_error = None;
                 }
@@ -865,6 +877,14 @@ impl NatActor {
     /// consecutive failures reach the threshold, drop the cached client
     /// and derived gateway — the next mapping round rediscovers (SSDP +
     /// Location check).
+    ///
+    /// `backend` deliberately stays `Some(Igd)` past the discard (the
+    /// internal backend/client desync is kept on purpose): `unmap_one` and
+    /// `poll_address` dispatch on `backend`, so clearing it would make the
+    /// best-effort shutdown unmap silently skip live gateway mappings
+    /// (3600s lease expiry would be the only reclaim) and stop address
+    /// polling. `resolve_igd` rebuilds the client lazily; the snapshot
+    /// reports this window as `backend: None` instead (see `snapshot`).
     fn note_igd_failure(&mut self) {
         self.igd_failures = self.igd_failures.saturating_add(1);
         if self.igd_failures < IGD_REDISCOVER_AFTER_FAILURES {
@@ -1135,8 +1155,22 @@ impl NatActor {
 
     /// Snapshot.
     fn snapshot(&self) -> NatSnapshot {
+        // `backend` is derived, not copied: the recorded value deliberately
+        // outlives its client in two windows — IGD discard-and-rediscover
+        // (`igd` dropped; `resolve_igd` rebuilds lazily) and NAT-PMP epoch
+        // poisoning (`pmp` dropped; breaker terminal for the session) —
+        // because unmap/poll dispatch on `backend` (see `note_igd_failure`).
+        // Reporting the stale value would present a dead backend as live;
+        // report None until the next successful round re-establishes the
+        // client. `mappings` stays optimistic in the same window (failed
+        // rounds do not clear active entries; lease expiry backstops).
+        let backend = match self.backend {
+            Some(Backend::Igd) if self.igd.is_none() => None,
+            Some(Backend::NatPmp) if self.poison.poisoned() => None,
+            backend => backend,
+        };
         NatSnapshot {
-            backend: self.backend,
+            backend,
             external_address: self.external_address,
             mappings: self
                 .active

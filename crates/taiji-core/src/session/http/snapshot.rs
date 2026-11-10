@@ -1,7 +1,9 @@
 //! The bitmap snapshot pipeline: block completion → bitmap dirty → a
 //! 2s-debounced snapshot persisted; every snapshot commit is preceded
 //! by one fsync of the task file (at most one per task per 2s, bounded
-//! cost).
+//! cost). A state-field change (the state/error setters) marks the
+//! pipeline dirty the same way and rides the next beat through the
+//! same fsync gate — never silently dropped on a clean pipeline.
 //!
 //! Timing invariant ("a power-loss bitmap is never ahead of the
 //! data"): every completed block in a snapshot has its byte range
@@ -12,15 +14,19 @@
 //!
 //! `NotFound` from fsync refuses the commit whenever the pipeline
 //! holds completed blocks (a file declared complete but missing = an
-//! inflated bitmap; never disguised as success) — snapshots only run
-//! while dirty, and dirty implies ≥1 completed block, so a NotFound
-//! at the commit point always accompanies a non-empty completed set.
+//! inflated bitmap; never disguised as success). Since the setters
+//! mark dirty too, a commit can also be reached with an empty
+//! completed set (a state-only change before the first block); a
+//! `NotFound` there is refused the same way (conservative: the change
+//! stays dirty and retries on the backoff cadence) — no commit lands
+//! while the task file is missing.
 //!
 //! Exit guard: terminal-row consumption
 //! ([`HttpSnapshotPipeline::into_row`]) must follow
 //! [`HttpSnapshotPipeline::flush_now`] — the completion path enforces
 //! "fsync + bitmap persist → terminal persist" order, and a row
-//! carrying an unpersisted bitmap is refused.
+//! carrying an unpersisted bitmap (or an unpersisted state/error
+//! change) is refused.
 //!
 //! The BT-side barrier (the same timing invariant: data fsync first,
 //! progress row persist second), the parent-directory trade-off, and
@@ -47,9 +53,9 @@ pub const SNAPSHOT_INTERVAL_MS: u64 = 2000;
 /// `.part` directly and fsync; tests = power-loss models / fault
 /// stubs). Blocking semantics — the caller must put it in
 /// `spawn_blocking`. Error semantics: **failures propagate verbatim**
-/// (including `NotFound` — whether a missing file is tolerable is
-/// decided by the pipeline on completed-block state, never disguised
-/// as success here).
+/// (including `NotFound` — the pipeline refuses any commit while the
+/// task file is missing; with completed blocks it would be an inflated
+/// bitmap — never disguised as success here).
 pub trait TaskFileSync: Send + Sync + 'static {
     /// fsync the task file. Any error (including NotFound) propagates
     /// verbatim.
@@ -58,12 +64,12 @@ pub trait TaskFileSync: Send + Sync + 'static {
 
 /// The production implementation: open the `.part` file directly and
 /// fsync (opened read+write — Windows `FlushFileBuffers` needs a write
-/// handle). `NotFound` propagates verbatim: with completed blocks in
-/// the pipeline, a missing file = declared-complete bytes missing, so
-/// the snapshot must refuse (see [`TaskFileSync`]). Goes through the
-/// store disk layer for uniform error classification and path context.
-/// Parent-directory fsync is not in this seam (see the module doc for
-/// the directory-entry trade-off — recovery from zero, the safe
+/// handle). `NotFound` propagates verbatim and the pipeline refuses the
+/// commit (with completed blocks in the pipeline, a missing file =
+/// declared-complete bytes missing; see [`TaskFileSync`]). Goes through
+/// the store disk layer for uniform error classification and path
+/// context. Parent-directory fsync is not in this seam (see the module
+/// doc for the directory-entry trade-off — recovery from zero, the safe
 /// direction).
 #[derive(Debug, Clone)]
 pub struct PartFileSync {
@@ -128,16 +134,20 @@ pub enum HttpSnapshotError {
     /// granularity out of domain).
     #[error("http: snapshot pipeline row geometry invalid")]
     RowCorrupt,
-    /// A terminal row carrying an unpersisted bitmap was consumed —
-    /// the completion path must [`HttpSnapshotPipeline::flush_now`]
-    /// (fsync + bitmap persist) before handing over the row.
-    #[error("http: row consumed with unflushed bitmap blocks; flush_now before terminal persist")]
+    /// A terminal row carrying unpersisted changes (an unpersisted
+    /// bitmap, or a state/error change from the setters) was consumed
+    /// — the completion path must [`HttpSnapshotPipeline::flush_now`]
+    /// (fsync + row persist) before handing over the row.
+    #[error(
+        "http: row consumed with unflushed bitmap blocks or state fields; flush_now before terminal persist"
+    )]
     UnflushedRow,
 }
 
 /// The per-task bitmap snapshot pipeline: holds the task's
 /// authoritative row copy (the in-memory truth), marks dirty on block
-/// completion, and fsyncs + persists when the debounce window expires.
+/// completion or a state-field change (the state/error setters), and
+/// fsyncs + persists when the debounce window expires.
 /// Not Clone — the row truth is single-held (HttpTask actor exclusive;
 /// snapshots commit via [`Self::flush_due`]).
 pub struct HttpSnapshotPipeline {
@@ -229,15 +239,15 @@ impl HttpSnapshotPipeline {
         Ok(true)
     }
 
-    /// The next snapshot due instant (None = no bitmap awaiting
-    /// persist; the task actor loop's timer hint face). The first
-    /// beat is due now (the first completed block can persist
-    /// immediately — progress on screen as soon as possible;
-    /// afterwards the 2s debounce cadence). **Failure backoff**: an
-    /// fsync/persist failure also advances the cadence anchor — the
-    /// next attempt = failure time + window, so a sustained disk
-    /// fault never hot-spins the task actor's due polling into the
-    /// disk.
+    /// The next snapshot due instant (None = nothing awaiting persist —
+    /// no unpersisted block or state-field change; the task actor
+    /// loop's timer hint face). The first beat is due now (the first
+    /// completed block can persist immediately — progress on screen as
+    /// soon as possible; afterwards the 2s debounce cadence).
+    /// **Failure backoff**: an fsync/persist failure also advances the
+    /// cadence anchor — the next attempt = failure time + window, so a
+    /// sustained disk fault never hot-spins the task actor's due
+    /// polling into the disk.
     pub fn next_due_ms(&self, now_ms: u64) -> Option<u64> {
         if !self.dirty {
             return None;
@@ -288,24 +298,41 @@ impl HttpSnapshotPipeline {
     /// entrance — their write face must go through the snapshot fsync
     /// order (a bare `row_mut` could carry a full dirty bitmap
     /// straight to upsert, bypassing the fsync gate).
+    ///
+    /// A state-field change marks the pipeline dirty: it rides the
+    /// next debounced snapshot (or [`Self::flush_now`]) through the
+    /// same fsync gate — a change on a clean pipeline is never
+    /// silently dropped. The flip side: a setter after the last flush
+    /// re-dirties the pipeline and [`Self::into_row`] refuses until
+    /// the next flush (a terminal path sets state/error first, then
+    /// [`Self::flush_now`], then consumes the row). A missing task
+    /// file refuses that commit too (see the module doc on
+    /// `NotFound`).
     pub fn set_state(&mut self, state: impl Into<String>) {
         self.row.state = state.into();
+        self.dirty = true;
     }
 
     /// Terminal/error payload maintenance (error_code/error_msg;
-    /// recovery to a non-error state passes `(None, None)`).
+    /// recovery to a non-error state passes `(None, None)`). Marks the
+    /// pipeline dirty exactly like [`Self::set_state`]: the change
+    /// rides the next snapshot (or [`Self::flush_now`]), and
+    /// [`Self::into_row`] refuses until it is flushed.
     pub fn set_error(&mut self, error_code: Option<String>, error_msg: Option<String>) {
         self.row.error_code = error_code;
         self.row.error_msg = error_msg;
+        self.dirty = true;
     }
 
     /// Consume the row (task wrap-up: the row goes back to the caller
-    /// for terminal persistence). **A dirty bitmap = refused**
-    /// ([`HttpSnapshotError::UnflushedRow`]) — the completion path
-    /// must run [`Self::flush_now`] first (fsync before terminal
-    /// persist, the exit guard of the ordering invariant; a done row
-    /// is not in the recovery read face, so the second line of
-    /// defense never covers "full bitmap + unpersisted bytes").
+    /// for terminal persistence). **A dirty pipeline = refused**
+    /// ([`HttpSnapshotError::UnflushedRow`]) — an unpersisted bitmap
+    /// or an unpersisted state/error change (the setters mark dirty);
+    /// the completion path must run [`Self::flush_now`] first (fsync
+    /// before terminal persist, the exit guard of the ordering
+    /// invariant; a done row is not in the recovery read face, so the
+    /// second line of defense never covers "full bitmap + unpersisted
+    /// bytes").
     pub fn into_row(self) -> Result<HttpTaskRow, HttpSnapshotError> {
         if self.dirty {
             return Err(HttpSnapshotError::UnflushedRow);
@@ -354,9 +381,9 @@ impl HttpSnapshotPipeline {
 
     /// The commit body: **fsync the task file first, commit the
     /// snapshot second** — the order is the invariant. An fsync
-    /// failure (including NotFound — with completed blocks in the
-    /// pipeline, a missing file is an inflated bitmap, never
-    /// committed) does not commit (the bitmap stays dirty); a persist
+    /// failure (including NotFound — refused whatever the completed
+    /// set; with completed blocks a missing file is an inflated
+    /// bitmap) does not commit (the pipeline stays dirty); a persist
     /// failure also stays dirty (a lost row write converges via the
     /// next snapshot/saveSession rewrite, matching the torrent
     /// row-write caliber). Failures also advance the cadence anchor
@@ -473,8 +500,9 @@ mod tests {
         }
     }
 
-    /// Missing-file injection (the NotFound semantic face: with
-    /// completed blocks in the pipeline = the snapshot is refused).
+    /// Missing-file injection (the NotFound semantic face: the
+    /// snapshot is refused — with completed blocks in the pipeline and
+    /// for a state-only commit alike).
     struct MissingFileSync;
 
     impl TaskFileSync for MissingFileSync {
@@ -508,14 +536,18 @@ mod tests {
         }
     }
 
-    /// The persist seam recorder: records the bitmap at the persist
-    /// instant and the durable face at that time. The call instant =
-    /// after fsync (the pipeline commit order) — the recorded value
-    /// is the observation point of the order invariant.
+    /// The persist seam recorder: records the bitmap (plus the
+    /// state-machine fields) at the persist instant and the durable
+    /// face at that time. The call instant = after fsync (the pipeline
+    /// commit order) — the recorded value is the observation point of
+    /// the order invariant.
     #[derive(Debug, Clone)]
     struct SnapshotRecord {
         bitmap: Vec<u8>,
         durable_len: u64,
+        state: String,
+        error_code: Option<String>,
+        error_msg: Option<String>,
     }
 
     fn recording_sink(
@@ -530,6 +562,9 @@ mod tests {
                 .push(SnapshotRecord {
                     bitmap: row.block_bitmap.clone().unwrap_or_default(),
                     durable_len,
+                    state: row.state,
+                    error_code: row.error_code,
+                    error_msg: row.error_msg,
                 });
             std::future::ready(Ok(PersistOutcome::Written))
         }
@@ -880,12 +915,12 @@ mod tests {
         assert!(!pipe.is_dirty());
     }
 
-    /// NotFound semantics: with completed blocks in the pipeline
-    /// (flush is dirty-driven, so reaching the commit point implies a
-    /// non-empty completed set), a missing file = declared-complete
-    /// bytes missing → the snapshot is refused; the production seam
-    /// reports NotFound on a missing file verbatim (never a disguised
-    /// Ok).
+    /// NotFound semantics: with completed blocks in the pipeline, a
+    /// missing file = declared-complete bytes missing → the snapshot
+    /// is refused; the production seam reports NotFound on a missing
+    /// file verbatim (never a disguised Ok). The empty-completed-set
+    /// face (a state-only dirty from the setters) is pinned in
+    /// `setters_mark_dirty_and_ride_next_snapshot`.
     #[tokio::test]
     async fn missing_task_file_rejects_snapshot_when_blocks_done() {
         let sync: Arc<dyn TaskFileSync> = Arc::new(MissingFileSync);
@@ -1015,7 +1050,8 @@ mod tests {
     /// straight to terminal persist, bypassing the fsync gate); the
     /// row may be handed over only after flush_now; the state setters
     /// expose only state/error fields and never touch the progress
-    /// face.
+    /// face. A setter alone dirties a clean pipeline too: `into_row`
+    /// refuses the unpersisted state change until flush_now.
     #[tokio::test]
     async fn into_row_requires_flush_and_setters_cannot_touch_progress() {
         let model = Arc::new(Mutex::new(PowerModel::default()));
@@ -1065,6 +1101,177 @@ mod tests {
             "the state written by the setter rides the row"
         );
         assert_eq!(row.block_bitmap.as_deref().map(<[u8]>::len), Some(1));
+
+        // A clean pipeline (no completed block): a setter alone dirties
+        // it — the unpersisted state change is refused at the exit just
+        // like an unpersisted bitmap (an old implementation left the
+        // pipeline clean, so the change bypassed every snapshot).
+        let mut pipe = ok(
+            HttpSnapshotPipeline::new(
+                pipeline_row("8000000000000407", 4, 256 * 1024),
+                None,
+                Arc::clone(&sync),
+            ),
+            "clean pipeline",
+        );
+        assert!(!pipe.is_dirty());
+        pipe.set_state("done");
+        assert!(
+            matches!(pipe.into_row(), Err(HttpSnapshotError::UnflushedRow)),
+            "a state change on a clean pipeline must flush_now before the row is handed over"
+        );
+        // Rebuilt (into_row consumed the capability): flush first,
+        // then the exit opens; the setters never touch the progress
+        // face.
+        let mut pipe = ok(
+            HttpSnapshotPipeline::new(
+                pipeline_row("8000000000000407", 4, 256 * 1024),
+                None,
+                Arc::clone(&sync),
+            ),
+            "clean pipeline rebuilt",
+        );
+        pipe.set_state("done");
+        pipe.set_error(None, None);
+        let flushed = ok(
+            pipe.flush_now(0, recording_sink(Arc::clone(&model), Arc::clone(&snaps)))
+                .await,
+            "flush state-only change",
+        );
+        assert!(flushed.is_some(), "a state-only change takes a real beat");
+        let row = ok(pipe.into_row(), "clean into_row after state-only flush");
+        assert_eq!(row.state, "done");
+        assert_eq!(row.total_done, 0, "the setters never touch progress");
+        assert_eq!(
+            row.block_bitmap.as_deref().map(|bm| done_blocks(bm, 4)),
+            Some(0),
+            "no completed block appears from a setter"
+        );
+    }
+
+    /// The state setters mark dirty (a state-field change on a clean
+    /// pipeline is never silently dropped): `set_state` on a clean
+    /// pipeline (no completed block) arms the first beat immediately
+    /// and the change rides the snapshot through the same fsync gate
+    /// (one fsync per beat, no progress carried); `set_error` after a
+    /// beat rides the next debounced beat (the 2s cost bound holds).
+    /// A missing task file refuses a state-only commit conservatively:
+    /// the change stays dirty and the exit stays closed.
+    #[tokio::test]
+    async fn setters_mark_dirty_and_ride_next_snapshot() {
+        let model = Arc::new(Mutex::new(PowerModel::default()));
+        let sync: Arc<dyn TaskFileSync> = Arc::new(SimSync(Arc::clone(&model)));
+        let snaps = Arc::new(Mutex::new(Vec::new()));
+        let mut pipe = ok(
+            HttpSnapshotPipeline::new(
+                pipeline_row("8000000000000409", 4, 256 * 1024),
+                None,
+                Arc::clone(&sync),
+            ),
+            "pipeline",
+        );
+        assert!(!pipe.is_dirty(), "a fresh pipeline is clean");
+        assert_eq!(pipe.next_due_ms(0), None, "nothing awaiting persist");
+
+        // A state change on a clean pipeline: dirty, first beat due
+        // now.
+        pipe.set_state("paused");
+        assert!(pipe.is_dirty(), "set_state marks the pipeline dirty");
+        assert_eq!(
+            pipe.next_due_ms(0),
+            Some(0),
+            "the first state-only beat is due immediately"
+        );
+        let first = ok(
+            pipe.flush_now(0, recording_sink(Arc::clone(&model), Arc::clone(&snaps)))
+                .await,
+            "state-only flush",
+        );
+        assert_eq!(first, Some(PersistOutcome::Written));
+        assert!(!pipe.is_dirty(), "the beat clears the dirty bit");
+        {
+            let records = snaps.lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(records.len(), 1, "exactly one snapshot");
+            let last = records.last().unwrap_or_else(|| panic!("recorded"));
+            assert_eq!(last.state, "paused", "the state change rides the snapshot");
+            assert_eq!(
+                done_blocks(&last.bitmap, 4),
+                0,
+                "a state-only beat carries no progress"
+            );
+        }
+        assert_eq!(
+            model.lock().unwrap_or_else(|p| p.into_inner()).fsyncs,
+            1,
+            "the state-only beat passes the same fsync gate"
+        );
+
+        // set_error after a beat: dirty again, rides the next
+        // debounced beat (the window still bounds the cost).
+        pipe.set_error(Some("e".into()), Some("m".into()));
+        assert!(pipe.is_dirty(), "set_error marks the pipeline dirty");
+        assert_eq!(pipe.next_due_ms(500), Some(SNAPSHOT_INTERVAL_MS));
+        let none = ok(
+            pipe.flush_due(500, recording_sink(Arc::clone(&model), Arc::clone(&snaps)))
+                .await,
+            "windowed flush",
+        );
+        assert_eq!(none, None, "no beat inside the debounce window");
+        let second = ok(
+            pipe.flush_due(
+                SNAPSHOT_INTERVAL_MS,
+                recording_sink(Arc::clone(&model), Arc::clone(&snaps)),
+            )
+            .await,
+            "debounced flush",
+        );
+        assert_eq!(second, Some(PersistOutcome::Written));
+        assert!(!pipe.is_dirty());
+        {
+            let records = snaps.lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(records.len(), 2, "one snapshot per beat");
+            let last = records.last().unwrap_or_else(|| panic!("recorded"));
+            assert_eq!(last.error_code.as_deref(), Some("e"));
+            assert_eq!(last.error_msg.as_deref(), Some("m"));
+            assert_eq!(
+                last.state, "paused",
+                "the earlier state rides along unchanged"
+            );
+        }
+        assert_eq!(
+            model.lock().unwrap_or_else(|p| p.into_inner()).fsyncs,
+            2,
+            "exactly one fsync per beat (bounded cost)"
+        );
+        // The fsynced upper-bound view advances with the state fields.
+        let view = pipe.flushed_row().unwrap_or_else(|| panic!("flushed"));
+        assert_eq!(view.state, "paused");
+        assert_eq!(view.error_code.as_deref(), Some("e"));
+
+        // A missing task file: the state-only commit is refused like
+        // any other (no commit lands while the file is missing) — the
+        // change stays dirty and the exit stays closed.
+        let mut missing = ok(
+            HttpSnapshotPipeline::new(
+                pipeline_row("800000000000040a", 4, 256 * 1024),
+                None,
+                Arc::new(MissingFileSync),
+            ),
+            "pipeline (missing task file)",
+        );
+        missing.set_state("paused");
+        match missing.flush_now(0, no_sink()).await {
+            Err(HttpSnapshotError::Fsync(StoreError::FileIo { source, .. })) => {
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected fsync NotFound, got {other:?}"),
+        }
+        assert!(missing.is_dirty(), "the refused state change stays dirty");
+        assert!(missing.flushed_row().is_none(), "nothing was committed");
+        assert!(
+            matches!(missing.into_row(), Err(HttpSnapshotError::UnflushedRow)),
+            "an unpersisted state change keeps the exit closed"
+        );
     }
 
     /// Power-order injection: multi-seed randomization × delete the
@@ -1418,7 +1625,7 @@ mod tests {
         ok(std::fs::create_dir_all(&dir), "mkdir");
 
         // Missing file → NotFound propagates verbatim (the pipeline
-        // decides on completed-block state).
+        // refuses the commit).
         let missing = PartFileSync::new(dir.join("absent.bin.part"));
         let err = missing.sync();
         match err {

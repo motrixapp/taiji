@@ -1181,9 +1181,12 @@ check (recover.rs) is the second line of defense.
 
 `NotFound` from fsync refuses the commit whenever the pipeline holds
 completed blocks (a file declared complete but missing = an inflated
-bitmap; never disguised as success) — snapshots only run while dirty,
-and dirty implies ≥1 completed block, so a NotFound reaching the commit
-point always accompanies a non-empty completed set.
+bitmap; never disguised as success). The state/error setters mark the
+pipeline dirty too, so a commit can also be reached with an empty
+completed set (a state-only change before the first block); a NotFound
+there is refused the same way (conservative: the change stays dirty and
+retries on the backoff cadence) — no commit lands while the task file
+is missing.
 
 ### Exit guard
 
@@ -1193,7 +1196,11 @@ persist" order, and a row carrying an unpersisted bitmap is refused
 (a done row is not in the recovery read face, so the second line of
 defense never covers "full bitmap + unpersisted bytes"). The state
 setters expose only state/error fields; bitmap/count/progress have no
-write entrance outside the snapshot fsync order.
+write entrance outside the snapshot fsync order. A setter marks the
+pipeline dirty: the state change rides the next debounced snapshot (or
+`flush_now`) through the same fsync gate — never silently dropped on a
+clean pipeline — and an unpersisted state change is refused at
+`into_row` as well.
 
 ### BT-side barrier
 

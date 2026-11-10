@@ -52,6 +52,10 @@ pub use rows::{
     TaskCookieRow, TorrentFileRow, TorrentProgressRow, TorrentRow, TorrentSnapshot, TrackerRow,
 };
 pub use runner::PersistWriter;
+// The unified task-phase vocabulary over the three persisted `state`
+// columns (torrent/http/media) — the enum + parse/coarse faces; see
+// the task_phase module doc for the landing rationale.
+pub use task_phase::{TaskFamily, TaskPhase, TaskPhaseError};
 // The media state-domain declarations (the startup recovery read
 // face's active set + the upsert guard's guarded set — re-exported
 // for the schema comment-consistency pin).
@@ -65,6 +69,7 @@ mod job;
 mod observer;
 mod rows;
 mod runner;
+mod task_phase;
 mod write_cookie;
 mod write_dht;
 mod write_http;

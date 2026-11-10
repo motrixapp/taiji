@@ -101,9 +101,12 @@ pub enum State {
     SynRecv,
     /// Handshake complete (BEP-29 CS_CONNECTED).
     Connected,
-    /// FIN phase: local ST_FIN sent awaiting confirmation, or the peer's
-    /// eof_pkt has not finished delivering (BEP-29 CS_FIN_SENT semantics;
-    /// see the "type" section's ST_FIN eof_pkt note).
+    /// FIN phase: our ST_FIN is queued (sent, or waiting for window room),
+    /// held through its acknowledgment until the connection closes (BEP-29
+    /// CS_FIN_SENT semantics). Only the local FIN drives this state: the
+    /// peer's FIN (eof_pkt, see the "type" section's ST_FIN note) is tracked
+    /// separately by the driver's `eof_pkt`/`read_eof` and leaves the state
+    /// untouched.
     Fin,
     /// Terminated (FIN done both ways / ST_RESET / retransmit give-up / local close).
     Closed,

@@ -52,7 +52,13 @@
 //!      logging/printing macro (`trace!`/`debug!`/`info!`/`warn!`/
 //!      `error!`/`print!`/`println!`/`eprint!`/`eprintln!`) and
 //!      `DebugStruct::field` labels (a string literal whose immediately
-//!      preceding code is `.field(`).
+//!      preceding code is `.field(`);
+//!   4. the canonical v1 string table — files listed in
+//!      [`CANONICAL_V1_TABLES`]: the persistence layer's single owned
+//!      home of the raw v1 vocabulary (phase B1 of the protocol/internal
+//!      split plan). The exemption is existence-checked in the guard, so
+//!      a rename or move fails loudly instead of silently idling the
+//!      rule; every other occurrence below rpc stays counted.
 //! - `#[cfg(test)]`-gated *non-module* items (helper fns, `use`s,
 //!   statements) stay in the counted face: they are not tests
 //!   modules/files, and counting them is the conservative direction.
@@ -96,6 +102,16 @@ const STATUS_WORDS: &[&str] = &[
 /// Measured leak baseline (2026-11-10): taiji-core 81, taiji-store 24,
 /// taiji-media 19, taiji-http 1. Ratchets down only — see the module doc.
 const BASELINE: usize = 125;
+
+/// The persistence layer's canonical v1 string table (phase B1 of the
+/// protocol/internal split plan): `task_phase.rs` owns the TaskPhase
+/// enum's v1 mapping — the one sanctioned home of the raw status
+/// vocabulary below the rpc crate. Counted occurrences in every other
+/// file stay in the leak face; B3 (writer convergence) is expected to
+/// shrink the rest of the baseline around this table. Registering a
+/// file here is a recorded decision with a rationale, never a silent
+/// pass — mirroring [`RPC_CONSUMERS`] on the manifest face.
+const CANONICAL_V1_TABLES: &[&str] = &["crates/taiji-store/src/persist/writer/task_phase.rs"];
 
 /// Production-file floor for the scan face (300 at the baseline date).
 const MIN_SCANNED_FILES: usize = 250;
@@ -145,6 +161,7 @@ fn aria2_status_literals_stay_within_baseline() {
     let mut scanned = 0usize;
     let mut offenders: Vec<String> = Vec::new();
     let mut per_crate: BTreeMap<String, usize> = BTreeMap::new();
+    let mut canonical_seen: HashSet<String> = HashSet::new();
     for (path, text, analysis) in &faces {
         if test_files.contains(path) || test_dirs.iter().any(|d| path.starts_with(d)) {
             continue;
@@ -152,6 +169,12 @@ fn aria2_status_literals_stay_within_baseline() {
         scanned += 1;
         let rel_path = path.strip_prefix(&root).unwrap_or(path);
         let rel = rel_path.display().to_string();
+        if CANONICAL_V1_TABLES.contains(&rel.as_str()) {
+            // Still part of the scan face (scanned += 1 above, floor
+            // honest); only the count is exempted.
+            canonical_seen.insert(rel);
+            continue;
+        }
         let hits = collect_status_hits(text, analysis);
         if hits.is_empty() {
             continue;
@@ -172,6 +195,17 @@ fn aria2_status_literals_stay_within_baseline() {
         scanned >= MIN_SCANNED_FILES,
         "scan surface distorted: only {scanned} production .rs files under \
          crates/*/src (floor {MIN_SCANNED_FILES}); did the workspace layout drift?"
+    );
+    let missing: Vec<&str> = CANONICAL_V1_TABLES
+        .iter()
+        .copied()
+        .filter(|c| !canonical_seen.contains(*c))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "canonical v1 table moved or removed: {missing:?} is not in the scan \
+         face; update CANONICAL_V1_TABLES (with its rationale) alongside the \
+         rename — an unregistered move would silently re-count the table"
     );
 
     let total = offenders.len();

@@ -33,9 +33,9 @@
 //! Reference location: setting the `TAIJI_DIFF_ARIA2C` environment variable
 //! (a path) takes effect explicitly (an invalid path means the reference is
 //! absent; no fallback probing); when unset, the default probe looks for the
-//! workspace sibling checkouts `aria2/src/aria2c` and the Motrix fork layout
-//! `aria2 fork/src/aria2c` (see [`DEFAULT_PROBE_LAYOUTS`]; the resolution
-//! core is unit-anchored in
+//! workspace sibling checkouts `aria2/src/aria2c` (the upstream layout) and
+//! the Motrix fork layout `aria2_motrix/src/aria2c` (see
+//! [`DEFAULT_PROBE_LAYOUTS`]; the resolution core is unit-anchored in
 //! `reference_resolution_absent_and_explicit_shapes`).
 //!
 //! WS push event names are not driven live by this test (fork events are
@@ -432,14 +432,15 @@ fn reference_resolution_absent_and_explicit_shapes() {
         .unwrap_or_else(|e| panic!("mkdir {}: {e}", manifest.display()));
     // (1) No checkout anywhere near this base: none of the probe layouts
     // exists under it (the `../..` chains land inside the private temp
-    // root, which has no aria2/aria2 fork sibling).
+    // root, which has no aria2/aria2_motrix sibling).
     assert_eq!(
         resolve_reference(None, &manifest),
         None,
         "all probe paths nonexistent -> no reference binary (the absent-default-red anchor)"
     );
-    // (3) Probe hit: create the fork-layout candidate relative to the
-    // manifest (layout `../../../aria2 fork/src/aria2c`).
+    // (3) Probe hit: create a probe candidate relative to the manifest
+    // (layout `../../../aria2/src/aria2c`; the fork layout entries probe
+    // later in order and stay missable here — the ordered-probe contract).
     let fork = manifest.join("../../../aria2/src/aria2c");
     let fork_dir = fork.parent().unwrap_or_else(|| panic!("fork parent"));
     std::fs::create_dir_all(fork_dir)
@@ -472,14 +473,18 @@ fn reference_resolution_absent_and_explicit_shapes() {
 
 /// Default probe layouts (`TAIJI_DIFF_ARIA2C` unset): workspace sibling
 /// checkouts resolved from the crate manifest dir — the upstream layout
-/// `aria2/src/aria2c` and the Motrix fork layout `aria2 fork/src/aria2c`;
+/// `aria2/src/aria2c` and the Motrix fork layout `aria2_motrix/src/aria2c`;
 /// the two `../` depths cover a plain checkout (repo root one level above
-/// the workspace) and a git-worktree sibling of the workspace itself.
+/// the workspace) and a git-worktree sibling of the workspace itself. The
+/// upstream layout is probed first (a built upstream checkout wins over the
+/// fork), the fork layout after — the reference contract of this test is
+/// either build, and the ordered probe keeps resolution deterministic when
+/// both exist.
 const DEFAULT_PROBE_LAYOUTS: &[&str] = &[
     "../../../../aria2/src/aria2c",
     "../../../aria2/src/aria2c",
-    "../../../../aria2/src/aria2c",
-    "../../../aria2/src/aria2c",
+    "../../../../aria2_motrix/src/aria2c",
+    "../../../aria2_motrix/src/aria2c",
 ];
 
 /// Resolution core (pure; unit-anchored in

@@ -17,7 +17,7 @@
   同一 fixture、同一参数，逐方法比对响应形态/错误码/错误消息/事件名。
   可复现性守卫 = 集成测试 `crates/taiji-rpc/tests/aria2_compat_live_diff.rs`
   （参考二进制经 `TAIJI_DIFF_ARIA2C` 环境变量指定；默认按序探测工作区同级
-  检出 `aria2/src/aria2c` 与 Motrix fork 布局 `aria2 fork/src/aria2c`；
+  检出 `aria2/src/aria2c`（上游布局）与 Motrix fork 布局 `aria2_motrix/src/aria2c`；
   **不可用时测试默认红** —— 零比对绝不允许宣称全绿差分；只有显式
   `TAIJI_DIFF_ALLOW_SKIP=1` 才降级为 SKIP 绿，输出中带机读标记
   `SKIP(taiji.rpc.live-diff): …`，降级消费方必须一并核查）。源码级静态

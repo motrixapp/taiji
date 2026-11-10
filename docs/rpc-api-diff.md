@@ -17,8 +17,8 @@ hereafter "the fork"). Governance rules:
   response shapes / error codes / error messages / event names. The reproducibility
   guard = the integration test `crates/taiji-rpc/tests/aria2_compat_live_diff.rs`
   (the reference binary is designated via the `TAIJI_DIFF_ARIA2C` environment variable;
-  by default the workspace sibling checkouts `aria2/src/aria2c` and the Motrix fork
-  layout `aria2 fork/src/aria2c` are probed; **when unavailable the test is red by
+  by default the workspace sibling checkouts `aria2/src/aria2c` (the upstream layout)
+  and the Motrix fork layout `aria2_motrix/src/aria2c` are probed; **when unavailable the test is red by
   default** — zero comparisons must never claim a fully
   green differential; only an explicit `TAIJI_DIFF_ALLOW_SKIP=1` downgrades to a SKIP
   green, with the machine-readable marker `SKIP(taiji.rpc.live-diff): …` in the output,

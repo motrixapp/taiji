@@ -27,15 +27,18 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use tracing::warn;
+
 use taiji_http::naming::{AUTO_RENAME_MAX_TRIES, renamed_candidate};
 // The fd-scan face uses the `fork_import` module path directly; the
 // persist re-export surface stays untouched.
 use taiji_store::persist::fork_import::ForkLiveness;
 use taiji_store::persist::{
-    Aria2CtrlError, Aria2HttpControl, ForkHttpTaskRow, HttpTaskRow, ImportBackup,
-    ImportTargetProbe, ImportTargetSnapshot, PersistHandle, backup_target_db, collect_aria2_files,
-    load_fork_http_tasks, open_fork_readonly, parse_aria2_control_http, probe_fork_readonly,
-    probe_import_target_readonly, read_import_target_snapshot as read_target_snapshot_impl,
+    Aria2CtrlError, Aria2HttpControl, ForkHttpTaskRow, ForkTaskState, HttpTaskRow, ImportBackup,
+    ImportTargetProbe, ImportTargetSnapshot, PersistHandle, TaskPhase, backup_target_db,
+    collect_aria2_files, load_fork_http_tasks, open_fork_readonly, parse_aria2_control_http,
+    probe_fork_readonly, probe_import_target_readonly,
+    read_import_target_snapshot as read_target_snapshot_impl,
 };
 
 use super::import::{AppliedTask, ImportSource};
@@ -368,10 +371,25 @@ fn http_collect_entry(
         return HttpCollectEntry::Skipped { source, reason };
     }
     // Option accounting: dir/out/pause get dedicated slots (columns/state);
-    // everything else goes verbatim into the inventory.
+    // everything else goes verbatim into the inventory. The parked seed
+    // reads `row.state` through the fork archive vocabulary's parse face
+    // ([`ForkTaskState::parse`]) — an unknown fork state (hand-edited /
+    // unknown-schema database) is explicit, never silent: warn (fork gid
+    // + the raw value) and land the task **paused** — the conservative
+    // state (an import whose archived intent cannot be read must not
+    // silently auto-start; the user sees the parked row and unpauses it).
     let mut dir_opt = None;
     let mut out_opt = None;
-    let mut paused = row.state == "paused";
+    let mut paused = match ForkTaskState::parse(&row.state) {
+        Ok(ForkTaskState::Paused) => true,
+        Ok(ForkTaskState::Waiting) => false,
+        Err(e) => {
+            warn!(target: "taiji::core::persist", fork_gid = %row.gid, %e,
+                "fork http task state outside the paused|waiting archive domain; \
+                 imported paused (conservative state)");
+            true
+        }
+    };
     let mut options = Vec::new();
     for (key, value) in &parsed.options {
         match key.as_str() {
@@ -838,7 +856,13 @@ impl HttpImportPlanner {
             origin_fork_key: Some(task.source_key.clone()),
             ..HttpPersistConfig::default()
         };
-        let state = if task.paused { "paused" } else { "queued" };
+        // Admission phase through the unified vocabulary's enum (the row
+        // word serializes only at the row/report payloads below).
+        let phase = if task.paused {
+            TaskPhase::Paused
+        } else {
+            TaskPhase::Queued
+        };
         // Bitmap payload (the successful-mapping face): block granularity
         // = the largest power-of-two factor of the piece clamped into
         // 256KiB..16MiB (the task-level immutable row contract);
@@ -869,7 +893,7 @@ impl HttpImportPlanner {
             // backfilled by the activation face).
             final_url: String::new(),
             mirrors_json: mirrors_json_of(&task.uris),
-            state: state.to_string(),
+            state: phase.as_v1_str().to_string(),
             queue_pos: task.queue_pos,
             dir: task.dir.clone(),
             out,
@@ -904,7 +928,7 @@ impl HttpImportPlanner {
             source_key: task.source_key.clone(),
             fork_gid: task.fork_gid.clone(),
             gid: gid_hex,
-            state: state.to_string(),
+            state: phase.as_v1_str().to_string(),
             dir: task.dir.clone(),
             out: row.out.clone(),
             uri_count: task.uris.len(),

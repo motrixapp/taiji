@@ -460,9 +460,9 @@ impl SessionActor {
                 // content, the seed pool) writes the seeding residence
                 // state instead.
                 let state = if self.queue.contains_seeding(gid) {
-                    "seeding"
+                    TaskPhase::Seeding
                 } else {
-                    "downloading"
+                    TaskPhase::Downloading
                 };
                 self.persist_transition(gid, state).await;
             }
@@ -1194,7 +1194,7 @@ impl SessionActor {
             self.queue.drop_active(gid);
             self.queue.push_seed_wait(gid);
             self.running.remove(&gid);
-            self.persist_transition(gid, "seeding").await;
+            self.persist_transition(gid, TaskPhase::Seeding).await;
             info!(target: "taiji::core::session", gid = %gid,
                 "seed budget full: completed task parked in seed_wait (graceful stop)");
             // The download slot freed here backfills in the same tick.
@@ -1309,7 +1309,7 @@ impl SessionActor {
             // Row truth: the download is complete and the task belongs
             // to the seed side ('seeding' covers residence and waiting
             // alike, the 'checking' precedent).
-            self.persist_transition(gid, "seeding").await;
+            self.persist_transition(gid, TaskPhase::Seeding).await;
             if let Some(t) = self.running.get(&gid) {
                 t.token.cancel();
             }
@@ -1321,7 +1321,7 @@ impl SessionActor {
             return;
         }
         self.queue.begin_seeding(gid);
-        self.persist_transition(gid, "seeding").await;
+        self.persist_transition(gid, TaskPhase::Seeding).await;
         info!(target: "taiji::core::session", gid = %gid,
             seeding = self.queue.seeding_len(),
             "download complete: task transferred to the seed pool (download slot released)");
@@ -1743,7 +1743,7 @@ impl SessionActor {
         let cfg = self.job_config(&gid);
         let mut row = super::super::persist::torrent_row(
             &gid.to_string(),
-            "paused",
+            TaskPhase::Paused,
             self.row_seq(),
             &derive_name(&meta.meta),
             &cfg,
@@ -2020,7 +2020,7 @@ impl SessionActor {
         let cfg = self.job_config(&gid);
         let mut row = super::super::persist::torrent_row(
             &gid.to_string(),
-            "queued",
+            TaskPhase::Queued,
             self.row_seq(),
             &derive_name(&meta.meta),
             &cfg,
@@ -2354,7 +2354,11 @@ impl SessionActor {
                 });
             let mut row = super::super::persist::torrent_row(
                 &gid.to_string(),
-                if patch.pause { "paused" } else { "metadata" },
+                if patch.pause {
+                    TaskPhase::Paused
+                } else {
+                    TaskPhase::Metadata
+                },
                 self.row_seq(),
                 &name,
                 &cfg,
@@ -2432,7 +2436,11 @@ impl SessionActor {
             cfg.selected_files = select_file_sel.clone();
             let row = super::super::persist::torrent_row(
                 &gid.to_string(),
-                if patch.pause { "paused" } else { "queued" },
+                if patch.pause {
+                    TaskPhase::Paused
+                } else {
+                    TaskPhase::Queued
+                },
                 self.row_seq(),
                 url,
                 &cfg,
@@ -2583,7 +2591,13 @@ impl SessionActor {
             // uris_from_mirrors inverse); for a single source the url
             // column is the truth, no redundant payload.
             mirrors_json: http_task::mirrors_json_of(&http_like),
-            state: if patch.pause { "paused" } else { "queued" }.into(),
+            state: if patch.pause {
+                TaskPhase::Paused
+            } else {
+                TaskPhase::Queued
+            }
+            .as_v1_str()
+            .into(),
             queue_pos: self.row_seq(),
             dir: patch
                 .dir
@@ -2764,7 +2778,11 @@ impl SessionActor {
         let meta = Arc::new(meta);
         let mut row = super::super::persist::torrent_row(
             &gid.to_string(),
-            if patch.pause { "paused" } else { "queued" },
+            if patch.pause {
+                TaskPhase::Paused
+            } else {
+                TaskPhase::Queued
+            },
             self.row_seq(),
             &derive_name(&meta.meta),
             &cfg,
@@ -2862,7 +2880,7 @@ impl SessionActor {
         // (the measured bitmap at RecheckDone re-routes; the mark would
         // only mislead the waiting face in between).
         self.seed_parked.remove(&gid);
-        self.persist_transition(gid, "checking").await;
+        self.persist_transition(gid, TaskPhase::Checking).await;
         self.queue.insert_check_pending(gid, paused);
         info!(target: "taiji::core::session", gid = %gid, parked =
             self.queue.check_pending_gids().len(),
@@ -3080,7 +3098,7 @@ impl SessionActor {
             // unpause face reactivates on the seed side — seed_parked,
             // §4.1.3).
             self.seed_parked.insert(gid);
-            self.persist_transition(gid, "paused").await;
+            self.persist_transition(gid, TaskPhase::Paused).await;
             self.queue
                 .insert_reserved(ReservedEntry { gid, paused: true }, Some(0));
             info!(target: "taiji::core::session", gid = %gid,
@@ -3092,14 +3110,14 @@ impl SessionActor {
                 // Seed budget full: park (no running slot of any pool;
                 // pump_all's seed segment promotes on the next release).
                 self.queue.push_seed_wait(gid);
-                self.persist_transition(gid, "seeding").await;
+                self.persist_transition(gid, TaskPhase::Seeding).await;
                 info!(target: "taiji::core::session", gid = %gid, budget,
                     "recheck complete (bitmap full): seed budget full, \
                      parked in seed_wait");
             } else {
                 // Direct seed-side transfer: the engine assembles inside
                 // the seed slot (activate_seed), never a download slot.
-                self.persist_transition(gid, "seeding").await;
+                self.persist_transition(gid, TaskPhase::Seeding).await;
                 info!(target: "taiji::core::session", gid = %gid,
                     "recheck complete (bitmap full): transfer to the seed pool \
                      (check slot released)");
@@ -3109,7 +3127,11 @@ impl SessionActor {
             // Not full (or the recheck errored): requeue reserved at the
             // head — the existing path, pause intent preserved (the
             // acceptance face of pausing mid-recheck).
-            let state = if paused { "paused" } else { "queued" };
+            let state = if paused {
+                TaskPhase::Paused
+            } else {
+                TaskPhase::Queued
+            };
             self.persist_transition(gid, state).await;
             self.queue
                 .insert_reserved(ReservedEntry { gid, paused }, Some(0));
@@ -3327,7 +3349,7 @@ impl SessionActor {
                     // Row state paused (the teardown event rewrites the same
                     // value when requeueing by the pause flag; skip-write
                     // semantics absorb the duplicate).
-                    self.persist_transition(gid, "paused").await;
+                    self.persist_transition(gid, TaskPhase::Paused).await;
                     Ok(CommandReply::Gid(gid))
                 } else {
                     Err(SessionError::failed(format!(
@@ -3342,9 +3364,9 @@ impl SessionActor {
                 // HTTP tasks: pause intent persisted with the http_task row
                 // (previously a reserved pause was a no-op on the http row,
                 // so the task auto-started after restart).
-                self.http_reserved_transition(gid, "paused").await;
-                self.media_reserved_transition(gid, "paused").await;
-                self.persist_transition(gid, "paused").await;
+                self.http_reserved_transition(gid, TaskPhase::Paused).await;
+                self.media_reserved_transition(gid, TaskPhase::Paused).await;
+                self.persist_transition(gid, TaskPhase::Paused).await;
                 Ok(CommandReply::Gid(gid))
             }
             // Check pool (in flight or parked — find locates both):
@@ -3366,7 +3388,7 @@ impl SessionActor {
                     if let Some(t) = self.running.get(&gid) {
                         t.token.cancel();
                     }
-                    self.persist_transition(gid, "paused").await;
+                    self.persist_transition(gid, TaskPhase::Paused).await;
                     Ok(CommandReply::Gid(gid))
                 } else {
                     Err(SessionError::failed(format!(
@@ -3383,7 +3405,7 @@ impl SessionActor {
                 self.queue
                     .insert_reserved(ReservedEntry { gid, paused: true }, Some(0));
                 self.seed_parked.insert(gid);
-                self.persist_transition(gid, "paused").await;
+                self.persist_transition(gid, TaskPhase::Paused).await;
                 Ok(CommandReply::Gid(gid))
             }
             // Synthesis pool (§4.3): a gate-hung or
@@ -3436,11 +3458,11 @@ impl SessionActor {
                 self.seed_parked.remove(&gid);
                 let budget = self.global.seed_budget();
                 if budget == 0 || self.queue.seeding_len() < budget {
-                    self.persist_transition(gid, "seeding").await;
+                    self.persist_transition(gid, TaskPhase::Seeding).await;
                     self.activate_seed(gid).await;
                 } else {
                     self.queue.push_seed_wait(gid);
-                    self.persist_transition(gid, "seeding").await;
+                    self.persist_transition(gid, TaskPhase::Seeding).await;
                     info!(target: "taiji::core::session", gid = %gid,
                         "seed budget full: unparked task re-queued into seed_wait");
                 }
@@ -3452,9 +3474,9 @@ impl SessionActor {
                 }
                 // HTTP task row back to queued (the http_task table is the
                 // source of truth).
-                self.http_reserved_transition(gid, "queued").await;
-                self.media_reserved_transition(gid, "queued").await;
-                let state = self.reserved_state_str(gid);
+                self.http_reserved_transition(gid, TaskPhase::Queued).await;
+                self.media_reserved_transition(gid, TaskPhase::Queued).await;
+                let state = self.reserved_state(gid);
                 self.persist_transition(gid, state).await;
                 Ok(CommandReply::Gid(gid))
             }
@@ -3535,7 +3557,7 @@ impl SessionActor {
             )));
         }
         let mut row = snap.row;
-        row.state = "queued".into();
+        row.state = TaskPhase::Queued.as_v1_str().into();
         row.error_code = None;
         row.error_msg = None;
         row.updated_at = now_epoch();
@@ -3581,10 +3603,11 @@ impl SessionActor {
     /// Row-state transition for waiting HTTP tasks (the reserved
     /// pause/unpause face): the row payload comes from the mirror
     /// (activated) or the registration row (not yet activated); the state
-    /// is changed and the whole row rewritten; `restore` is updated in
-    /// sync (the next activation before the mirror takes over does not
-    /// carry a stale row state). No-op for non-HTTP tasks.
-    pub(super) async fn http_reserved_transition(&mut self, gid: Gid, state: &str) {
+    /// arrives as the unified vocabulary's enum and serializes through
+    /// its canonical table, the whole row is rewritten; `restore` is
+    /// updated in sync (the next activation before the mirror takes over
+    /// does not carry a stale row state). No-op for non-HTTP tasks.
+    pub(super) async fn http_reserved_transition(&mut self, gid: Gid, phase: TaskPhase) {
         let Some(Job::Http(hj)) = self.jobs.get_mut(&gid) else {
             return;
         };
@@ -3595,7 +3618,7 @@ impl SessionActor {
                 None => return,
             },
         };
-        row.state = state.to_string();
+        row.state = phase.as_v1_str().to_string();
         row.updated_at = now_epoch();
         hj.restore = Some(row.clone());
         self.persist_http_row(&row).await;
@@ -3721,13 +3744,14 @@ impl SessionActor {
     }
 
     /// Row-state transition for waiting media tasks (the reserved
-    /// pause/unpause face): `paused` writes through the upsert
-    /// (non-terminal→terminal); `queued` — the exit from `paused` —
-    /// routes through the explicit unpause job (the upsert's
-    /// terminal-degrade guard refuses the plain non-terminal
+    /// pause/unpause face; the phase arrives as the unified vocabulary's
+    /// enum and serializes through its canonical table): `paused` writes
+    /// through the upsert (non-terminal→terminal); `queued` — the exit
+    /// from `paused` — routes through the explicit unpause job (the
+    /// upsert's terminal-degrade guard refuses the plain non-terminal
     /// overwrite; the job also clears the §3.2 phase memory). No-op
     /// for non-media tasks.
-    pub(super) async fn media_reserved_transition(&mut self, gid: Gid, state: &str) {
+    pub(super) async fn media_reserved_transition(&mut self, gid: Gid, phase: TaskPhase) {
         let Some(Job::Media(mj)) = self.jobs.get_mut(&gid) else {
             return;
         };
@@ -3737,7 +3761,7 @@ impl SessionActor {
         let Some(p) = self.persist.as_ref() else {
             return;
         };
-        if state == "queued" {
+        if phase == TaskPhase::Queued {
             let _ = p.unpause_media_task(&gid.to_string()).await;
             if let Ok(Some(fresh)) = p.load_media_task(&gid.to_string()).await {
                 row = fresh;
@@ -3745,7 +3769,7 @@ impl SessionActor {
         } else {
             let _ = p.upsert_media_task(row.clone()).await;
         }
-        row.state = state.to_string();
+        row.state = phase.as_v1_str().to_string();
         row.updated_at = now_epoch();
         mj.cfg.restore = Some(row);
     }
@@ -3862,7 +3886,22 @@ impl SessionActor {
             };
             let gid = Gid::from_u64(raw_gid);
             self.gid.reserve(raw_gid);
-            let paused = row.state == "paused";
+            // Pause judgment through the unified vocabulary's parse face
+            // (the startup read face already filters rows to the active
+            // word set; a parse failure is defensive-only — warn and take
+            // the not-paused active face, the store write face's
+            // poisoned-row posture, the row repairs on the next phase
+            // write).
+            let paused = match TaskPhase::parse_v1(&row.state) {
+                Ok(phase) => phase == TaskPhase::Paused,
+                Err(e) => {
+                    warn!(target: "taiji::core::session", gid = %row.gid, %e,
+                        "startup media row state outside the unified vocabulary; \
+                         restored as the not-paused active face (row repairs on the \
+                         next phase write)");
+                    false
+                }
+            };
             let mut cfg = crate::session::media::media_config_from_row(&row);
             cfg.gid = gid.to_string();
             cfg.persist = self.persist.clone();

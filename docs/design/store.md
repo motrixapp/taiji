@@ -629,6 +629,55 @@ At-rest hardening: the database file and its `-wal`/`-shm` sidecars get
 0600 on unix (best-effort, idempotent per open) — the database stores
 plaintext cookies, tracker passkeys, and config_json credentials.
 
+### Ledger v4: the one-shot state-CHECK tightening
+
+Ledger v4 (pre-release; see `schema.rs`'s module docs for the freeze
+posture) is a **one-shot rebuild**, not an expand-contract migration:
+inside its single transaction it DROPs every table of the v1∪v2∪v3 union
+— child tables before their FK parents (`torrent_file`/
+`torrent_progress`/`tracker`/`recovered_layer` before `torrent`;
+`media_format`/`media_track`/`media_segment`/`media_key` before
+`media_task`; then `task_cookie`/`media_archive`/`http_task` and the v1
+standalone tables) — and re-creates the full set with the one semantic
+addition: the three persisted task `state` columns (`torrent.state`,
+`http_task.state`, `media_task.state`) carry
+`CHECK(state IN (<the unified 15-word vocabulary>))`.
+
+Why a full DROP instead of rebuilding only the three task tables: the
+open face runs `PRAGMA foreign_keys=ON` before the migration
+transaction, and that pragma is a documented no-op inside a
+transaction — parent tables cannot be dropped under live child FKs, so
+a partial rebuild would need the exact FK deactivation that is
+structurally unavailable. Dropping child-first sidesteps every FK
+ordering hazard at the cost of the millisecond-scale double build on
+the fresh-database path (v1..v3 create, v4 drops and re-creates).
+Accepted pre-release only.
+
+Semantics for existing databases (the hard premise of the
+protocol/internal split plan): any `user_version` in {1,2,3} that opens
+under the v4 binary is **rebuilt with its data cleared** — no dual
+write, no backfill, no row salvage. This is a dev-database-only event:
+the project is unreleased (no external databases exist), and the first
+external release moves the freeze point from v4 to v5, after which
+every persistence change must go through expand-contract migrations
+and this one-shot path is retired. Rollback = revert the v4 commit
+(the ledger returns to 3) plus restore the pre-upgrade backup
+(`sqlite3 .backup`); the migration is atomic, so a kill mid-v4 leaves
+the database at its old version untouched.
+
+The CHECK word list is hand-written inside the v4 DDL string (the
+ledger's `sqls` are compile-time constants; a whole DDL string is never
+byte-equal to a status word, so the rpc leak counter does not see it —
+guard counting rule). Single-source discipline: the word list is pinned
+against `TaskPhase` (the `task_phase` derivation face) by tests — the
+three tables accept exactly the 15-word union (INSERT/UPDATE pins),
+reject out-of-domain words (`Paused`, `waiting`, `active`, …), and the
+`sqlite_master` CHECK text is compared word-for-word against the
+`TaskPhase` emission table; an old v3 database that opens under the v4
+binary must land at `user_version = 4` with the CHECKs present and its
+rows cleared. The v1/v2/v3 SQL texts are never edited (released
+hash-recovery binaries occupy ledger v2); v4 carries its own full DDL.
+
 ### Pre-import backup anchor (`.v1.bak`)
 
 The backup must run before the target's first open/migration so it

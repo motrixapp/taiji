@@ -150,8 +150,13 @@ fn seeded_row(
     pos: i64,
 ) -> (StoreTorrentRow, Vec<TorrentFileRow>) {
     let meta = Metainfo::parse(bytes).unwrap_or_else(|e| panic!("fixture parse: {e}"));
-    let mut row =
-        super::super::persist::torrent_row(hex, "paused", pos, &derive_name(&meta.meta), cfg);
+    let mut row = super::super::persist::torrent_row(
+        hex,
+        taiji_store::persist::TaskPhase::Paused,
+        pos,
+        &derive_name(&meta.meta),
+        cfg,
+    );
     super::super::persist::fill_torrent_identity(&mut row, &meta, bytes.to_vec());
     (row, file_rows(hex, &meta.meta.files))
 }

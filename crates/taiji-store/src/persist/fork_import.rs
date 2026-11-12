@@ -63,6 +63,106 @@ pub struct ForkProgress {
     pub bitfield: Vec<u8>,
 }
 
+/// Fork `task.state` vocabulary — the fork session-archive domain
+/// ("paused" | "waiting"), anchored on the [`ForkTaskRow::state`] /
+/// [`ForkHttpTaskRow::state`] field docs and verified against the fork
+/// source itself: `Sqlite3SessionStore.cc`'s one live state expression
+/// (`upsertTask`: `state = rg->isPauseRequested() ? "paused" :
+/// "waiting"`) is the only writer of this column — the other state
+/// statement (`updateTaskState`) has no callers in the fork tree. The
+/// import faces judge parked-ness through this type instead of a bare
+/// string comparison, so the two-word archive domain has one owned
+/// table on the store face.
+///
+/// # Domain attribution (a foreign domain, not a taiji row state)
+///
+/// These words are what the legacy fork's own sqlite store wrote and
+/// the migration reads verbatim; they are NOT members of the unified
+/// taiji row-state vocabulary
+/// ([`crate::persist::writer::TaskPhase`]). Two shape collisions are
+/// deliberate non-overlaps: `waiting` is rejected by
+/// `TaskPhase::parse_v1` (it is an online-projection word, never a
+/// taiji row state), and the fork-side `paused` maps onto the
+/// importing family's row word at the core-side import decision — the
+/// word-shape equality with the taiji `paused` carries no shared
+/// semantics here. The tellStatus projection word `active` is NOT an
+/// archive word: the fork's serializer writes `waiting` for a task
+/// caught mid-download (the projection vocabulary and the archive
+/// vocabulary are different faces of the fork), so `active` never
+/// enters this column and [`Self::parse`] rejects it. The
+/// single-source mapping body below is therefore this domain's own
+/// table (one bare literal per fork word, the floor this read face
+/// permits; `waiting` is outside the rpc governance word list,
+/// `paused` rides the leak counter as this file's one registered
+/// residue).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ForkTaskState {
+    /// Fork paused task (the import face's parked judgment; serialized
+    /// `pause=true` ORs into it at the core face).
+    Paused,
+    /// Fork not-paused task — queue-resident or caught mid-download
+    /// alike: the fork's serializer writes the same `waiting` word for
+    /// both (`isPauseRequested() == false`), so parked-ness is the only
+    /// distinction this column ever carried, and the import resumes the
+    /// task not-paused (queued).
+    Waiting,
+}
+
+/// [`ForkTaskState::parse`] failure: the fork row's state value is
+/// outside the two-word archive domain (a hand-edited or
+/// unknown-schema fork database). The original value rides the error so
+/// the import report can name the exact offending row content.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ForkTaskStateError {
+    /// Unknown fork-state string (case drift, taiji row words,
+    /// projection words, empty input — anything not byte-equal to a
+    /// fork archive word).
+    #[error(
+        "fork task state: unknown fork state {value:?} (outside the paused|waiting archive domain)"
+    )]
+    Unknown {
+        /// The rejected input, verbatim.
+        value: String,
+    },
+}
+
+impl ForkTaskState {
+    /// The full variant set, table order (the parse scan face walks it
+    /// against [`Self::as_str`], so parse cannot drift from emission).
+    pub const ALL: [ForkTaskState; 2] = [ForkTaskState::Paused, ForkTaskState::Waiting];
+
+    /// The fork archive word, byte for byte as `Sqlite3SessionStore.cc`
+    /// wrote it (the `upsertTask` state expression). The two arms are
+    /// this domain's single literal table; [`Self::parse`] derives from
+    /// it and adds none of its own.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForkTaskState::Paused => "paused",
+            ForkTaskState::Waiting => "waiting",
+        }
+    }
+
+    /// Parse a fork `task.state` value. Accepts exactly the two archive
+    /// words, byte for byte, case-sensitive. Unknown strings —
+    /// including case drift (`Paused`), the tellStatus projection word
+    /// `active` (never an archive value; a mid-download task archives
+    /// as `waiting`), taiji row words that are not fork words
+    /// (`queued`/`error`/`done`), and empty input — are
+    /// [`ForkTaskStateError::Unknown`] carrying the original value: a
+    /// foreign value never silently maps onto a fork state. The
+    /// disposition of an unknown row (skip vs report) belongs to the
+    /// import faces, not the vocabulary.
+    pub fn parse(s: &str) -> Result<ForkTaskState, ForkTaskStateError> {
+        Self::ALL
+            .into_iter()
+            .find(|state| state.as_str() == s)
+            .ok_or_else(|| ForkTaskStateError::Unknown {
+                value: s.to_owned(),
+            })
+    }
+}
+
 /// Open the fork sqlite database read-only and probe its schema.
 ///
 /// - `SQLITE_OPEN_READ_ONLY`: sqlite rejects every write;
@@ -2104,6 +2204,74 @@ mod tests {
                 need: u32::MAX as usize,
                 have: 0,
             })
+        );
+    }
+
+    // ---- ForkTaskState: the fork task.state archive domain ----
+
+    /// The two-word archive table: variant count, as_str identity per
+    /// variant, and the parse round-trip over ALL (the scan face walks
+    /// ALL × as_str, so a re-pointed arm fails the round-trip here).
+    /// Anchored on the fork source's one live state expression
+    /// (`Sqlite3SessionStore.cc` `upsertTask`:
+    /// `isPauseRequested() ? "paused" : "waiting"`) — the tellStatus
+    /// projection word `active` never enters this column.
+    #[test]
+    fn fork_task_state_table_round_trips() {
+        assert_eq!(
+            ForkTaskState::ALL.len(),
+            2,
+            "exactly the two archive words Sqlite3SessionStore.cc writes \
+             (paused/waiting — a task caught mid-download archives as \
+             waiting; the tellStatus word active is projection-only)"
+        );
+        for state in ForkTaskState::ALL {
+            assert_eq!(
+                ForkTaskState::parse(state.as_str()).ok(),
+                Some(state),
+                "round-trip for {state:?}"
+            );
+        }
+        // Exact word pins (byte-for-byte, lowercase as written by the fork).
+        assert_eq!(ForkTaskState::Paused.as_str(), "paused");
+        assert_eq!(ForkTaskState::Waiting.as_str(), "waiting");
+    }
+
+    /// Unknown fork states are rejected with the original value carried:
+    /// case drift, padded input, empty, taiji row words that are not
+    /// fork words, projection words. `paused` is BOTH a fork archive
+    /// word and a taiji row word (shape collision, not shared
+    /// vocabulary — see the enum doc): it must keep parsing as the fork
+    /// word here.
+    #[test]
+    fn fork_task_state_parse_rejects_foreign_values_with_original() {
+        for bad in [
+            "Paused", "WAITING", "waiting ", "", "queued", "error", "done",
+            // The tellStatus projection word and its case drift: never
+            // archive values (a mid-download task archives as `waiting`).
+            "active", "Active",
+        ] {
+            let err = match ForkTaskState::parse(bad) {
+                Ok(state) => panic!("must not parse: {bad:?} -> {state:?}"),
+                Err(e) => e,
+            };
+            assert_eq!(
+                err,
+                ForkTaskStateError::Unknown {
+                    value: bad.to_owned()
+                },
+                "the error must carry the original input {bad:?}"
+            );
+        }
+        // The two archive words parse to their variants (the paused shape
+        // collision keeps fork semantics on the fork face).
+        assert_eq!(
+            ForkTaskState::parse("paused").ok(),
+            Some(ForkTaskState::Paused)
+        );
+        assert_eq!(
+            ForkTaskState::parse("waiting").ok(),
+            Some(ForkTaskState::Waiting)
         );
     }
 }

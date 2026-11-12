@@ -9,7 +9,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::StoreError;
 
 use super::job::PersistOutcome;
-use super::rows::{TORRENT_ACTIVE_STATES, TorrentFileRow, TorrentRow, TorrentSnapshot};
+use super::rows::{TorrentFileRow, TorrentRow, TorrentSnapshot};
+use super::task_phase::{TaskFamily, TaskPhase};
 
 /// Now (epoch seconds) — the write-side time source for observability
 /// columns.
@@ -91,11 +92,17 @@ const TORRENT_READ_COLS: &str = "gid, name, state, queue_pos, dir, config_json, 
 /// file set all equal to the db (observability columns aside) -> skip;
 /// otherwise a single transaction writes (parent-row upsert -> file rows
 /// delete-all + insert-all, FK parents before children).
+///
+/// Write-point validation: the payload `state` must parse in the unified
+/// vocabulary and belong to the torrent family
+/// ([`super::validate_task_state`]) — an unknown or cross-family word is
+/// an explicit error, never a silent row.
 pub(super) fn upsert_torrent(
     conn: &mut Connection,
     row: &TorrentRow,
     files: Option<&[TorrentFileRow]>,
 ) -> Result<PersistOutcome, StoreError> {
+    super::validate_task_state(&row.state, TaskFamily::Torrent, "torrent")?;
     let existing: Option<TorrentRowCmp> = conn
         .query_row(
             &format!("SELECT {TORRENT_CMP_COLS} FROM torrent WHERE gid = ?1"),
@@ -243,12 +250,15 @@ fn load_torrent_files(conn: &Connection, gid: &str) -> Result<Vec<TorrentFileRow
         .map_err(StoreError::from)
 }
 
-/// Recovery read face (SPEC §5.4): all rows of the active set (queue_pos,
-/// created_at order) + their file sets.
+/// Recovery read face (SPEC §5.4): all rows of the active set (the
+/// torrent-family derivation [`TaskPhase::active_words`] — every
+/// non-terminal member of the declared domain; queue_pos, created_at
+/// order) + their file sets.
 pub(super) fn load_torrents_at_startup(
     conn: &Connection,
 ) -> Result<Vec<TorrentSnapshot>, StoreError> {
-    let placeholders = TORRENT_ACTIVE_STATES
+    let active_states = TaskPhase::active_words(TaskFamily::Torrent);
+    let placeholders = active_states
         .iter()
         .map(|_| "?")
         .collect::<Vec<_>>()
@@ -260,7 +270,7 @@ pub(super) fn load_torrents_at_startup(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        rusqlite::params_from_iter(TORRENT_ACTIVE_STATES.iter()),
+        rusqlite::params_from_iter(active_states.iter()),
         read_torrent_row,
     )?;
     let mut out = Vec::new();
@@ -292,18 +302,17 @@ pub(super) fn load_max_queue_pos(conn: &Connection) -> Result<i64, StoreError> {
     .map_err(StoreError::from)
 }
 
-/// Terminal-state domain (shared by three sites; the 2 values outside
-/// TORRENT_ACTIVE_STATES).
-const TERMINAL_STATES: &[&str] = &["done", "error"];
-
-/// Persisted DownloadResult write face: only terminal rows (done/error)
-/// accepted — letting non-state semantics slip in would pollute the
-/// recovery active set; the write side rejects explicitly (defense).
+/// Persisted DownloadResult write face: only terminal rows (the
+/// vocabulary's terminal derivation — done/error) accepted — letting
+/// non-state semantics slip in would pollute the recovery active set;
+/// the write side rejects explicitly (defense; the family-domain
+/// validation rides the delegated [`upsert_torrent`]).
 pub(super) fn insert_download_result(
     conn: &mut Connection,
     row: &TorrentRow,
 ) -> Result<PersistOutcome, StoreError> {
-    if !TERMINAL_STATES.contains(&row.state.as_str()) {
+    let phase = super::validate_task_state(&row.state, TaskFamily::Torrent, "torrent")?;
+    if !phase.is_terminal() {
         return Err(StoreError::Internal(format!(
             "download result row must have terminal state (done|error), got '{}'",
             row.state
@@ -313,16 +322,18 @@ pub(super) fn insert_download_result(
 }
 
 /// Purge persisted DownloadResults: all terminal rows deleted (FK cascade
-/// removes dependents).
+/// removes dependents). The terminal set binds as parameters (the
+/// vocabulary's terminal derivation).
 pub(super) fn purge_download_results(conn: &mut Connection) -> Result<PersistOutcome, StoreError> {
-    let placeholders = TERMINAL_STATES
+    let terminal_states = TaskPhase::terminal_words();
+    let placeholders = terminal_states
         .iter()
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
     let n = conn.execute(
         &format!("DELETE FROM torrent WHERE state IN ({placeholders})"),
-        rusqlite::params_from_iter(TERMINAL_STATES.iter()),
+        rusqlite::params_from_iter(terminal_states.iter()),
     )?;
     Ok(if n > 0 {
         PersistOutcome::Written
@@ -338,13 +349,14 @@ pub(super) fn remove_download_result(
     conn: &mut Connection,
     gid: &str,
 ) -> Result<PersistOutcome, StoreError> {
-    let placeholders = TERMINAL_STATES
+    let terminal_states = TaskPhase::terminal_words();
+    let placeholders = terminal_states
         .iter()
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
     let sql_params: Vec<&str> = std::iter::once(gid)
-        .chain(TERMINAL_STATES.iter().copied())
+        .chain(terminal_states.iter().copied())
         .collect();
     let n = conn.execute(
         &format!("DELETE FROM torrent WHERE gid = ?1 AND state IN ({placeholders})"),
@@ -358,17 +370,29 @@ pub(super) fn remove_download_result(
 }
 
 /// Read back one persisted DownloadResult; no terminal row for the gid ->
-/// None.
+/// None. The terminal set binds as parameters (the vocabulary's terminal
+/// derivation — no quoted state literal rides the SQL text).
 pub(super) fn load_download_result(
     conn: &Connection,
     gid: &str,
 ) -> Result<Option<TorrentRow>, StoreError> {
+    let terminal_states = TaskPhase::terminal_words();
+    let placeholders = terminal_states
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Bind order: ?1 gid, ?2.. the terminal words (all strings — one
+    // homogeneous parameter iterator).
+    let sql_params: Vec<&str> = std::iter::once(gid)
+        .chain(terminal_states.iter().copied())
+        .collect();
     conn.query_row(
         &format!(
             "SELECT {TORRENT_READ_COLS} FROM torrent
-             WHERE gid = ?1 AND state IN ('done', 'error')"
+             WHERE gid = ?1 AND state IN ({placeholders})"
         ),
-        params![gid],
+        rusqlite::params_from_iter(sql_params),
         read_torrent_row,
     )
     .optional()

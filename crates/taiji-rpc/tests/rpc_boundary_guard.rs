@@ -99,9 +99,53 @@ const STATUS_WORDS: &[&str] = &[
     "done",
 ];
 
-/// Measured leak baseline (2026-11-10): taiji-core 81, taiji-store 24,
-/// taiji-media 19, taiji-http 1. Ratchets down only — see the module doc.
-const BASELINE: usize = 125;
+/// Measured leak baseline (2026-11-12, after the 2026-11-11 kernel
+/// closure — 内核收口, the kernel write-face convergence reached the
+/// core actor / http driver / import faces, phases B2-B5 of the
+/// protocol/internal split plan): 25, down from 102 (2026-11-11) and
+/// 125 (2026-11-10). The 25 was re-derived by hand on 2026-11-12
+/// against the counting rules in this module's doc (grep the scan
+/// face for the whole-word literal forms, then strip test faces,
+/// comments, display-macro arguments and `.field(` labels site by
+/// site) — the total and every per-file attribution below came out
+/// of that recount, not out of the closure step's own bookkeeping.
+/// Per crate: taiji-media 18, taiji-core 5, taiji-http 1,
+/// taiji-store 1. The residual 25, exhaustively (every counted
+/// site, file by file — nothing else is counted):
+///
+/// - `taiji-media/src/phase.rs` (18): `MediaPhase`'s own two literal
+///   tables (`as_str` + `parse` arms) — the media `state` domain's
+///   single source, this crate's canonical table (its store edge is
+///   dev-only, so the store-side exemption cannot host it);
+/// - `taiji-core/src/session/view.rs` (3): `StatusKind::as_str` — the
+///   aria2 online-projection wire table (VLB_* constants); 3 of its 8
+///   words (`paused`/`seeding`/`checking`) double as row-state words.
+///   The projection face is deliberately core-side vocabulary, not a
+///   row-state table;
+/// - `taiji-core/src/session/media.rs` (2): `MediaTrackLive`'s
+///   per-track liveness words (`"active"`/`"done"`, an in-memory live
+///   view) — same word *shape* as the task-phase word, different
+///   concept (track finished, not the task-state column);
+/// - `taiji-http/src/finalize.rs` (1): `STATE_DONE`, the finalize
+///   face's frozen terminal seam constant (documented mirror of the
+///   row contract);
+/// - `taiji-store/src/persist/fork_import.rs` (1): `ForkTaskState`'s
+///   `paused` arm — the fork archive's own two-word domain table
+///   (`waiting` is not a governed word).
+///
+/// Write-point status, two calibers. The 14 governed words' write
+/// points below rpc are zero — this counter's own verdict: every
+/// counted residue above is a table, a frozen seam constant or a
+/// same-shape foreign word, never a task-state column write. The
+/// 15th domain word, `error`, sits outside [`STATUS_WORDS`] (aria2's
+/// own wire word — the vocabulary-caliber note in `task_phase.rs`:
+/// 15 = 14 + `error`), so this counter cannot see it; its one bare
+/// write point, the startup unrecoverable-row recovery write in
+/// `taiji-core/src/session/actor/lifecycle.rs`, was converged to
+/// `TaskPhase::Error.as_v1_str()` on 2026-11-12 (review finding) —
+/// a hand-audit fact this guard does not pin, regressing it would
+/// not move the count. Ratchets down only — see the module doc.
+const BASELINE: usize = 25;
 
 /// The persistence layer's canonical v1 string table (phase B1 of the
 /// protocol/internal split plan): `task_phase.rs` owns the TaskPhase

@@ -1522,7 +1522,7 @@ async fn bootstrap_queue_order_preserved_across_families() {
         // torrent row queue_pos=5 (with a metadata BLOB, rebuildable).
         let mut trow = super::super::persist::torrent_row(
             torrent_gid,
-            "queued",
+            taiji_store::persist::TaskPhase::Queued,
             5,
             "v2.bin",
             &super::super::persist::PersistedTaskConfig {

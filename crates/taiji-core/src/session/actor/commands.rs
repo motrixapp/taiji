@@ -384,9 +384,11 @@ impl SessionActor {
                     // Persist the paused state of waiting tasks
                     // (paused row; HTTP tasks via the http_task
                     // table; media tasks via the media_task row).
-                    self.http_reserved_transition(entry.gid, "paused").await;
-                    self.media_reserved_transition(entry.gid, "paused").await;
-                    self.persist_transition(entry.gid, "paused").await;
+                    self.http_reserved_transition(entry.gid, TaskPhase::Paused)
+                        .await;
+                    self.media_reserved_transition(entry.gid, TaskPhase::Paused)
+                        .await;
+                    self.persist_transition(entry.gid, TaskPhase::Paused).await;
                 }
                 let _ = reply.send(Ok(CommandReply::Accepted));
             }
@@ -434,9 +436,11 @@ impl SessionActor {
                     // Back to the waiting-state row (queued/metadata
                     // per task shape; HTTP/media task rows return to
                     // queued).
-                    self.media_reserved_transition(entry.gid, "queued").await;
-                    self.http_reserved_transition(entry.gid, "queued").await;
-                    let state = self.reserved_state_str(entry.gid);
+                    self.media_reserved_transition(entry.gid, TaskPhase::Queued)
+                        .await;
+                    self.http_reserved_transition(entry.gid, TaskPhase::Queued)
+                        .await;
+                    let state = self.reserved_state(entry.gid);
                     self.persist_transition(entry.gid, state).await;
                 }
                 let _ = reply.send(Ok(CommandReply::Accepted));

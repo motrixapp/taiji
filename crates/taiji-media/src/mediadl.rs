@@ -36,6 +36,7 @@ use crate::keys::{
     KeyTable, TrackCrypto, build_track_crypto, collect_key_specs, expand_track_keys,
 };
 use crate::m3u8::{self, Playlist, VariantPolicy, parse_manifest, select_variant};
+use crate::phase::MediaPhase;
 use crate::ssrf::{HostVerdictCache, SsrfPolicy, SsrfResolver, check_uri, default_resolver};
 use crate::staging::{
     StagingQuota, archive_name, create_staging_dir, ensure_same_volume, guess_archive_ext,
@@ -528,7 +529,11 @@ impl MediaDownload {
                 gid: self.gid.clone(),
                 kind: kind.to_string(),
                 manifest_url: manifest_url.to_string(),
-                state: "downloading".to_string(),
+                // The row word serializes through the media phase
+                // vocabulary's own table (MediaPhase — this crate's
+                // single source of the state domain), never a bare
+                // literal at the write point.
+                state: MediaPhase::Downloading.as_str().to_string(),
                 staging_dir: gid_dir.display().to_string(),
                 output_path: self.cfg.output_dir.display().to_string(),
                 manifest_norm_digest: norm_digest.into_bytes(),

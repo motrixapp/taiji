@@ -77,30 +77,41 @@
 //! - `StatusKind` (the online projection face) is untouched: its
 //!   `active`/`waiting`/`complete`/`removed` words are projection
 //!   words, not row states, and are rejected by `parse_v1`.
-//! - The three active-set constants (`TORRENT_ACTIVE_STATES`,
-//!   `HTTP_TASK_ACTIVE_STATES`, `MEDIA_TASK_ACTIVE_STATES`) are
-//!   untouched; the planned derivation (family filter + terminal
-//!   filter) reproduces them exactly (9−2=7, 6−2=4, 10−2=8 members),
-//!   which the tests here pin so the derivation cannot drift.
+//! - The five state-set constants that once lived beside this enum (the
+//!   three active sets in the `rows`/`write_media` modules, the http
+//!   terminal set, the media guarded set) are **dissolved**: every
+//!   write/read face now consumes the derivation face here —
+//!   [`TaskPhase::active_words`] (family filter + terminal filter),
+//!   [`TaskPhase::terminal_words`], [`TaskPhase::guarded_words`] —
+//!   which reproduced each body exactly, word for word
+//!   (9−2=7, 6−2=4, 10−2=8 active members; membership was pinned, the
+//!   constants' declared-doc sequence was not — every consumer is an
+//!   order-insensitive contains-check or IN-list), before the swap.
+//!   The dissolution anchors are the frozen tables in this file's
+//!   tests (the per-family domain lists plus the frozen emission
+//!   orders), so the derivation cannot drift now that no constant
+//!   body remains to compare against. The derivations add no bare
+//!   word of their own: they walk [`TaskPhase::ALL`] × `applies_to` ×
+//!   `is_terminal` / `is_guarded` × `as_v1_str` inside this
+//!   (exempted) file.
 //!
-//! # Leak-baseline disclosure
+//! # Leak-baseline disposition
 //!
 //! The 15-string table lives in this module's production face as
 //! exactly one bare literal per domain word (the grouped
 //! [`as_v1_str`](TaskPhase::as_v1_str) arms; `parse_v1` derives from it
 //! — there is no second literal table; 14 of the 15 are governed words,
-//! the floor this API permits). The rpc leak counter is a purely
-//! lexical count over a ratchet-down baseline with zero headroom today,
-//! so this module takes it 125 → 139 and
-//! `aria2_status_literals_stay_within_baseline` is red until a
-//! same-batch disposition lands — one of: migrate at least 14 existing
-//! counted literals onto this enum (every migrated literal leaves the
-//! counted face and frees headroom), or teach the guard a
-//! single-source-table exemption rule. Both edit existing files and are
-//! therefore outside this change's pure-addition scope. Registering the
-//! vocabulary in the ledger records the decision but does NOT by itself
-//! turn the counter green (the guard reads no ledger), and raising the
-//! baseline is forbidden by the guard's own module doc.
+//! the floor this API permits). At the B1 landing the rpc leak counter
+//! was a purely lexical count with zero headroom, so this module alone
+//! took it 125 → 139 red until a same-batch disposition landed. The
+//! disposition that landed is the single-source-table exemption: the
+//! guard's `CANONICAL_V1_TABLES` list (in the rpc crate's
+//! `rpc_boundary_guard.rs` test) names this file, the whole table body
+//! rides outside the counted face, and the baseline ratchets down as
+//! the write faces migrate onto the derivation face (the five
+//! state-set constants dissolved onto it — see the relationship note
+//! above). Raising the baseline remains forbidden by the guard's own
+//! module doc.
 //!
 //! # Variant line (no more, no fewer)
 //!
@@ -333,6 +344,28 @@ impl TaskPhase {
         matches!(self, TaskPhase::Error | TaskPhase::Done)
     }
 
+    /// The guarded phases ([`TaskPhase::Paused`], [`TaskPhase::Error`],
+    /// [`TaskPhase::Done`]) — the media upsert guard's refuse set, word
+    /// body {`paused`, `error`, `done`} (once the guarded-state
+    /// constant in write_media; the derivation face
+    /// [`Self::guarded_words`] now owns it). Guarded is NOT terminal:
+    /// a paused task is parked,
+    /// not finished — the two terminal members are guarded AND
+    /// terminal, `paused` is guarded only (it stays in the active read
+    /// set because restart recovery resumes it; the deliberate
+    /// double-listing is pinned by tests below). Leaving the guarded
+    /// set goes only through the explicit faces (unpause paused→queued,
+    /// reopen error|done→resolving).
+    ///
+    /// Family note: today only the media write face consumes a guarded
+    /// word set, but the classification itself is family-blind
+    /// vocabulary — `paused` parks the same way in all three families
+    /// — so the predicate carries no family parameter and
+    /// [`Self::guarded_words`] derives from it without per-family arms.
+    pub fn is_guarded(self) -> bool {
+        matches!(self, TaskPhase::Paused | TaskPhase::Error | TaskPhase::Done)
+    }
+
     /// Does this phase word belong to the family's declared value
     /// domain? (Torrent 9, http 6, media 10 row words; the shared words
     /// — queued/downloading/paused/error/done — belong to all three.)
@@ -378,17 +411,68 @@ impl TaskPhase {
             ),
         }
     }
+
+    /// Shared derivation walk behind the word-set faces:
+    /// [`Self::ALL`] in table order → `keep` filter → [`Self::as_v1_str`]
+    /// → first occurrence kept (the checking/seeding fold groups emit
+    /// their one row word once each). Zero bare words in any derivation
+    /// body — every string below this line comes from the
+    /// [`Self::as_v1_str`] table — so the whole derivation face rides
+    /// this file's canonical-table exemption and never widens the leak
+    /// baseline.
+    fn words_matching(keep: impl Fn(TaskPhase) -> bool) -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = Vec::new();
+        for phase in Self::ALL {
+            if !keep(phase) {
+                continue;
+            }
+            let word = phase.as_v1_str();
+            if !words.contains(&word) {
+                words.push(word);
+            }
+        }
+        words
+    }
+
+    /// The family's active-state words: every non-terminal member of
+    /// the family's declared domain (family filter + terminal filter),
+    /// emitted in [`Self::ALL`] table order (torrent 9−2=7, http 6−2=4,
+    /// media 10−2=8 members). Pinned word for word — as a SET — against
+    /// the frozen active-set tables in the tests below (the anchors
+    /// that stood as the write-face constants before their
+    /// dissolution), so the derivation cannot drift. The frozen tables
+    /// spell each family's declared doc order (the http and media
+    /// bodies are lifecycle-ordered), the derivation emits ALL-table
+    /// order; membership is what is pinned, not sequence — every
+    /// consumer (startup recovery IN-lists, path-conflict probes,
+    /// guard contains-checks) is order-insensitive.
+    pub fn active_words(family: TaskFamily) -> Vec<&'static str> {
+        Self::words_matching(|phase| phase.applies_to(family) && !phase.is_terminal())
+    }
+
+    /// The terminal-state words {`error`, `done`}: derivation =
+    /// [`Self::ALL`] filtered by [`Self::is_terminal`]. All three
+    /// families' terminal sets agree; returned in ALL order (`error`
+    /// precedes `done`; set-equal, and the consumers are
+    /// contains-checks and IN-lists, both order-insensitive).
+    pub fn terminal_words() -> Vec<&'static str> {
+        Self::words_matching(Self::is_terminal)
+    }
+
+    /// The guarded-state words {`paused`, `error`, `done`}: derivation =
+    /// [`Self::ALL`] filtered by [`Self::is_guarded`] (the terminals
+    /// plus `paused`) — the media upsert guard's refuse set, word set
+    /// AND order (the ALL walk visits Paused, then Error, then Done).
+    /// The paused double-listing (active AND guarded) survives the
+    /// derivation because `active_words` never filters on `is_guarded`.
+    pub fn guarded_words() -> Vec<&'static str> {
+        Self::words_matching(Self::is_guarded)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{TaskFamily, TaskPhase, TaskPhaseError};
-    // The write-face state-domain constants (sibling modules; the
-    // family-filter pins below hold this enum's table against them).
-    use super::super::rows::{
-        HTTP_TASK_ACTIVE_STATES, HTTP_TASK_TERMINAL_STATES, TORRENT_ACTIVE_STATES,
-    };
-    use super::super::write_media::{MEDIA_TASK_ACTIVE_STATES, MEDIA_TASK_GUARDED_STATES};
     use std::collections::HashSet;
 
     /// The frozen 15-string union of the three declared domains, sorted.
@@ -476,6 +560,22 @@ mod tests {
             .collect();
         v.sort_unstable();
         v.dedup();
+        v
+    }
+
+    /// The expected active-set body for a family, anchored on the
+    /// frozen domain list (the state-set constants the derivation face
+    /// replaced are gone; the frozen tables here are the dissolution
+    /// anchors — family domain minus the two terminal words).
+    fn frozen_family_active(family: TaskFamily) -> Vec<&'static str> {
+        let domain: &[&str] = match family {
+            TaskFamily::Torrent => FROZEN_TORRENT,
+            TaskFamily::Http => FROZEN_HTTP,
+            TaskFamily::Media => FROZEN_MEDIA,
+        };
+        let terminal = TaskPhase::terminal_words();
+        let mut v: Vec<&str> = domain.to_vec();
+        v.retain(|w| !terminal.contains(w));
         v
     }
 
@@ -791,9 +891,11 @@ mod tests {
     }
 
     /// The family filters reproduce the three declared domains exactly
-    /// (9/6/10), and — the derivation face the active-set rewrite will
+    /// (9/6/10), and — the derivation face the write/read consumers
     /// rely on — family filter + terminal filter reproduces the three
-    /// active-set constants member for member (9−2=7, 6−2=4, 10−2=8).
+    /// active-set bodies member for member (9−2=7, 6−2=4, 10−2=8;
+    /// the frozen tables here are the anchors since the write-face
+    /// constants dissolved).
     #[test]
     fn family_filters_reproduce_the_declared_domains_and_active_sets() {
         // Declared domains.
@@ -807,27 +909,26 @@ mod tests {
             sorted(FROZEN_MEDIA)
         );
         // Active sets: family filter + non-terminal filter == the
-        // constants (this pins the planned derivation to the constants
-        // as they stand today).
+        // frozen bodies (family domain minus the two terminals).
         assert_eq!(
             sorted_family_active_strings(TaskFamily::Torrent),
-            sorted(TORRENT_ACTIVE_STATES),
+            sorted(&frozen_family_active(TaskFamily::Torrent)),
             "torrent: 9 declared words - 2 terminals = the 7-member active set"
         );
         assert_eq!(
             sorted_family_active_strings(TaskFamily::Http),
-            sorted(HTTP_TASK_ACTIVE_STATES),
+            sorted(&frozen_family_active(TaskFamily::Http)),
             "http: 6 declared words - 2 terminals = the 4-member active set"
         );
         assert_eq!(
             sorted_family_active_strings(TaskFamily::Media),
-            sorted(MEDIA_TASK_ACTIVE_STATES),
+            sorted(&frozen_family_active(TaskFamily::Media)),
             "media: 10 declared words - 2 terminals = the 8-member active set"
         );
     }
 
-    /// Terminal classification: exactly Error|Done, aligned with the
-    /// http terminal constant and the media guarded set's terminal
+    /// Terminal classification: exactly Error|Done, agreeing with the
+    /// per-family filter view and the guarded derivation's terminal
     /// members; `paused` deliberately double-lists on the media face
     /// (active AND guarded) — pinned here so the derivation face keeps
     /// that shape.
@@ -841,27 +942,191 @@ mod tests {
                 p
             );
         }
+        // The family-filter view and the classification view agree: the
+        // http family's terminal members (family filter + terminal
+        // retain) == the terminal derivation, and the frozen terminal
+        // body is exactly the two words.
+        let terminal = TaskPhase::terminal_words();
         let mut derived_terminals = sorted_family_strings(TaskFamily::Http);
-        derived_terminals.retain(|w| HTTP_TASK_TERMINAL_STATES.contains(w));
+        derived_terminals.retain(|w| terminal.contains(w));
+        let mut frozen_terminal = vec!["done", "error"];
+        frozen_terminal.sort_unstable();
         assert_eq!(
             derived_terminals,
-            sorted(HTTP_TASK_TERMINAL_STATES),
-            "the http terminal constant is the http family's terminal filter output"
+            sorted(&terminal),
+            "the http family's terminal members == the terminal derivation"
         );
-        // The media guarded set = terminals + paused (the deliberate
-        // double listing of paused: active because restart recovery
-        // resumes it, guarded because the teardown row must survive a
-        // late detached phase write). Derived from the full media
-        // domain, not the active set — the terminals are exactly what
-        // the active set excludes.
+        assert_eq!(
+            sorted(&terminal),
+            frozen_terminal,
+            "the terminal body is exactly {{done, error}}"
+        );
+        // The media guarded derivation = terminals + paused (the
+        // deliberate double listing of paused: active because restart
+        // recovery resumes it, guarded because the teardown row must
+        // survive a late detached phase write). Derived from the full
+        // media domain, not the active set — the terminals are exactly
+        // what the active set excludes.
         let mut derived_guarded = sorted_family_strings(TaskFamily::Media);
-        derived_guarded.retain(|w| HTTP_TASK_TERMINAL_STATES.contains(w));
+        derived_guarded.retain(|w| terminal.contains(w));
         derived_guarded.push("paused");
         derived_guarded.sort_unstable();
         assert_eq!(
             derived_guarded,
-            sorted(MEDIA_TASK_GUARDED_STATES),
+            sorted(&TaskPhase::guarded_words()),
             "media guarded = the family terminals + paused"
         );
+    }
+
+    /// The public derivation face vs the frozen active-set bodies,
+    /// WORD FOR WORD — the complement of the sorted-set pin above: that
+    /// pin rides a test-local reimplementation of the filter chain,
+    /// this one exercises the production face the write consumers
+    /// actually call, so a drift between the two fails here even when
+    /// the local helper still agrees. Membership is pinned as a set
+    /// against the frozen tables (the write-face constants the
+    /// derivation replaced are dissolved; these arrays are the
+    /// standing anchors). The derived sequences are separately frozen
+    /// below as the documented emission order (a reorder of ALL
+    /// silently reshaping the IN-lists deserves a red test, not a
+    /// shrug).
+    #[test]
+    fn active_words_derivation_is_frozen_word_for_word() {
+        let torrent = TaskPhase::active_words(TaskFamily::Torrent);
+        let http = TaskPhase::active_words(TaskFamily::Http);
+        let media = TaskPhase::active_words(TaskFamily::Media);
+        // Word-for-word membership against the frozen bodies.
+        assert_eq!(
+            sorted(&torrent),
+            sorted(&frozen_family_active(TaskFamily::Torrent)),
+            "torrent: the 7-member body, fold words once each"
+        );
+        assert_eq!(
+            sorted(&http),
+            sorted(&frozen_family_active(TaskFamily::Http)),
+            "http: the 4-member body"
+        );
+        assert_eq!(
+            sorted(&media),
+            sorted(&frozen_family_active(TaskFamily::Media)),
+            "media: the 8-member body"
+        );
+        // Member counts as independent pins (a frozen-body edit that
+        // keeps set equality but changes the count cannot slip through).
+        assert_eq!(torrent.len(), 7, "torrent: 9 declared - 2 terminals");
+        assert_eq!(http.len(), 4, "http: 6 declared - 2 terminals");
+        assert_eq!(media.len(), 8, "media: 10 declared - 2 terminals");
+        // Fold collapse: the checking/seeding groups contribute their one
+        // row word exactly once each (no duplicates anywhere).
+        for words in [&torrent, &http, &media] {
+            let mut uniq = words.to_vec();
+            uniq.sort_unstable();
+            uniq.dedup();
+            assert_eq!(uniq.len(), words.len(), "no folded duplicate: {words:?}");
+        }
+        // The frozen emission order (ALL-table walk, first occurrence
+        // kept). Torrent happens to coincide with its frozen body's
+        // sorted-ish spelling; http/media do not — both facts are
+        // pinned as-is.
+        assert_eq!(
+            torrent,
+            [
+                "queued",
+                "metadata",
+                "checking",
+                "allocating",
+                "downloading",
+                "seeding",
+                "paused",
+            ]
+        );
+        assert_eq!(http, ["queued", "downloading", "paused", "probing"]);
+        assert_eq!(
+            media,
+            [
+                "queued",
+                "downloading",
+                "paused",
+                "resolving",
+                "recording",
+                "processing",
+                "verifying",
+                "finalizing",
+            ]
+        );
+    }
+
+    /// terminal/guarded derivations vs the frozen bodies: terminal ==
+    /// {`done`, `error`} (set-equal; the ALL walk emits `error` first —
+    /// consumers are contains-checks/IN-lists, order-insensitive),
+    /// guarded == {`paused`, `error`, `done`} WORD FOR WORD in ALL-table
+    /// order, guarded == terminal ∪ {`paused`}, and the paused
+    /// double-listing (active AND guarded on the media face) belongs to
+    /// `paused` alone.
+    #[test]
+    fn terminal_and_guarded_words_match_the_write_face_bodies() {
+        let terminal = TaskPhase::terminal_words();
+        let guarded = TaskPhase::guarded_words();
+        // Terminal: set-pinned against the frozen two-word body.
+        assert_eq!(terminal.len(), 2, "exactly the two terminal words");
+        let mut frozen_terminal = vec!["done", "error"];
+        frozen_terminal.sort_unstable();
+        assert_eq!(
+            sorted(&terminal),
+            frozen_terminal,
+            "terminal set == {{done, error}}"
+        );
+        // Guarded: the frozen refuse-set body, order included.
+        assert_eq!(
+            guarded,
+            ["paused", "error", "done"],
+            "guarded == {{paused, error, done}}, ALL-table order"
+        );
+        // Algebra: guarded = terminal + paused (the double listing).
+        let mut terminal_plus_paused = terminal.clone();
+        terminal_plus_paused.push("paused");
+        terminal_plus_paused.sort_unstable();
+        assert_eq!(
+            sorted(&guarded),
+            terminal_plus_paused,
+            "guarded == terminal ∪ {{paused}}"
+        );
+        // The double listing is paused's alone: within the media family,
+        // every guarded member sits in the active set exactly when it is
+        // `paused` (restart recovery resumes it; error/done are excluded
+        // from the active read face).
+        let media_active = TaskPhase::active_words(TaskFamily::Media);
+        for word in &guarded {
+            assert_eq!(
+                media_active.contains(word),
+                *word == "paused",
+                "only paused double-lists (active AND guarded): {word}"
+            );
+        }
+    }
+
+    /// Per-variant guarded classification (the same per-variant caliber
+    /// as the family membership pin): `is_guarded` == Paused|Error|Done
+    /// over the whole table, and `is_guarded` == `is_terminal` || Paused
+    /// — the classification algebra [`TaskPhase::guarded_words`] and
+    /// [`TaskPhase::active_words`] ride, so a re-pointed predicate arm
+    /// fails here even when the word-set comparisons above still pass.
+    #[test]
+    fn guarded_classification_is_pinned_per_variant() {
+        for phase in TaskPhase::ALL {
+            assert_eq!(
+                phase.is_guarded(),
+                matches!(
+                    phase,
+                    TaskPhase::Paused | TaskPhase::Error | TaskPhase::Done
+                ),
+                "guarded body pin for {phase:?}"
+            );
+            assert_eq!(
+                phase.is_guarded(),
+                phase.is_terminal() || phase == TaskPhase::Paused,
+                "guarded == terminal || paused for {phase:?}"
+            );
+        }
     }
 }

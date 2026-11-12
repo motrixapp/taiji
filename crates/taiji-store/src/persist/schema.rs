@@ -9,6 +9,12 @@
 //! directly into the v1 DDL — the project is unreleased with no existing
 //! databases, so no migration is needed and old dev databases are simply
 //! rebuilt; after release the append-only migration discipline resumes.
+//! The same pre-release basis licenses ledger v4 (the one-shot rebuild
+//! that lands the task-`state` CHECKs; see the ledger docs below and
+//! `docs/design/store.md` § "Ledger v4"): it clears old dev databases'
+//! data, and the first-external-release freeze point moves to v5 — after
+//! that freeze this one-shot shape is retired and every persistence
+//! change must go through expand-contract migrations.
 
 /// A single migration: the target `user_version` and its SQL sequence
 /// (committed/rolled back as one transaction).
@@ -45,7 +51,8 @@ pub struct Migration {
 /// again" posture is retired: until the first external release the
 /// media DDL settles as written (dev databases rebuild), and the
 /// first external release freezes the then-current DDL as the
-/// migration baseline (ledger v4; squashes allowed before that).
+/// migration baseline (ledger v5 since v4 landed; squashes allowed
+/// before that).
 /// During 0.2 the four media tables have zero write paths (no
 /// PersistWriter messages); the 0.3 media work enables the
 /// media_task/media_track/media_segment write faces.
@@ -85,7 +92,8 @@ pub struct Migration {
 /// full terminal set (done **and** error, the v0.3 widening) and
 /// `PRAGMA secure_delete=ON` lands on the open face. Same
 /// pre-release basis as the prior three revisions (dev databases
-/// rebuild; the first external release freezes the ledger as v4).
+/// rebuild; the first external release freezes the ledger as v5 since
+/// v4 landed).
 ///
 /// The fifth pre-release revision of v3:
 /// the `media_archive` download-archive table lands (0.3 fingerprint
@@ -97,6 +105,50 @@ pub struct Migration {
 /// (the privacy face: the rows name what the user downloaded;
 /// the destructive clear faces exist for exactly that). Same
 /// pre-release basis (dev databases rebuild).
+///
+/// v4 (the one-shot state-CHECK tightening, the store face of the
+/// protocol/internal split plan): the three persisted task `state`
+/// columns (`torrent.state`, `http_task.state`, `media_task.state`)
+/// gain `CHECK(state IN (<the unified 15-word vocabulary>))` — the
+/// database-side defense under the typed producers (the writer faces
+/// already validate through [`crate::persist::writer::TaskPhase`]'s
+/// parse + family filter; the CHECK is the second line against
+/// hand-edited rows and any future untyped writer). The migration is a
+/// **one-shot rebuild**, not expand-contract: inside its single
+/// transaction it DROPs every table of the v1∪v2∪v3 union — child
+/// tables before their FK parents — then re-creates the full set with
+/// the CHECKs. Consequences, all deliberate and pre-release-only:
+/// - an old dev database (`user_version` in {1,2,3}) opening under a
+///   v4 binary is rebuilt **with its data cleared** — the hard premise
+///   "old dev databases rebuild once, no dual write, no backfill";
+///   the upgrade notice rides the release notes (back up with
+///   `sqlite3 .backup` first; rollback = revert this ledger entry +
+///   restore the backup);
+/// - a fresh database runs v1..v3 then v4, building the tables twice
+///   (millisecond-scale DDL; accepted pre-release);
+/// - why the full DROP instead of rebuilding only the three task
+///   tables: the open face sets `PRAGMA foreign_keys=ON` before the
+///   migration transaction and that pragma is a documented no-op
+///   inside a transaction, so parent tables cannot be dropped under
+///   live child FKs — dropping child-first over the full union is the
+///   zero-FK-hazard path;
+/// - the v1/v2/v3 SQL texts stay untouched (released hash-recovery
+///   binaries occupy ledger v2; the ledger discipline forbids editing
+///   published entries anyway) — v4 carries its own full DDL;
+/// - the CHECK word list is hand-written inside the DDL string (the
+///   `sqls` are compile-time constants, and a whole DDL string is
+///   never byte-equal to a bare status word, so the rpc leak counter
+///   does not see it — the guard's counting rule). The single-source
+///   discipline against [`crate::persist::writer::TaskPhase`] is held
+///   by tests, not by generation: the three tables must accept exactly
+///   the 15-word union and reject out-of-domain words, and the
+///   `sqlite_master` CHECK text is compared word-for-word against the
+///   TaskPhase emission table (see the v4 tests below).
+///
+/// With v4 landed, the first external release freeze point moves from
+/// v4 to v5 (module docs above); after that freeze every persistence
+/// change must go through expand-contract migrations and this one-shot
+/// path is retired.
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 1,
@@ -198,8 +250,8 @@ pub const MIGRATIONS: &[Migration] = &[
     // tables. The old "v3 freezes the DDL forever" note is retired —
     // pre-release the media DDL settles as written (dev databases
     // rebuild); the first external release freezes the then-current DDL
-    // as the migration baseline (ledger v4; squashes allowed before
-    // that). Renovation: media_segment gains validator_digest
+    // as the migration baseline (ledger v5 since v4 landed; squashes
+    // allowed before that). Renovation: media_segment gains validator_digest
     // (segment-level normalized-identity digest, written from day one —
     // the 0.4 signature-refresh/structure-diff consumption face) and the
     // media_task.state comment widens to the full ten-state domain.
@@ -309,6 +361,214 @@ pub const MIGRATIONS: &[Migration] = &[
 );",
         ],
     },
+    // v4 — the one-shot state-CHECK tightening (see the ledger docs
+    // above for the full rationale). One transaction: drop the whole
+    // v1∪v2∪v3 table set child-before-parent (the open face holds
+    // `PRAGMA foreign_keys=ON` and that pragma cannot be turned off
+    // inside the migration transaction, so parents drop only after
+    // their child tables are gone), then re-create the full set with
+    // the three task `state` columns carrying the unified 15-word
+    // CHECK. Old dev databases (user_version 1-3) rebuild with data
+    // cleared — the pre-release one-shot premise; fresh databases
+    // build the tables twice (millisecond-scale). The DROP order
+    // below is exact: torrent children, torrent, media children,
+    // media_task, then the FK-less tables. The word list is
+    // hand-written here (a compile-time constant; the whole DDL
+    // string is never byte-equal to a bare status word, so the rpc
+    // leak counter does not count it) and pinned against
+    // `writer::TaskPhase` by the v4 tests in this file and in
+    // persist/mod.rs — the pin, not the duplication, is what keeps
+    // the two tables from drifting.
+    Migration {
+        version: 4,
+        sqls: &[
+            "DROP TABLE torrent_file;
+DROP TABLE torrent_progress;
+DROP TABLE tracker;
+DROP TABLE recovered_layer;
+DROP TABLE torrent;
+DROP TABLE media_format;
+DROP TABLE media_track;
+DROP TABLE media_segment;
+DROP TABLE media_key;
+DROP TABLE media_task;
+DROP TABLE task_cookie;
+DROP TABLE media_archive;
+DROP TABLE http_task;
+DROP TABLE meta;
+DROP TABLE global_tracker;
+DROP TABLE peer_ban;
+DROP TABLE ipfilter;
+DROP TABLE dht_state;
+DROP TABLE session_kv;",
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            "CREATE TABLE torrent (
+  gid TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN (
+    'queued','metadata','checking','allocating','downloading','seeding',
+    'paused','error','done','probing','resolving','recording',
+    'processing','verifying','finalizing')),
+  queue_pos INTEGER NOT NULL,
+  dir TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  v1_infohash BLOB, v2_infohash BLOB,
+  is_private INTEGER NOT NULL DEFAULT 0,
+  metadata BLOB,
+  error_code INTEGER, error_msg TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);",
+            "CREATE TABLE torrent_file (
+  gid TEXT NOT NULL REFERENCES torrent(gid) ON DELETE CASCADE,
+  file_index INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  length INTEGER NOT NULL,
+  attr TEXT,
+  pieces_root BLOB,
+  piece_layer BLOB,
+  v1_offset INTEGER,
+  selected INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (gid, file_index)
+);",
+            "CREATE TABLE torrent_progress (
+  gid TEXT PRIMARY KEY REFERENCES torrent(gid) ON DELETE CASCADE,
+  piece_length INTEGER NOT NULL,
+  v1_bitfield BLOB,
+  v2_file_bits BLOB,
+  upload_at_startup INTEGER NOT NULL DEFAULT 0,
+  downloaded_total INTEGER NOT NULL DEFAULT 0,
+  uploaded_total INTEGER NOT NULL DEFAULT 0,
+  active_time_s INTEGER NOT NULL DEFAULT 0,
+  seed_time_s INTEGER NOT NULL DEFAULT 0,
+  digest BLOB NOT NULL, updated_at INTEGER NOT NULL
+);",
+            "CREATE TABLE tracker (
+  gid TEXT NOT NULL REFERENCES torrent(gid) ON DELETE CASCADE,
+  tier INTEGER NOT NULL, url TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_interval INTEGER, last_min_interval INTEGER,
+  next_announce_at INTEGER, last_error TEXT, last_ok_at INTEGER,
+  seeds INTEGER, leechers INTEGER,
+  PRIMARY KEY (gid, tier, url)
+);",
+            "CREATE TABLE global_tracker (
+  url TEXT PRIMARY KEY, added_at INTEGER NOT NULL
+);",
+            "CREATE TABLE peer_ban (
+  ip TEXT PRIMARY KEY, reason TEXT NOT NULL, until INTEGER NOT NULL);",
+            "CREATE TABLE ipfilter (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL,
+  rule TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1);",
+            "CREATE TABLE dht_state (
+  family TEXT NOT NULL CHECK(family IN ('v4','v6')),
+  node_id BLOB NOT NULL, routing_table BLOB NOT NULL,
+  saved_at INTEGER NOT NULL, PRIMARY KEY(family));",
+            "CREATE TABLE session_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            "CREATE TABLE recovered_layer (
+  gid TEXT NOT NULL REFERENCES torrent(gid) ON DELETE CASCADE,
+  file_index INTEGER NOT NULL,
+  piece_length INTEGER NOT NULL,
+  file_length INTEGER NOT NULL,
+  pieces_root BLOB NOT NULL,
+  layer BLOB NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (gid, file_index)
+);",
+            "CREATE TABLE http_task (
+  gid TEXT PRIMARY KEY,              -- shared namespace with BT (single GID pool)
+  url TEXT NOT NULL, final_url TEXT NOT NULL,
+  mirrors_json TEXT,                 -- multi-source expansion (per-source state/demotion, import restores from serialized)
+  state TEXT NOT NULL CHECK(state IN (
+    'queued','metadata','checking','allocating','downloading','seeding',
+    'paused','error','done','probing','resolving','recording',
+    'processing','verifying','finalizing')),
+                                     -- the v4 tightening: the unified 15-word vocabulary (family-blind, same caliber as TaskPhase::parse_v1; the family's own six words stay the write face's domain)
+  queue_pos INTEGER NOT NULL, dir TEXT NOT NULL, out TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  probe_json TEXT,                   -- ProbeResult (per-source aggregate)
+  validator_digest BLOB,
+  block_size INTEGER NOT NULL,       -- block-grid granularity (power of two, import tasks may deviate)
+  block_bitmap BLOB, block_count INTEGER,
+            total_done INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT, error_msg TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);",
+            "CREATE TABLE task_cookie (             -- unified task cookie store (http|media dual family, cleared at terminal states + startup GC, paired-delete discipline)
+  gid TEXT NOT NULL,                        -- dual-family shared GID pool (globally unique, no cross-family FK — single-writer paired deletes)
+  task_kind TEXT NOT NULL CHECK(task_kind IN ('http','media')),  -- GC/read routing label (plain column, not in PK)
+  name TEXT NOT NULL, domain TEXT NOT NULL, path TEXT NOT NULL,
+  value TEXT NOT NULL,
+  expires_utc INTEGER,              -- NULL = session cookie (lives with the task)
+  secure INTEGER NOT NULL, host_only INTEGER NOT NULL,
+  creation_utc INTEGER NOT NULL,
+  PRIMARY KEY (gid, name, domain, path)
+);",
+            "CREATE TABLE media_task (            -- written from 0.3 on
+  gid TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK(kind IN ('hls','dash')),
+  manifest_url TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN (
+    'queued','metadata','checking','allocating','downloading','seeding',
+    'paused','error','done','probing','resolving','recording',
+    'processing','verifying','finalizing')),
+                                     -- the v4 tightening: the unified 15-word vocabulary (family-blind; the media family's own ten words stay the write face's domain, the synthesis/LIVE phases included)
+  phase_detail_json TEXT, variant_json TEXT,
+  selector_json TEXT,                -- selector snapshot (three-layer selector expression + resolution layer, verbatim)
+  output_name TEXT,                  -- sanitized product name from template expansion (basename-ized, leading-dash refused, length/charset clamped before insert)
+  bridge_json TEXT,                  -- bridge metadata (reserved for a future yt-dlp bridge, always NULL in 0.3)
+  staging_dir TEXT NOT NULL, output_path TEXT NOT NULL,
+  manifest_norm_digest BLOB NOT NULL,
+  total_done INTEGER NOT NULL DEFAULT 0,
+  config_json TEXT NOT NULL,
+  error_code TEXT, error_msg TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);",
+            "CREATE TABLE media_format (        -- resolved format-tree snapshot (the persistent counterpart of the probe-token server cache)
+  gid TEXT PRIMARY KEY REFERENCES media_task(gid) ON DELETE CASCADE,
+  formats_json TEXT NOT NULL,        -- FormatTree serialization (unified format-tree nodes)
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);",
+            "CREATE TABLE media_archive (        -- download archive (sensitivity = browsing-history-equivalent — a row means the user downloaded this, cleared via taiji.clearMediaArchive / --media-archive-clear)
+  url_digest TEXT PRIMARY KEY,        -- checkpoint 1 intake/activation fingerprint: normalized URL digest (query/fragment stripped, path kept, SHA-256 hex, taiji-media archive_url_digest)
+  manifest_digest TEXT NOT NULL,      -- checkpoint 2 Resolving-phase fingerprint: canonical digest of the fetched manifest (same content via a CDN/mirror hits, not one-row-per-URL — each URL keeps its own row)
+  kind TEXT NOT NULL CHECK(kind IN ('hls','dash')),
+  title TEXT,                         -- manifest-level title (DASH ProgramInformation/Title, HLS has no standard source = NULL)
+  output_name TEXT NOT NULL,          -- sanitized product name (read-back face)
+  gid TEXT NOT NULL,                  -- archiving task GID (provenance)
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);",
+            "CREATE INDEX idx_media_archive_manifest ON media_archive(manifest_digest);",
+            "CREATE TABLE media_track (
+  gid TEXT NOT NULL REFERENCES media_task(gid) ON DELETE CASCADE,
+  track_idx INTEGER NOT NULL, kind TEXT NOT NULL,   -- video|audio|subtitle
+  playlist_uri TEXT NOT NULL, local_name TEXT NOT NULL,
+  init_files_json TEXT, seg_bitmap BLOB, seg_count INTEGER,
+  PRIMARY KEY (gid, track_idx)
+);",
+            "CREATE TABLE media_segment (
+  gid TEXT NOT NULL REFERENCES media_task(gid) ON DELETE CASCADE,
+  track_idx INTEGER NOT NULL, seg_idx INTEGER NOT NULL,
+  media_sequence INTEGER,           -- HLS absolute sequence (IV key), NULL for DASH
+  uri TEXT NOT NULL, byte_range TEXT, key_id INTEGER,
+                                    -- key_id → media_key.id (decryption face, NULL = plaintext segment)
+  seg_len INTEGER NOT NULL,         -- plaintext length semantics (encrypted tracks archive as decrypted plaintext appended in order — bitmap bytes and archive length share one semantics)
+  duration_ms INTEGER,
+  validator_digest BLOB,            -- segment-level canonical identity digest (consumed by signature refresh / structural diff)
+  map_idx INTEGER,                  -- effective EXT-X-MAP index (multi-MAP boundary bookkeeping, consumed by the local rewrite)
+  PRIMARY KEY (gid, track_idx, seg_idx)
+);",
+            "CREATE TABLE media_key (
+  id INTEGER PRIMARY KEY,
+  gid TEXT NOT NULL REFERENCES media_task(gid) ON DELETE CASCADE,
+  key_id TEXT NOT NULL, uri TEXT NOT NULL,
+  iv BLOB,                          -- NULL ⇒ derived from the segment's media_sequence (encrypted init segments carry MAP/KEY@IV, successors chain from the first segment seq)
+  key BLOB NOT NULL,                -- exactly 16B (key material lives only in the DB, never in staging, plaintext-local threat model, at-rest encryption is future work)
+  UNIQUE (gid, key_id)
+);",
+        ],
+    },
 ];
 
 /// Highest schema version the current code supports.
@@ -360,22 +620,25 @@ mod tests {
 
     /// Comment/declaration consistency: the migration
     /// header comment's media_task.state value domain is the
-    /// full ten-state set, and the declared active
-    /// read face ([`crate::persist::writer::MEDIA_TASK_ACTIVE_STATES`])
-    /// plus the two terminals reconstructs exactly that set (the
-    /// header once listed only seven states with a stale
-    /// pre-synthesis mapping sentence — this pin keeps the comment
-    /// from drifting from the declarations again). The upsert
-    /// guard's guarded set
-    /// ([`crate::persist::writer::MEDIA_TASK_GUARDED_STATES`]) is
-    /// pinned alongside: `paused` sits in BOTH lists by design
+    /// full ten-state set, and the derivation face's active read set
+    /// ([`crate::persist::writer::TaskPhase::active_words`] of the
+    /// media family) plus the terminal derivation
+    /// ([`crate::persist::writer::TaskPhase::terminal_words`])
+    /// reconstructs exactly that set (the header once listed only
+    /// seven states with a stale pre-synthesis mapping sentence — this
+    /// pin keeps the comment from drifting from the declarations
+    /// again). The upsert guard's guarded set
+    /// ([`crate::persist::writer::TaskPhase::guarded_words`]) is
+    /// pinned alongside: `paused` sits in BOTH sets by design
     /// (active: restart recovery resumes it; guarded: the teardown's
     /// row survives stale detached phase writes) — editing either
-    /// list alone fails here. Zero DDL semantic
+    /// derivation alone fails here. Zero DDL semantic
     /// change: the row comment inside the DDL string may evolve under
     /// the pre-release discipline, the column shape never.
     #[test]
     fn media_task_state_comment_matches_the_spec_full_set() {
+        use crate::persist::writer::{TaskFamily, TaskPhase};
+
         const SPEC_MEDIA_3_2_FULL_SET: &[&str] = &[
             "queued",
             "resolving",
@@ -410,31 +673,32 @@ mod tests {
             !declarations.contains("Verifying -> processing"),
             "the stale pre-synthesis state mapping must not return"
         );
-        // The active read face + terminals == the full set, element
+        // The active derivation + terminals == the full set, element
         // for element (no extra, no missing).
-        let active = crate::persist::writer::MEDIA_TASK_ACTIVE_STATES;
-        let mut reconstructed: Vec<&str> = active.to_vec();
-        reconstructed.extend_from_slice(&["error", "done"]);
+        let active = TaskPhase::active_words(TaskFamily::Media);
+        let terminal = TaskPhase::terminal_words();
+        let mut reconstructed: Vec<&str> = active.clone();
+        reconstructed.extend_from_slice(&terminal);
         reconstructed.sort_unstable();
         let mut want: Vec<&str> = SPEC_MEDIA_3_2_FULL_SET.to_vec();
         want.sort_unstable();
         assert_eq!(
             reconstructed, want,
-            "active read face + terminals must reconstruct the full ten-state set"
+            "active derivation + terminal derivation must reconstruct the full ten-state set"
         );
-        // And the active face never claims a terminal.
+        // And the active derivation never claims a terminal.
         assert!(!active.contains(&"error") && !active.contains(&"done"));
-        // Guard-side pin: `paused` deliberately sits in BOTH lists
+        // Guard-side pin: `paused` deliberately sits in BOTH sets
         // (active: restart recovery resumes it; guarded: the upsert
         // guard refuses stale live-phase overwrites of the paused
         // row), error/done are guarded only, the live-phase states
-        // are active only — either list edited alone fails here.
-        let guarded = crate::persist::writer::MEDIA_TASK_GUARDED_STATES;
+        // are active only — either derivation edited alone fails here.
+        let guarded = TaskPhase::guarded_words();
         assert!(
             guarded.contains(&"paused") && active.contains(&"paused"),
             "paused must stay in both the active and the guarded set"
         );
-        for state in ["error", "done"] {
+        for state in terminal {
             assert!(guarded.contains(&state), "{state} must stay guarded");
             assert!(
                 !active.contains(&state),
@@ -456,10 +720,10 @@ mod tests {
                 "{state} is a live phase, never guarded"
             );
         }
-        // Neither list may grow a stray state either: deduped union
-        // still reconstructs the full set.
-        let mut union: Vec<&str> = active.to_vec();
-        union.extend_from_slice(guarded);
+        // Neither derivation may grow a stray state either: deduped
+        // union still reconstructs the full set.
+        let mut union: Vec<&str> = active.clone();
+        union.extend_from_slice(&guarded);
         union.sort_unstable();
         union.dedup();
         assert_eq!(
@@ -484,6 +748,249 @@ mod tests {
             expected += 1;
         }
         assert_eq!(LATEST_VERSION, expected - 1);
+    }
+
+    /// v4 static face, part 1 — the one-shot rebuild covers the whole
+    /// v1∪v2∪v3 union and drops child tables before their FK parents.
+    /// The DROP order is load-bearing (the open face holds
+    /// `PRAGMA foreign_keys=ON` across the migration transaction and
+    /// that pragma cannot be disabled inside a transaction), so the
+    /// pin is per-pair positional, not just presence. Exactly one DROP
+    /// per table (a stale duplicate would double-drop and fail the
+    /// real migration) and exactly one CREATE per table (the rebuild
+    /// must not double-create either). The pre-v4 ledger entries stay
+    /// CHECK-free on the state columns — the published v1/v2/v3 SQL
+    /// texts are frozen (released binaries occupy ledger v2); the
+    /// tightening lives in v4 only.
+    #[test]
+    fn v4_drops_and_rebuilds_the_full_union_in_fk_order() {
+        let v4 = MIGRATIONS.last().unwrap_or(&MIGRATIONS[0]);
+        assert_eq!(v4.version, 4, "v4 must be the ledger's last entry");
+        let v4_sql = v4.sqls.join("\n");
+        let all_tables: Vec<&str> = SCHEMA_V1_TABLES
+            .iter()
+            .chain(SCHEMA_V2_TABLES.iter())
+            .chain(SCHEMA_V3_TABLES.iter())
+            .copied()
+            .collect();
+        assert_eq!(all_tables.len(), 19, "10 v1 + 1 v2 + 8 v3 tables");
+        for table in &all_tables {
+            let drops = v4_sql.matches(&format!("DROP TABLE {table};")).count();
+            assert_eq!(drops, 1, "{table} must be dropped exactly once in v4");
+            let creates = v4_sql.matches(&format!("CREATE TABLE {table} ")).count();
+            assert_eq!(
+                creates, 1,
+                "{table} must be re-created exactly once in v4 (the full-union rebuild)"
+            );
+        }
+        // FK child-before-parent pins (positional): every child's DROP
+        // precedes its parent's DROP.
+        for (child, parent) in [
+            ("torrent_file", "torrent"),
+            ("torrent_progress", "torrent"),
+            ("tracker", "torrent"),
+            ("recovered_layer", "torrent"),
+            ("media_format", "media_task"),
+            ("media_track", "media_task"),
+            ("media_segment", "media_task"),
+            ("media_key", "media_task"),
+        ] {
+            let child_at = v4_sql.find(&format!("DROP TABLE {child};"));
+            let parent_at = v4_sql.find(&format!("DROP TABLE {parent};"));
+            let ordered = match (child_at, parent_at) {
+                (Some(c), Some(p)) => c < p,
+                _ => false,
+            };
+            assert!(
+                ordered,
+                "v4 must DROP {child} before {parent} (foreign_keys=ON across the \
+                 migration transaction: a parent drop under live child FKs fails)"
+            );
+        }
+        // Freeze surface: the published pre-v4 entries carry no state
+        // CHECK (their SQL text is frozen; the v4 tightening is the
+        // only sanctioned home of the constraint).
+        for m in &MIGRATIONS[..3] {
+            assert!(
+                !m.sqls.join("\n").contains("CHECK(state"),
+                "ledger v{} must stay free of the state CHECK (frozen text)",
+                m.version
+            );
+        }
+        // And v4 itself carries exactly the three state CHECKs (one per
+        // task family — a fourth would name a non-task state column).
+        assert_eq!(
+            v4_sql.matches("CHECK(state IN (").count(),
+            3,
+            "v4 carries the CHECK on torrent.state, http_task.state and media_task.state"
+        );
+    }
+
+    /// v4 static face, part 2 — the CHECK word list equals the
+    /// [`crate::persist::writer::TaskPhase`] emission table (the
+    /// unified 15-word vocabulary), extracted from the DDL text the
+    /// way the migration would apply it. The word list is hand-written
+    /// in the DDL (a compile-time constant; the guard never counts a
+    /// whole DDL string), so this pin — not shared generation — is
+    /// what keeps the two tables from drifting: adding a word to
+    /// TaskPhase without v4 (or spelling a v4 word TaskPhase rejects)
+    /// fails here.
+    #[test]
+    fn v4_state_check_word_list_matches_the_task_phase_vocabulary() {
+        use crate::persist::writer::TaskPhase;
+
+        let v4 = MIGRATIONS.last().unwrap_or(&MIGRATIONS[0]);
+        assert_eq!(v4.version, 4);
+        let v4_sql = v4.sqls.join("\n");
+        // The TaskPhase derivation: distinct as_v1_str outputs over ALL
+        // (the 15 row words; the checking/seeding fold groups emit once
+        // each through the dedup).
+        let mut derived: Vec<&str> = TaskPhase::ALL
+            .into_iter()
+            .map(TaskPhase::as_v1_str)
+            .collect();
+        derived.sort_unstable();
+        derived.dedup();
+        assert_eq!(derived.len(), 15, "the unified domain is 15 words");
+        for table in ["torrent", "http_task", "media_task"] {
+            let start = v4_sql
+                .find(&format!("CREATE TABLE {table} "))
+                .unwrap_or_else(|| panic!("missing {table} in v4"));
+            let table_ddl = &v4_sql[start..];
+            let check_at = table_ddl
+                .find("CHECK(state IN (")
+                .unwrap_or_else(|| panic!("{table} must carry the state CHECK in v4"));
+            let words_span = &table_ddl[check_at + "CHECK(state IN (".len()..];
+            let close = words_span.find("))").unwrap_or(words_span.len());
+            let words: Vec<String> = words_span[..close]
+                .split(',')
+                .map(|w| w.trim().trim_matches('\'').to_owned())
+                .collect();
+            let mut sorted = words.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted, derived,
+                "{table}.state CHECK word list must equal the TaskPhase 15-word vocabulary"
+            );
+            // Every word is accepted by parse_v1 byte for byte (the
+            // CHECK and the parse face agree — no word the vocabulary
+            // would itself reject).
+            for word in &words {
+                assert!(
+                    TaskPhase::parse_v1(word).is_ok(),
+                    "{table}: CHECK word {word:?} must parse as a TaskPhase row word"
+                );
+            }
+        }
+    }
+
+    /// v4 applied face — the CHECK enforces exactly the unified domain
+    /// on all three task tables (INSERT and UPDATE alike): all 15 words
+    /// land on every table (family-blind, the same caliber as
+    /// `TaskPhase::parse_v1`; the per-family narrowing stays the write
+    /// faces' validation duty), and the out-of-domain words — case
+    /// drift and the StatusKind projection words — are rejected by the
+    /// database itself. This is the DB-side defense line under the
+    /// typed producers: a hand-edited row (or a future untyped writer)
+    /// cannot store a state outside the vocabulary.
+    #[test]
+    fn v4_state_check_accepts_the_union_and_rejects_foreign_words() {
+        use rusqlite::{Connection, params};
+
+        let conn = Connection::open_in_memory().unwrap_or_else(|e| panic!("open: {e}"));
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .unwrap_or_else(|e| panic!("fk on: {e}"));
+        for m in MIGRATIONS {
+            for sql in m.sqls {
+                conn.execute_batch(sql)
+                    .unwrap_or_else(|e| panic!("v{} ddl: {e}", m.version));
+            }
+        }
+        // CHECK-specific failure match: a bare is_err() could be
+        // satisfied by an unrelated SQL defect in the statement itself;
+        // sqlite names the violating constraint class in the message.
+        fn is_check_violation(err: &rusqlite::Error) -> bool {
+            err.to_string().contains("CHECK constraint failed")
+        }
+        // One INSERT helper per family (the minimal NOT NULL column set,
+        // same shapes the persist/mod.rs DDL-contract test uses).
+        fn insert(
+            conn: &Connection,
+            table: &str,
+            gid: &str,
+            state: &str,
+        ) -> Result<usize, rusqlite::Error> {
+            let sql = match table {
+                "torrent" => "INSERT INTO torrent (gid, name, state, queue_pos, dir, config_json,
+                     kind, created_at, updated_at) VALUES (?1, 't', ?2, 0, '/dl', '{}', 'v2', 1, 1)",
+                "http_task" => "INSERT INTO http_task (gid, url, final_url, state, queue_pos, dir,
+                     out, config_json, block_size, total_done, created_at, updated_at)
+                     VALUES (?1, 'https://x/f', 'https://c/f', ?2, 0, '/dl', 'f.bin', '{}', 4096, 0, 1, 1)",
+                "media_task" => "INSERT INTO media_task (gid, kind, manifest_url, state, staging_dir,
+                     output_path, manifest_norm_digest, config_json, created_at, updated_at)
+                     VALUES (?1, 'hls', 'https://x/master.m3u8', ?2, '/dl/.taiji-b/x', '/dl/out.mp4',
+                     x'55', '{}', 1, 1)",
+                _ => panic!("unknown task table {table}"),
+            };
+            conn.execute(sql, params![gid, state])
+        }
+        let vocabulary: Vec<String> = {
+            use crate::persist::writer::TaskPhase;
+            let mut v: Vec<String> = TaskPhase::ALL
+                .into_iter()
+                .map(|p| p.as_v1_str().to_owned())
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        assert_eq!(vocabulary.len(), 15);
+        for table in ["torrent", "http_task", "media_task"] {
+            // All 15 words land on every table (fresh row per word).
+            for (i, word) in vocabulary.iter().enumerate() {
+                let gid = format!("8{i:015}");
+                insert(&conn, table, &gid, word).unwrap_or_else(|e| {
+                    panic!("{table} must accept the unified-domain word {word:?}: {e}")
+                });
+            }
+            // Out-of-domain words are rejected by the database on INSERT
+            // (case drift + the StatusKind projection words + the
+            // runtime-only fold names), and the rejection is the CHECK
+            // itself — not an incidental SQL failure.
+            for bad in [
+                "Paused", "waiting", "active", "complete", "removed", "planning", "",
+            ] {
+                let err = match insert(&conn, table, "80000000000000f1", bad) {
+                    Ok(_) => panic!("{table} INSERT must reject the out-of-domain word {bad:?}"),
+                    Err(e) => e,
+                };
+                assert!(
+                    is_check_violation(&err),
+                    "{table} INSERT of {bad:?} must fail the CHECK constraint, got: {err}"
+                );
+                // And on UPDATE (the CHECK binds both statement faces).
+                let err = match conn.execute(
+                    &format!("UPDATE {table} SET state = ?1 WHERE rowid = 1"),
+                    params![bad],
+                ) {
+                    Ok(_) => panic!("{table} UPDATE must reject the out-of-domain word {bad:?}"),
+                    Err(e) => e,
+                };
+                assert!(
+                    is_check_violation(&err),
+                    "{table} UPDATE of {bad:?} must fail the CHECK constraint, got: {err}"
+                );
+            }
+        }
+        // The re-created tables take rows (the rebuild left a working
+        // schema, not just DDL text): the 15-word sweep above already
+        // inserted 45 rows; the count check closes the loop.
+        for table in ["torrent", "http_task", "media_task"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap_or_else(|e| panic!("count {table}: {e}"));
+            assert_eq!(n, 15, "{table} holds the 15 accepted rows");
+        }
     }
 
     #[test]
@@ -511,8 +1018,9 @@ mod tests {
             );
         }
         // Freeze surface: no media-model table may appear outside ledger
-        // v3 (the pre-release revisions all land IN v3; the
-        // first external release freezes the ledger as v4).
+        // v3 in the PRE-v4 entries (the pre-release revisions all land
+        // IN v3; v4 rebuilds the full union by design; the first
+        // external release freezes the ledger as v5).
         let earlier_sql = format!(
             "{}\n{}",
             MIGRATIONS[0].sqls.join("\n"),

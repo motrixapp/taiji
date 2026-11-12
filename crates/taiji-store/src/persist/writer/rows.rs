@@ -22,7 +22,10 @@ pub struct MediaTaskRow {
     /// Manifest URL verbatim.
     pub manifest_url: String,
     /// queued|resolving|downloading|recording|processing|verifying|
-    /// finalizing|paused|error|done (the full ten-state domain; no CHECK).
+    /// finalizing|paused|error|done (the full ten-state domain, ==
+    /// [`super::task_phase::TaskPhase::active_words`] of the media
+    /// family ∪ the terminal words; the upsert entry validates it
+    /// against that derivation).
     pub state: String,
     /// Pause phase memory (the media mount's face; carried verbatim).
     pub phase_detail_json: Option<String>,
@@ -276,20 +279,6 @@ pub struct DhtStateRow {
     pub saved_at: i64,
 }
 
-/// The active set of `torrent.state` (the recovery semantics "read
-/// torrents with state in the active set"):
-/// `LoadTorrentsAtStartup` returns only these rows; `done`/`error` are
-/// persisted DownloadResults (terminal states, not rebuilt).
-pub const TORRENT_ACTIVE_STATES: &[&str] = &[
-    "queued",
-    "metadata",
-    "checking",
-    "allocating",
-    "downloading",
-    "seeding",
-    "paused",
-];
-
 /// torrent row payload (field-for-field per the `torrent`
 /// table). Primary key gid; the table has no digest column -> skip-write
 /// via row-level comparison (the same precedent as [`TrackerRow`]).
@@ -303,8 +292,8 @@ pub struct TorrentRow {
     pub name: String,
     /// The state set: queued|metadata|checking|allocating|
     /// downloading|seeding|paused|error|done (stored verbatim as text;
-    /// the value domain is the writer-side caller's duty — the DDL has
-    /// no CHECK).
+    /// the upsert entry validates the value against the unified
+    /// vocabulary's torrent-family derivation — the DDL has no CHECK).
     pub state: String,
     /// Queue order (stable ORDER BY key at recovery; a session-side
     /// increasing counter).
@@ -399,20 +388,6 @@ pub struct RecoveredLayerRow {
     pub layer: Vec<u8>,
 }
 
-/// The active set of http_task.state (recovery semantics:
-/// [`super::PersistJob::LoadHttpTasksAtStartup`] returns only these
-/// rows); `done`/`error` are terminal and not rebuilt (matching the
-/// [`TORRENT_ACTIVE_STATES`] recovery policy).
-pub const HTTP_TASK_ACTIVE_STATES: &[&str] = &["queued", "probing", "downloading", "paused"];
-
-/// The terminal set of http_task.state (the complement of
-/// [`HTTP_TASK_ACTIVE_STATES`]). Non-terminal overwrites of terminal
-/// rows are rejected by the write face (see the downgrade-write guard in
-/// [`super::write_http::upsert_http_task`]); the only exit from a
-/// terminal state is the explicit reopen (the Error->unpause re-probe
-/// migration arm).
-pub const HTTP_TASK_TERMINAL_STATES: &[&str] = &["done", "error"];
-
 /// http_task row payload (the media data-model increment; DDL frozen).
 ///
 /// Primary key gid (a namespace pooled with BT; no cross-table
@@ -435,7 +410,8 @@ pub struct HttpTaskRow {
     /// single-source tasks. The store does not interpret the structure.
     pub mirrors_json: Option<String>,
     /// queued|probing|downloading|paused|error|done (no DDL CHECK; the
-    /// value domain is the writer-side caller's duty).
+    /// upsert entry validates the value against the unified
+    /// vocabulary's http-family derivation).
     pub state: String,
     /// Queue order (stable ORDER BY key at recovery; a session-side
     /// increasing counter).

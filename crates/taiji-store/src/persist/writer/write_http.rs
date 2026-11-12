@@ -7,13 +7,13 @@
 //! cookie **reads** that ride them, plus the paired delete.
 
 use rusqlite::{Connection, OptionalExtension, params};
+use tracing::warn;
 
 use crate::error::StoreError;
 
 use super::job::PersistOutcome;
-use super::rows::{
-    HTTP_TASK_ACTIVE_STATES, HTTP_TASK_TERMINAL_STATES, HttpTaskRow, HttpTaskSnapshot,
-};
+use super::rows::{HttpTaskRow, HttpTaskSnapshot};
+use super::task_phase::{TaskFamily, TaskPhase};
 use super::write_cookie::load_task_cookies;
 
 /// Now, in epoch seconds — the writer-side time source for observational
@@ -72,10 +72,21 @@ const HTTP_TASK_READ_COLS: &str = "gid, url, final_url, mirrors_json, state, que
 /// downloading); the only exit from a terminal state is the explicit
 /// [`reopen_http_task`] (escaping a terminal state does not pass this
 /// guard).
+///
+/// Write-point validation: the payload `state` must parse in the unified
+/// vocabulary and belong to the http family
+/// ([`super::validate_task_state`]) — an unknown or cross-family word is
+/// an explicit error, never a silent row. The stored row's state is
+/// parsed for the guard below with a poisoned-row policy: an
+/// unparseable stored value reads as **non-terminal** (the exact
+/// semantics the old word-set contains-check had) and the upsert
+/// overwrites it — the poison is repaired, with a warn so the branch is
+/// never silent.
 pub(super) fn upsert_http_task(
     conn: &mut Connection,
     row: &HttpTaskRow,
 ) -> Result<PersistOutcome, StoreError> {
+    let phase = super::validate_task_state(&row.state, TaskFamily::Http, "http_task")?;
     let existing: Option<HttpTaskRow> = conn
         .query_row(
             &format!("SELECT {HTTP_TASK_READ_COLS} FROM http_task WHERE gid = ?1"),
@@ -83,11 +94,28 @@ pub(super) fn upsert_http_task(
             read_http_task_row,
         )
         .optional()?;
-    if let Some(cur) = existing.as_ref()
-        && HTTP_TASK_TERMINAL_STATES.contains(&cur.state.as_str())
-        && !HTTP_TASK_TERMINAL_STATES.contains(&row.state.as_str())
-    {
-        return Ok(PersistOutcome::SkippedUnchanged);
+    // The stored value comes from a single-row SELECT with no word-set
+    // filter, so a hand-poisoned row is reachable here. Parse it: Ok ->
+    // classify by variant; Err -> warn (gid + the raw value) and keep
+    // the old contains=false reading — non-terminal, guard passes, the
+    // overwrite repairs the row. No silent else.
+    if let Some(cur) = existing.as_ref() {
+        let cur_terminal = match TaskPhase::parse_v1(&cur.state) {
+            Ok(p) => p.is_terminal(),
+            Err(_) => {
+                warn!(
+                    gid = %row.gid,
+                    raw_state = %cur.state,
+                    "http_task stored state is outside the unified vocabulary; the terminal \
+                     guard reads it as non-terminal and lets the upsert overwrite (poisoned-row \
+                     repair)"
+                );
+                false
+            }
+        };
+        if cur_terminal && !phase.is_terminal() {
+            return Ok(PersistOutcome::SkippedUnchanged);
+        }
     }
     let same = match existing.as_ref() {
         Some(cur) => {
@@ -154,8 +182,10 @@ pub(super) fn upsert_http_task(
     Ok(PersistOutcome::Written)
 }
 
-/// Startup recovery read face: all rows in the active set (queue_pos,
-/// created_at order) + each row's task cookie set (the unified
+/// Startup recovery read face: all rows in the active set (the
+/// http-family derivation [`TaskPhase::active_words`] — every
+/// non-terminal member of the declared domain; queue_pos, created_at
+/// order) + each row's task cookie set (the unified
 /// task_cookie table: replayed deterministically in
 /// name/domain/path order). Terminal rows (done/error) are not on this
 /// face — persisted result rows remain as task facts that can be
@@ -165,7 +195,8 @@ pub(super) fn upsert_http_task(
 pub(super) fn load_http_tasks_at_startup(
     conn: &Connection,
 ) -> Result<Vec<HttpTaskSnapshot>, StoreError> {
-    let placeholders = HTTP_TASK_ACTIVE_STATES
+    let active_states = TaskPhase::active_words(TaskFamily::Http);
+    let placeholders = active_states
         .iter()
         .map(|_| "?")
         .collect::<Vec<_>>()
@@ -177,7 +208,7 @@ pub(super) fn load_http_tasks_at_startup(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        rusqlite::params_from_iter(HTTP_TASK_ACTIVE_STATES.iter()),
+        rusqlite::params_from_iter(active_states.iter()),
         read_http_task_row,
     )?;
     let rows: Vec<HttpTaskRow> = rows
@@ -259,17 +290,37 @@ pub(super) fn delete_http_task(
 /// fields cleared; bitmap/progress/resume digest preserved as-is (the
 /// re-probe settles via the existing resume criteria — nothing
 /// fabricated, nothing lost). Hit = `Written`; missing or non-terminal
-/// row = `SkippedUnchanged` (idempotent).
+/// row = `SkippedUnchanged` (idempotent). The SET word and the WHERE
+/// terminal set both bind as parameters (words from the vocabulary's
+/// emission/derivation faces — no quoted state literal rides the SQL
+/// text).
 pub(super) fn reopen_http_task(
     conn: &mut Connection,
     gid: &str,
 ) -> Result<PersistOutcome, StoreError> {
+    let reopen_state = TaskPhase::Queued.as_v1_str();
+    let terminal_states = TaskPhase::terminal_words();
+    let placeholders = terminal_states
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
     let tx = conn.transaction()?;
+    // Bind order: ?1 gid, ?2 the reopen word, ?3 updated_at, ?4.. the
+    // terminal words (mixed str/i64 binds — the same slice shape
+    // `params!` builds).
+    let updated_at = now_epoch_secs();
+    let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&gid, &reopen_state, &updated_at];
+    for word in &terminal_states {
+        binds.push(word);
+    }
     let reopened = tx.execute(
-        "UPDATE http_task SET state = 'queued', error_code = NULL, error_msg = NULL,
-         updated_at = ?2
-         WHERE gid = ?1 AND state IN ('done', 'error')",
-        params![gid, now_epoch_secs()],
+        &format!(
+            "UPDATE http_task SET state = ?2, error_code = NULL, error_msg = NULL,
+             updated_at = ?3
+             WHERE gid = ?1 AND state IN ({placeholders})"
+        ),
+        binds.as_slice(),
     )?;
     tx.commit()?;
     if reopened > 0 {
@@ -1098,6 +1149,132 @@ mod tests {
         assert_eq!(snap.cookies.len(), 1);
         assert_eq!(snap.cookies[0].name, "sid");
         assert!(ok(load_http_task(&conn, "8000000000000999"), "missing").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Write-point state validation (the upsert entry's parse_v1 +
+    /// family filter): an unknown word (case drift) and a cross-family
+    /// word (a torrent-only or media-only phase presented as an http
+    /// row — the checking/seeding fold words included) are explicit
+    /// errors that never touch the row; the error carries the offending
+    /// value verbatim.
+    #[test]
+    fn http_task_upsert_refuses_unknown_and_cross_family_states() {
+        let path = tmp_db("state-validation");
+        let mut conn = ok(open_and_migrate(&path), "open");
+        let gid = "8000000000000272";
+        ok(
+            upsert_http_task(&mut conn, &row(gid, "downloading", 0)),
+            "seed",
+        );
+        for bad in [
+            "Paused",
+            "active",
+            "metadata",
+            "checking",
+            "seeding",
+            "resolving",
+        ] {
+            let err = match upsert_http_task(&mut conn, &row(gid, bad, 0)) {
+                Ok(_) => panic!("must refuse state {bad:?}"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains(bad),
+                "the error must carry the offending value {bad:?}: {err}"
+            );
+        }
+        // The stored row survived every refusal unchanged, and the
+        // in-family words (including both terminals and every active
+        // word of the family's derivation) keep landing.
+        let loaded = ok(load_http_task(&conn, gid), "read back");
+        let loaded = match loaded {
+            Some(s) => s.row,
+            None => panic!("row must exist"),
+        };
+        assert_eq!(loaded.state, "downloading");
+        for good in ["queued", "probing", "paused", "error", "done"] {
+            assert_eq!(
+                ok(
+                    upsert_http_task(&mut conn, &row(gid, good, 0)),
+                    "good state"
+                ),
+                PersistOutcome::Written,
+                "{good} is inside the http family's declared domain"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The terminal guard's poisoned-row policy under the v4 CHECK
+    /// (two defense layers, pinned together): the stored value comes
+    /// from a single-row SELECT with no word-set filter, so the guard
+    /// must tolerate a poisoned row — an unparseable stored state reads
+    /// as non-terminal, the exact semantics the old word-set
+    /// contains-check had (contains == false), so a live-phase upsert
+    /// overwrites it (the poison is repaired, warn emitted), instead of
+    /// wedging the row behind a guard it can never satisfy. Since
+    /// ledger v4 the plain SQL poison is itself refused by the
+    /// database-side CHECK (the outer layer — asserted first); the
+    /// guard's tolerance branch is then exercised through sqlite's
+    /// `PRAGMA ignore_check_constraints` (the documented test bypass of
+    /// the outer layer), standing in for the non-SQL corruption faces
+    /// the CHECK cannot see (page-level corruption, a future migration
+    /// mistake). Production code never sets that pragma.
+    #[test]
+    fn http_task_terminal_guard_reads_poisoned_state_as_non_terminal() {
+        let path = tmp_db("poisoned-guard");
+        let mut conn = ok(open_and_migrate(&path), "open");
+        let gid = "8000000000000273";
+        ok(
+            upsert_http_task(&mut conn, &row(gid, "done", 4096)),
+            "seed done",
+        );
+        // Layer 1 (the v4 CHECK): the direct-SQL poison is refused by
+        // the database itself — the out-of-domain word never lands.
+        assert!(
+            conn.execute(
+                "UPDATE http_task SET state = 'Paused' WHERE gid = ?1",
+                params![gid],
+            )
+            .is_err(),
+            "the v4 state CHECK must refuse the out-of-domain poison word"
+        );
+        // Layer 2 (the guard's tolerance): bypass the CHECK with
+        // sqlite's test pragma, poison the row, re-enable enforcement,
+        // then verify the guard repairs rather than wedges.
+        ok(
+            conn.pragma_update(None, "ignore_check_constraints", "ON"),
+            "disable checks (test bypass)",
+        );
+        ok(
+            conn.execute(
+                "UPDATE http_task SET state = 'Paused' WHERE gid = ?1",
+                params![gid],
+            ),
+            "poison state",
+        );
+        ok(
+            conn.pragma_update(None, "ignore_check_constraints", "OFF"),
+            "re-enable checks",
+        );
+        // A live-phase payload over the poisoned row: the guard reads
+        // the stored value as non-terminal (warn + contains=false
+        // semantics) and the upsert lands, repairing the row.
+        assert_eq!(
+            ok(
+                upsert_http_task(&mut conn, &row(gid, "downloading", 8192)),
+                "overwrite poisoned"
+            ),
+            PersistOutcome::Written
+        );
+        let loaded = ok(load_http_task(&conn, gid), "read back");
+        let loaded = match loaded {
+            Some(s) => s.row,
+            None => panic!("row must exist"),
+        };
+        assert_eq!(loaded.state, "downloading", "the poisoned row is repaired");
+        assert_eq!(loaded.total_done, 8192);
         let _ = std::fs::remove_file(&path);
     }
 }

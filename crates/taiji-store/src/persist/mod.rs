@@ -16,18 +16,19 @@ pub mod writer;
 
 pub use fork_import::{
     Aria2ControlFile, Aria2CtrlError, Aria2HttpControl, FORK_SCHEMA_VERSION, ForkHttpTaskRow,
-    ForkProgress, ForkTaskRow, collect_aria2_files, completed_length_from_bitfield,
-    count_fork_tasks, expected_bitfield_len, load_fork_bt_tasks, load_fork_http_tasks,
-    open_fork_readonly, parse_aria2_control, parse_aria2_control_http, probe_fork_readonly,
+    ForkProgress, ForkTaskRow, ForkTaskState, ForkTaskStateError, collect_aria2_files,
+    completed_length_from_bitfield, count_fork_tasks, expected_bitfield_len, load_fork_bt_tasks,
+    load_fork_http_tasks, open_fork_readonly, parse_aria2_control, parse_aria2_control_http,
+    probe_fork_readonly,
 };
 pub use schema::{MIGRATIONS, Migration, SCHEMA_V2_TABLES, SCHEMA_V3_TABLES};
 pub use writer::{
-    DhtStateRow, HTTP_TASK_ACTIVE_STATES, HttpTaskRow, HttpTaskSnapshot, IpfilterRow,
-    MediaArchiveRow, MediaFormatRow, MediaKeyRow, MediaSegmentRow, MediaTaskRow, MediaTrackRow,
-    PeerBanRow, PersistHandle, PersistJob, PersistObserve, PersistOutcome, PersistWriter,
-    RecoveredLayerRow, SharedPersistObserve, TASK_KIND_HTTP, TASK_KIND_MEDIA,
-    TORRENT_ACTIVE_STATES, TaskCookieRow, TaskCookieSweepEntry, TaskCookieSweepReport,
-    TorrentFileRow, TorrentProgressRow, TorrentRow, TorrentSnapshot, TrackerRow,
+    DhtStateRow, HttpTaskRow, HttpTaskSnapshot, IpfilterRow, MediaArchiveRow, MediaFormatRow,
+    MediaKeyRow, MediaSegmentRow, MediaTaskRow, MediaTrackRow, PeerBanRow, PersistHandle,
+    PersistJob, PersistObserve, PersistOutcome, PersistWriter, RecoveredLayerRow,
+    SharedPersistObserve, TASK_KIND_HTTP, TASK_KIND_MEDIA, TaskCookieRow, TaskCookieSweepEntry,
+    TaskCookieSweepReport, TaskFamily, TaskPhase, TaskPhaseError, TorrentFileRow,
+    TorrentProgressRow, TorrentRow, TorrentSnapshot, TrackerRow,
 };
 
 use std::path::Path;
@@ -716,20 +717,21 @@ fn has_table(conn: &Connection, name: &str) -> Result<bool, StoreError> {
 }
 
 /// Occupied active http_task (dir, out) set (the same state filter as
-/// the startup recovery read face `HTTP_TASK_ACTIVE_STATES`; terminal
-/// done/error rows are not in the path-conflict decision face).
+/// the startup recovery read face — the http-family active derivation
+/// [`writer::TaskPhase::active_words`]; terminal done/error rows are
+/// not in the path-conflict decision face).
 fn occupied_http_rows(conn: &Connection) -> Result<Vec<(String, String)>, StoreError> {
-    let placeholders = writer::HTTP_TASK_ACTIVE_STATES
+    let active_states = writer::TaskPhase::active_words(writer::TaskFamily::Http);
+    let placeholders = active_states
         .iter()
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!("SELECT dir, out FROM http_task WHERE state IN ({placeholders})");
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        params_from_iter(writer::HTTP_TASK_ACTIVE_STATES.iter()),
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    )?;
+    let rows = stmt.query_map(params_from_iter(active_states.iter()), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)
 }
@@ -1261,21 +1263,22 @@ mod tests {
     /// intact in all columns (readable and writable), the new media
     /// tables
     /// created and empty (migrations only create tables), user_version
-    /// advanced, reopen idempotent.
+    /// advanced, reopen idempotent. Since ledger v4 (the one-shot
+    /// state-CHECK rebuild) the full open face would wipe the rows, so
+    /// this losslessness pin rides the parameterized ceiling
+    /// `open_and_migrate_up_to(_, 3)` (the isomorphic old-binary open);
+    /// the full-open wipe semantics are pinned separately by
+    /// [`old_v3_db_opens_to_v4_rebuilt_with_check`].
     #[test]
     fn pre_phase_b_db_upgrades_to_v3_preserving_legacy_rows() {
         let path = tmp_db("v2-to-v3");
         legacy_v2_db(&path);
         {
-            let conn = ok(open_and_migrate(&path), "migrate v2->v3");
+            let conn = ok(open_and_migrate_up_to(&path, 3), "migrate v2->v3");
             assert_eq!(
                 user_version_of(&conn),
-                LATEST_VERSION,
-                "ledger advanced to v3"
-            );
-            assert_eq!(
-                LATEST_VERSION, 3,
-                "the media DDL settles the ledger at v3 (v2 is taken by the existing release)"
+                3,
+                "ledger advanced to the v3 ceiling"
             );
             // Legacy data undamaged: whole-row, full-column comparison across the four tables.
             assert_legacy_rows_intact(&conn);
@@ -1297,19 +1300,161 @@ mod tests {
                 assert_eq!(n, 0, "{table} must be empty (migrations create no data)");
             }
         }
-        // Reopen idempotent: all migrations skip, the table set does not double.
+        // Reopen idempotent at the same ceiling: migrations skip, the
+        // table set does not double (the legacy rows survive this
+        // reopen too — v3 is still a row-preserving step).
+        {
+            let conn = ok(open_and_migrate_up_to(&path, 3), "reopen");
+            assert_eq!(user_version_of(&conn), 3);
+            assert_eq!(tables_of(&conn).len(), all_migrated_table_count());
+            assert_legacy_rows_intact(&conn);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The v4 one-shot rebuild semantics on an old v3 dev database (the
+    /// hard premise of the pre-release posture): opening under the
+    /// current binary advances the ledger to v4, **clears every row**
+    /// (no dual write, no backfill — the DROP+recreate inside the
+    /// migration transaction), leaves the full table set in place with
+    /// the unified state CHECKs present, and reopening is idempotent.
+    /// The released-binary note: back up with `sqlite3 .backup` before
+    /// upgrading; rollback = revert the v4 ledger entry + restore the
+    /// backup (the migration is atomic — a kill mid-v4 leaves the old
+    /// version untouched).
+    #[test]
+    fn old_v3_db_opens_to_v4_rebuilt_with_check() {
+        let path = tmp_db("v3-to-v4");
+        // Build the old v3 shape through the parameterized open (the
+        // isomorphic old-binary face), then seed rows in all three task
+        // families — the wipe must be total, not per-family.
+        {
+            let conn = ok(open_and_migrate_up_to(&path, 3), "build v3");
+            assert_eq!(user_version_of(&conn), 3);
+            ok(
+                conn.execute(
+                    "INSERT INTO torrent (gid, name, state, queue_pos, dir, config_json, kind,
+                         created_at, updated_at)
+                     VALUES ('8000000000000009', 'old3.bin', 'seeding', 1, '/dl', '{}', 'v2', 5, 6)",
+                    [],
+                ),
+                "seed v3 torrent",
+            );
+            ok(
+                conn.execute(
+                    "INSERT INTO http_task (gid, url, final_url, state, queue_pos, dir, out,
+                         config_json, block_size, total_done, created_at, updated_at)
+                     VALUES ('800000000000000a', 'https://x/g', 'https://x/g', 'downloading', 0,
+                         '/dl', 'g.bin', '{}', 4096, 0, 1, 1)",
+                    [],
+                ),
+                "seed v3 http",
+            );
+            ok(
+                conn.execute(
+                    "INSERT INTO media_task (gid, kind, manifest_url, state, staging_dir,
+                         output_path, manifest_norm_digest, config_json, created_at, updated_at)
+                     VALUES ('800000000000000b', 'hls', 'https://x/m.m3u8', 'resolving', '/d', '/o',
+                         ?1, '{}', 1, 1)",
+                    params![vec![0x55u8; 32]],
+                ),
+                "seed v3 media",
+            );
+        }
+        // The upgrade open: v4 runs, the rows are gone, the CHECKs are
+        // in place, the ledger reads 4.
+        {
+            let conn = ok(open_and_migrate(&path), "migrate v3->v4");
+            assert_eq!(
+                user_version_of(&conn),
+                LATEST_VERSION,
+                "the ledger advanced to v4"
+            );
+            assert_eq!(LATEST_VERSION, 4, "v4 = the one-shot state-CHECK rebuild");
+            assert_eq!(
+                tables_of(&conn).len(),
+                all_migrated_table_count(),
+                "the full v1∪v2∪v3 table set is back after the rebuild"
+            );
+            for table in [
+                "torrent",
+                "http_task",
+                "media_task",
+                "torrent_file",
+                "media_track",
+            ] {
+                let n: i64 = ok(
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)),
+                    "post-rebuild count",
+                );
+                assert_eq!(
+                    n, 0,
+                    "{table} must be empty (the v4 rebuild clears the data)"
+                );
+            }
+            // The CHECK rides the rebuilt state columns (sqlite_master
+            // text), and it enforces: an out-of-domain word is refused
+            // by the database itself.
+            for table in ["torrent", "http_task", "media_task"] {
+                let ddl: String = ok(
+                    conn.query_row(
+                        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                        [table],
+                        |r| r.get(0),
+                    ),
+                    "read ddl",
+                );
+                assert!(
+                    ddl.contains("CHECK(state IN ("),
+                    "{table} must carry the state CHECK after the v4 rebuild"
+                );
+            }
+            assert!(
+                conn.execute(
+                    "INSERT INTO http_task (gid, url, final_url, state, queue_pos, dir, out,
+                         config_json, block_size, total_done, created_at, updated_at)
+                     VALUES ('800000000000000c', 'https://x/h', 'https://x/h', 'waiting', 0,
+                         '/dl', 'h.bin', '{}', 4096, 0, 1, 1)",
+                    [],
+                )
+                .is_err(),
+                "the rebuilt CHECK must refuse the projection word 'waiting'"
+            );
+            ok(
+                conn.execute(
+                    "INSERT INTO torrent (gid, name, state, queue_pos, dir, config_json, kind,
+                         created_at, updated_at)
+                     VALUES ('800000000000000d', 'new4.bin', 'queued', 0, '/dl', '{}', 'v2', 1, 1)",
+                    [],
+                ),
+                "post-rebuild insert",
+            );
+        }
+        // Reopen idempotent: v4 does not run twice.
         {
             let conn = ok(open_and_migrate(&path), "reopen");
             assert_eq!(user_version_of(&conn), LATEST_VERSION);
-            assert_eq!(tables_of(&conn).len(), all_migrated_table_count());
+            let n: i64 = ok(
+                conn.query_row("SELECT COUNT(*) FROM torrent", [], |r| r.get(0)),
+                "reopen count",
+            );
+            assert_eq!(
+                n, 1,
+                "the post-rebuild row survives the reopen (no double wipe)"
+            );
         }
         let _ = std::fs::remove_file(&path);
     }
 
     /// sqlite_master output compared verbatim: a fresh database vs an
-    /// upgraded one (v2->v3) produce *exactly the same* table set and DDL
-    /// text — the upgrade path must not drift from the fresh-create
-    /// schema.
+    /// upgraded one (a legacy v2 database opening under the current
+    /// binary) produce *exactly the same* table set and DDL text — the
+    /// upgrade path must not drift from the fresh-create schema. Since
+    /// ledger v4 both paths converge on the v4 rebuild text by
+    /// construction (the fresh path builds v1..v3 then v4
+    /// drops/re-creates everything; the upgrade path runs v3 then the
+    /// same v4), so this pin guards the rebuild text staying the single
+    /// terminal shape.
     #[test]
     fn fresh_and_upgraded_dbs_produce_identical_sqlite_master() {
         let fresh = tmp_db("ddl-fresh");
@@ -1390,7 +1535,10 @@ mod tests {
     /// v1->v3 direct path: an old database that skipped the v2 migration
     /// (pre-0.1.0) upgrades straight to v3 — the migration loop replays
     /// the ledger interval, missing versions do not mean missing tables,
-    /// legacy data intact.
+    /// legacy data intact. Rides the ceiling-3 open since ledger v4
+    /// (the full open rebuilds and clears — pinned by
+    /// [`old_v3_db_opens_to_v4_rebuilt_with_check`]); the v1->v4 wipe is
+    /// the same v4 entry, replayed over a longer interval.
     #[test]
     fn v1_db_upgrades_directly_to_v3() {
         let path = tmp_db("v1-to-v3");
@@ -1411,8 +1559,8 @@ mod tests {
             );
         }
         {
-            let conn = ok(open_and_migrate(&path), "migrate v1->v3");
-            assert_eq!(user_version_of(&conn), LATEST_VERSION);
+            let conn = ok(open_and_migrate_up_to(&path, 3), "migrate v1->v3");
+            assert_eq!(user_version_of(&conn), 3);
             assert_eq!(tables_of(&conn).len(), all_migrated_table_count());
             let name: String = ok(
                 conn.query_row(
@@ -1428,7 +1576,8 @@ mod tests {
     }
 
     /// Rollback semantics: an old binary (0.1.x, supported ceiling =
-    /// ledger v2) refuses a v3 (media-model) database, and the refusal happens
+    /// ledger v2) refuses a newer-ledger database (v4 since the one-shot
+    /// rebuild; v3 when it was the ceiling), and the refusal happens
     /// before any migration DDL / ledger write (the database is neither
     /// downgraded nor polluted). Open-phase PRAGMAs are connection-level
     /// configuration (journal_mode writes nothing on an already-migrated
@@ -1441,8 +1590,8 @@ mod tests {
     fn phase_a_binary_rejects_phase_b_db_unchanged() {
         let path = tmp_db("rollback-reject");
         {
-            let conn = ok(open_and_migrate(&path), "build v3 db");
-            assert_eq!(user_version_of(&conn), 3);
+            let conn = ok(open_and_migrate(&path), "build current-ledger db");
+            assert_eq!(user_version_of(&conn), LATEST_VERSION);
         }
         // After clean shutdown there are no sidecars; the main-file baseline is in place.
         assert_eq!(
@@ -1451,16 +1600,16 @@ mod tests {
             "no -wal/-shm after shutdown"
         );
         let before = sha256_of(&path);
-        // Old-binary view: supported = 2 -> the v3 database is refused.
+        // Old-binary view: supported = 2 -> the newer database is refused.
         match open_and_migrate_up_to(&path, 2) {
             Err(StoreError::MigrationVersionMismatch { db, supported }) => {
                 assert_eq!(
                     (db, supported),
-                    (3, 2),
-                    "0.1.x supported ceiling = v2, new db = v3"
+                    (LATEST_VERSION, 2),
+                    "0.1.x supported ceiling = v2, new db = the current ledger head"
                 );
             }
-            Ok(_) => panic!("old binary must not open a v3 database"),
+            Ok(_) => panic!("old binary must not open a newer-ledger database"),
             Err(other) => panic!("expected MigrationVersionMismatch, got {other:?}"),
         }
         // Rejection path: zero written bytes, zero leftovers.
@@ -1474,11 +1623,11 @@ mod tests {
             before, after,
             "the refusal path must not touch any byte of the main file"
         );
-        // After refusal the database stays v3 as-is (not advanced, not
-        // reverted; reopen still works).
+        // After refusal the database stays at its version as-is (not
+        // advanced, not reverted; reopen still works).
         {
             let conn = ok(open_and_migrate(&path), "reopen after reject");
-            assert_eq!(user_version_of(&conn), 3);
+            assert_eq!(user_version_of(&conn), LATEST_VERSION);
             assert_eq!(tables_of(&conn).len(), all_migrated_table_count());
         }
         // Reverse sanity: the old binary opens a v2 database fine (the

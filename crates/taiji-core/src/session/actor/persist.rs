@@ -38,7 +38,7 @@ impl SessionActor {
             let cfg = self.job_config(&gid);
             let mut row = super::super::persist::torrent_row(
                 &gid_hex,
-                "queued",
+                TaskPhase::Queued,
                 self.row_seq(),
                 &derive_name(&meta.meta),
                 &cfg,
@@ -60,40 +60,40 @@ impl SessionActor {
             return;
         }
         let state = if pause {
-            "paused"
+            TaskPhase::Paused
         } else if restart {
-            "queued"
+            TaskPhase::Queued
         } else {
             match status {
-                StatusKind::Complete => "done",
-                StatusKind::Error => "error",
+                StatusKind::Complete => TaskPhase::Done,
+                StatusKind::Error => TaskPhase::Error,
                 // Shutdown interruption (flagless Cancelled->Removed
                 // classification): unfinished task.
-                StatusKind::Removed | StatusKind::Active => "queued",
+                StatusKind::Removed | StatusKind::Active => TaskPhase::Queued,
                 // Defensive: waiting states never appear in the
                 // result-table classification.
-                StatusKind::Waiting | StatusKind::Paused => "queued",
+                StatusKind::Waiting | StatusKind::Paused => TaskPhase::Queued,
                 // Seeding-residence terminal dispatch:
                 // the seed-pool teardown routes here with the natural
                 // classification (Complete/Error/Removed); the Seeding
                 // value itself only rides the waiting projection —
                 // defensively persisted as the seeding row state.
-                StatusKind::Seeding => "seeding",
+                StatusKind::Seeding => TaskPhase::Seeding,
                 // War 2: the Checking value rides the waiting
                 // projection only (in-flight rechecks project active);
                 // defensively persisted as the checking row state.
-                StatusKind::Checking => "checking",
+                StatusKind::Checking => TaskPhase::Checking,
             }
         };
         let Some((row, files)) = self.rows.get_mut(&gid_hex) else {
             return;
         };
-        row.state = state.to_string();
-        if state == "error" {
+        row.state = state.as_v1_str().to_string();
+        if state == TaskPhase::Error {
             row.error_msg = note;
         }
         let (row, files) = (row.clone(), files.clone());
-        if state == "done" || state == "error" {
+        if state.is_terminal() {
             // Persist the DownloadResult = the torrent row's terminal
             // form (the file set is not part of the result write face).
             // Drop the mirror (task is terminal; restart does not
@@ -328,15 +328,16 @@ impl SessionActor {
         }
     }
 
-    /// Waiting-state row text (dispatched by task shape: magnet
-    /// metadata task = metadata).
-    pub(super) fn reserved_state_str(&self, gid: Gid) -> &'static str {
+    /// Waiting-state row phase (dispatched by task shape: magnet
+    /// metadata task = metadata). Returns the unified vocabulary's
+    /// enum; the row word serializes only at the write face.
+    pub(super) fn reserved_state(&self, gid: Gid) -> TaskPhase {
         match self.jobs.get(&gid) {
-            Some(Job::Magnet(_)) => "metadata",
+            Some(Job::Magnet(_)) => TaskPhase::Metadata,
             // HTTP task row state belongs to the driver/http_task
             // table; no torrent-row mirror -> the transition face is a
-            // no-op. The text only serves UnpauseAll dispatch.
-            _ => "queued",
+            // no-op. The phase only serves UnpauseAll dispatch.
+            _ => TaskPhase::Queued,
         }
     }
 
@@ -355,13 +356,15 @@ impl SessionActor {
     }
 
     /// State-transition rewrite (update state on the mirror row; no
-    /// mirror = never persisted, skip).
-    pub(super) async fn persist_transition(&mut self, gid: Gid, state: &str) {
+    /// mirror = never persisted, skip). The phase arrives as the unified
+    /// vocabulary's enum and serializes through its canonical table —
+    /// the torrent-row write face never sees a raw row word.
+    pub(super) async fn persist_transition(&mut self, gid: Gid, phase: TaskPhase) {
         let key = gid.to_string();
         let Some((row, files)) = self.rows.get_mut(&key) else {
             return;
         };
-        row.state = state.to_string();
+        row.state = phase.as_v1_str().to_string();
         let (row, files) = (row.clone(), files.clone());
         if let Some(p) = &self.persist {
             if let Err(e) = p.upsert_torrent(row, files).await {

@@ -47,7 +47,7 @@ use crate::seed::SeedPolicy;
 use taiji_io::rate_limit::LimiterSet;
 use taiji_io::text::is_spoofing_char;
 use taiji_store::persist::{
-    PeerBanRow, PersistHandle, TorrentFileRow, TorrentProgressRow, TorrentRow,
+    PeerBanRow, PersistHandle, TaskPhase, TorrentFileRow, TorrentProgressRow, TorrentRow,
 };
 
 use crate::peer_guard::ManualBanRule;

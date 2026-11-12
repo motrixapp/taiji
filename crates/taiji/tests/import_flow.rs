@@ -576,7 +576,11 @@ type HttpRowSnapshot = (
 /// Synthetic fork-schema db seeded with HTTP/FTP task rows
 /// (is_torrent=0; serialized = first line with TAB-separated URIs +
 /// leading-space option lines; progress optional — None = no
-/// task_progress row, the weak-resume shape).
+/// task_progress row, the weak-resume shape). `task.state` carries the
+/// fork archive word `waiting` (not paused) — the only two words the
+/// fork serializer ever writes here (Sqlite3SessionStore.cc `upsertTask`:
+/// `isPauseRequested() ? "paused" : "waiting"`; `active` is a
+/// tellStatus projection word and never enters this column).
 fn seed_fork_db_http(path: &Path, rows: &[HttpSeedRow<'_>]) {
     let conn = ok(rusqlite::Connection::open(path), "open fork fixture");
     ok(
@@ -603,7 +607,7 @@ fn seed_fork_db_http(path: &Path, rows: &[HttpSeedRow<'_>]) {
         ok(
             conn.execute(
                 "INSERT INTO task (gid, state, serialized, queue_position, digest, created_at, updated_at)
-                 VALUES (?1, 'active', ?2, ?3, x'00', 0, 0)",
+                 VALUES (?1, 'waiting', ?2, ?3, x'00', 0, 0)",
                 rusqlite::params![gid, serialized, i as i64],
             ),
             "seed http task",
@@ -746,7 +750,10 @@ fn http_face_import_second_import_and_path_conflict() {
             mirrors.contains("http://mirror.invalid/a.bin"),
             "mirrors_json = the serialized multi-URI restoration: {mirrors}"
         );
-        assert_eq!(state, "queued", "fork active -> queued: {state}");
+        assert_eq!(
+            state, "queued",
+            "fork waiting (not paused) -> queued: {state}"
+        );
         assert_eq!(r_dir, dir_str);
         assert_eq!(r_out, "a.bin", "the serialized out= surface A: {r_out}");
         assert_eq!(

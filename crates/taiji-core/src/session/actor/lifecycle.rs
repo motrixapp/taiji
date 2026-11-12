@@ -138,7 +138,25 @@ impl SessionActor {
             // never collides with a restored GID.
             self.gid.reserve(raw_gid);
             let cfg = PersistedTaskConfig::from_json(&row.config_json);
-            let paused = row.state == "paused";
+            // Recovery routing reads the row state through the unified
+            // vocabulary's parse face — no bare word comparison. The
+            // startup read face already filters rows to the active word
+            // set, so a parse failure here is a defensive branch only
+            // (a poisoned row that slipped past the IN-list): warn and
+            // take the plain active face (not paused, queued routing —
+            // the store write face's poisoned-row posture: the row
+            // repairs on the next transition rewrite).
+            let mut phase = match TaskPhase::parse_v1(&row.state) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(target: "taiji::core::session", gid = %gid_hex, %e,
+                        "startup torrent row state outside the unified vocabulary; \
+                         restored as the plain active face (row repairs on the next \
+                         transition write)");
+                    TaskPhase::Queued
+                }
+            };
+            let paused = phase == TaskPhase::Paused;
             match self.rebuild_from_row(&gid, &row, &cfg).await {
                 Rebuilt::Torrent(boxed) => {
                     let (metainfo, tiers) = *boxed;
@@ -161,7 +179,7 @@ impl SessionActor {
                     // precedent); finish_recheck writes the measured
                     // bitmap back and advances the row (queued/paused)
                     // + routes per the bitmap (seed side when full).
-                    if row.state == "checking" {
+                    if phase == TaskPhase::Checking {
                         self.queue.insert_check_pending(gid, false);
                         checked_restarts += 1;
                     }
@@ -285,7 +303,7 @@ impl SessionActor {
                     // known boundary (a download slot held before
                     // SeedingStarted) exists only on the download
                     // side, which full bitmaps never take.
-                    let seed_side = if row.state == "seeding" {
+                    let seed_side = if phase == TaskPhase::Seeding {
                         let progress = match &self.persist {
                             Some(p) => p.load_torrent_progress(&gid_hex).await.ok().flatten(),
                             None => None,
@@ -300,7 +318,8 @@ impl SessionActor {
                             // Not full (or no measured bitmap): the
                             // download side takes the row with the
                             // seeding state rewritten away.
-                            row.state = "queued".to_string();
+                            phase = TaskPhase::Queued;
+                            row.state = phase.as_v1_str().to_string();
                             if let Some(persist) = &self.persist {
                                 if let Err(e) = persist
                                     .upsert_torrent(row.clone(), snap.files.clone())
@@ -320,7 +339,7 @@ impl SessionActor {
                         // after the match carries it into saveSession
                         // unchanged).
                         self.queue.push_seed_wait(gid);
-                    } else if row.state == "checking" {
+                    } else if phase == TaskPhase::Checking {
                         // War 2: parked above — the row mirror keeps
                         // 'checking'; not a reserved member (the
                         // post-recheck requeue comes from finish_recheck).
@@ -416,7 +435,9 @@ impl SessionActor {
                     warn!(target: "taiji::core::session", gid = %gid_hex, %reason,
                         "startup row unrecoverable; recorded as error result");
                     let mut err_row = row;
-                    err_row.state = "error".to_string();
+                    // Terminal state via the enum table (kernel closure:
+                    // no bare v1 state words on the row-write face).
+                    err_row.state = TaskPhase::Error.as_v1_str().to_string();
                     err_row.error_msg = Some(reason);
                     if let Err(e) = persist.insert_download_result(err_row).await {
                         warn!(target: "taiji::core::session", gid = %gid_hex, %e,
@@ -530,7 +551,21 @@ impl SessionActor {
             let gid = Gid::from_u64(raw_gid);
             // GID reserve (cross-restart dedup, same pool as torrent).
             self.gid.reserve(raw_gid);
-            let paused = row.state == "paused";
+            // Pause judgment through the unified vocabulary's parse face
+            // (the startup read face already filters rows to the active
+            // word set; a parse failure is defensive-only — warn and
+            // take the not-paused active face, the store write face's
+            // poisoned-row posture, row repairs on the next transition).
+            let paused = match TaskPhase::parse_v1(&row.state) {
+                Ok(phase) => phase == TaskPhase::Paused,
+                Err(e) => {
+                    warn!(target: "taiji::core::session", gid = %gid_hex, %e,
+                        "startup http row state outside the unified vocabulary; \
+                         restored as the not-paused active face (row repairs on the \
+                         next transition write)");
+                    false
+                }
+            };
             let queue_pos = row.queue_pos;
             // Concurrency-intent face replay: the split/cap effective
             // values frozen into the row at creation override the
@@ -1007,7 +1042,7 @@ impl SessionActor {
                 self.queue.remove_seeding(gid);
                 self.running.remove(&gid);
                 self.seed_parked.remove(&gid);
-                self.persist_transition(gid, "checking").await;
+                self.persist_transition(gid, TaskPhase::Checking).await;
                 return true;
             }
             self.queue.remove_seeding(gid);
@@ -1024,7 +1059,7 @@ impl SessionActor {
             self.queue.drop_active(gid);
             self.queue.push_seed_wait(gid);
             self.running.remove(&gid);
-            self.persist_transition(gid, "seeding").await;
+            self.persist_transition(gid, TaskPhase::Seeding).await;
             return true;
         }
         false

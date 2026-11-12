@@ -1263,6 +1263,90 @@ async fn download_result_insert_purge_remove_load() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Write-point state validation on the torrent face (the upsert entry's
+/// parse_v1 + family filter): an unknown word (case drift, a projection
+/// word) and a cross-family word (an http-only or media-only phase
+/// presented as a torrent row) are explicit internal errors that never
+/// touch the row, on both [`PersistJob::UpsertTorrent`] and the
+/// result-row face; the torrent family's own words — fold words
+/// included — keep landing.
+#[tokio::test]
+async fn torrent_upsert_refuses_unknown_and_cross_family_states() {
+    let path = tmp_db("torrent-state-validation");
+    let (handle, join) = ok(PersistWriter::spawn(path.clone()).await, "spawn");
+    let gid = "8000000000000043";
+    assert_eq!(
+        ok(
+            handle
+                .upsert_torrent(torrent_row(gid, "downloading", 0), Vec::new())
+                .await,
+            "seed"
+        ),
+        PersistOutcome::Written
+    );
+    for bad in ["Paused", "active", "probing", "resolving", "recording"] {
+        let err = match handle
+            .upsert_torrent(torrent_row(gid, bad, 0), Vec::new())
+            .await
+        {
+            Ok(_) => panic!("must refuse state {bad:?}"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, StoreError::Internal(_)),
+            "an explicit writer-side refusal for {bad:?}: {err}"
+        );
+        assert!(
+            err.to_string().contains(bad),
+            "the error must carry the offending value {bad:?}: {err}"
+        );
+        // The result-row face refuses the same payloads (its own
+        // terminal check never even runs — the family validation is
+        // upstream of it).
+        assert!(
+            handle
+                .insert_download_result(torrent_row(gid, bad, 0))
+                .await
+                .is_err()
+        );
+    }
+    // The stored row survived every refusal unchanged; the family's
+    // fold words and every active word keep landing.
+    assert_eq!(
+        ok(handle.load_torrents_at_startup().await, "load startup")
+            .iter()
+            .map(|s| s.row.state.as_str())
+            .collect::<Vec<_>>(),
+        vec!["downloading"],
+        "the row is untouched by the refused payloads"
+    );
+    for good in [
+        "queued",
+        "metadata",
+        "checking",
+        "allocating",
+        "seeding",
+        "paused",
+        "error",
+        "done",
+    ] {
+        assert_eq!(
+            ok(
+                handle
+                    .upsert_torrent(torrent_row(gid, good, 0), Vec::new())
+                    .await,
+                "good state"
+            ),
+            PersistOutcome::Written,
+            "{good} is inside the torrent family's declared domain"
+        );
+    }
+    drop(handle);
+    let exited = tokio::time::timeout(Duration::from_secs(1), join).await;
+    assert!(exited.is_ok());
+    let _ = std::fs::remove_file(&path);
+}
+
 /// session_kv read/write + dedup; after the Checkpoint barrier
 /// everything is durable (WAL checkpoint(TRUNCATE) ran successfully).
 #[tokio::test]
@@ -1680,7 +1764,8 @@ fn media_task_row(gid: &str, state: &str) -> MediaTaskRow {
 }
 
 /// The upsert guard across the whole guarded set (paused/error/
-/// done — MEDIA_TASK_GUARDED_STATES): a stale detached live-phase
+/// done — the unified vocabulary's guarded derivation,
+/// `TaskPhase::guarded_words`): a stale detached live-phase
 /// write landing after the row reached a guarded state is a
 /// `SkippedUnchanged` and the stored row survives, and only the
 /// explicit exits (the paused→queued unpause job, the error/done

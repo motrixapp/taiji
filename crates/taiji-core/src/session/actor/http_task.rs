@@ -74,7 +74,7 @@ use taiji_http::cookies::{CookieStore, NetscapeCookie};
 use taiji_http::coordinator;
 use taiji_http::degraded::DegradedJob;
 use taiji_http::error::{HttpError, Result as HttpResult};
-use taiji_http::finalize::{FinalizeOutcome, Finalizer, RenameIntent, RenameJournal, STATE_DONE};
+use taiji_http::finalize::{FinalizeOutcome, Finalizer, RenameIntent, RenameJournal};
 use taiji_http::ftp::{FtpConfig, FtpProbe, FtpTlsMode, FtpTransport, PasvAddressPolicy};
 use taiji_http::grid::BlockGrid;
 use taiji_http::limiter::{HttpLimiter, RateSampleReporter, ThrottledSink};
@@ -108,7 +108,7 @@ use taiji_http::worker::{
     slowstart_reached, stagger_delay, supervisor_directives,
 };
 use taiji_store::error::StoreError;
-use taiji_store::persist::{HttpTaskRow, PersistHandle, PersistOutcome, TaskCookieRow};
+use taiji_store::persist::{HttpTaskRow, PersistHandle, PersistOutcome, TaskCookieRow, TaskPhase};
 
 use super::super::http::{
     PartFileSync, ValidatorFacts, bit_test, recover, recover::PartFileFacts, recover::Resumability,
@@ -1227,10 +1227,10 @@ impl PersistJournal {
 
     /// Upsert a snapshot of the mirror row (one statement carries state +
     /// rename_pending).
-    async fn upsert_mirror(&self, state: &str, rename_pending: bool) -> HttpResult<()> {
+    async fn upsert_mirror(&self, phase: TaskPhase, rename_pending: bool) -> HttpResult<()> {
         let row = {
             let mut r = crate::lock(&self.row);
-            r.state = state.to_string();
+            r.state = phase.as_v1_str().to_string();
             let mut cfg = HttpPersistConfig::from_json(&r.config_json);
             cfg.rename_pending = rename_pending;
             r.config_json = cfg.to_json();
@@ -1256,7 +1256,7 @@ impl RenameJournal for PersistJournal {
         intent: &'a RenameIntent,
     ) -> BoxJournalFuture<'a, HttpResult<()>> {
         Box::pin(async move {
-            self.upsert_mirror(STATE_DONE, true).await?;
+            self.upsert_mirror(TaskPhase::Done, true).await?;
             {
                 let mut pending = crate::lock(&self.pending);
                 // gid dedup: repeated records for one task do not grow the
@@ -1275,7 +1275,7 @@ impl RenameJournal for PersistJournal {
 
     fn clear_intent<'a>(&'a self, gid: &'a str) -> BoxJournalFuture<'a, HttpResult<()>> {
         Box::pin(async move {
-            self.upsert_mirror(STATE_DONE, false).await?;
+            self.upsert_mirror(TaskPhase::Done, false).await?;
             crate::lock(&self.pending).retain(|i| i.gid != gid);
             Ok(())
         })
@@ -1491,7 +1491,7 @@ pub(super) fn spawn_http_task(
                 url: run.uris.first().cloned().unwrap_or_default(),
                 final_url: String::new(),
                 mirrors_json: None,
-                state: "queued".into(),
+                state: TaskPhase::Queued.as_v1_str().into(),
                 queue_pos: run.queue_pos,
                 dir: run.dir.display().to_string(),
                 out: String::new(),
@@ -1822,8 +1822,8 @@ async fn drive_attempt(
     }
 
     // ---- Probing ----
-    set_state(&mirror, "probing");
-    row.state = "probing".into();
+    set_state(&mirror, TaskPhase::Probing);
+    row.state = TaskPhase::Probing.as_v1_str().into();
     let _ = upsert_row(run.persist.as_ref(), &row).await;
     trace.trace.mark("probe_row");
     // Transport config (option wiring): timeout/retry/proxy/cert faces are
@@ -2092,8 +2092,8 @@ async fn drive_attempt(
                     .await;
                 }
             }
-            set_state(&mirror, STATE_DONE);
-            row.state = STATE_DONE.into();
+            set_state(&mirror, TaskPhase::Done);
+            row.state = TaskPhase::Done.as_v1_str().into();
             let _ = upsert_row(run.persist.as_ref(), &row).await;
             info!(target: "taiji::core::http", gid = %gid_hex, "empty file download done");
             DriveStop::Done {
@@ -2170,8 +2170,8 @@ async fn drive_degraded(
     ctx: RequestCtx,
 ) -> DriveStop {
     let gid_hex = run.gid.to_string();
-    set_state(mirror, "downloading");
-    row.state = "downloading".into();
+    set_state(mirror, TaskPhase::Downloading);
+    row.state = TaskPhase::Downloading.as_v1_str().into();
     let _ = upsert_row(run.persist.as_ref(), &row).await;
     live.connections.store(1, Ordering::Relaxed);
     live.note_source_busy(0, 1);
@@ -2394,8 +2394,8 @@ async fn drive_degraded(
     // authority) and no longer drift with write points.
     live.done_bytes.store(completed, Ordering::Relaxed);
     live.total_len.store(completed, Ordering::Relaxed);
-    set_state(mirror, STATE_DONE);
-    let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, STATE_DONE)).await;
+    set_state(mirror, TaskPhase::Done);
+    let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
     DriveStop::Done {
         total_len: completed,
         completed_len: completed,
@@ -2729,8 +2729,8 @@ async fn drive_segmented(
         .await;
     }
 
-    set_state(mirror, "downloading");
-    row.state = "downloading".into();
+    set_state(mirror, TaskPhase::Downloading);
+    row.state = TaskPhase::Downloading.as_v1_str().into();
     if let Err(e) = upsert_row(run.persist.as_ref(), &row).await {
         warn!(target: "taiji::core::http", gid = %gid_hex, %e, "http row persist failed");
     }
@@ -3545,7 +3545,7 @@ async fn drive_segmented(
                 }
             }
         }
-        set_state(mirror, STATE_DONE);
+        set_state(mirror, TaskPhase::Done);
         let intent = RenameIntent {
             gid: gid_hex.clone(),
             part_path: paths.part_path.clone(),
@@ -3559,7 +3559,8 @@ async fn drive_segmented(
         match finalizer.finalize(&intent, closed).await {
             Ok(FinalizeOutcome::Completed { .. }) => {
                 live.rename_pending.store(false, Ordering::Relaxed);
-                let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, STATE_DONE)).await;
+                let _ =
+                    upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
                 // `--remote-time`: after the rename settles, set the final
                 // file's mtime from the remote Last-Modified; best effort
                 // (never a task failure).
@@ -3588,7 +3589,8 @@ async fn drive_segmented(
                 // the task-removal path backstops).
                 final_lease.persist();
                 live.rename_pending.store(true, Ordering::Relaxed);
-                let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, STATE_DONE)).await;
+                let _ =
+                    upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
                 info!(target: "taiji::core::http", gid = %gid_hex,
                     path = %paths.final_path.display(),
                     "download done with renamePending (retry closes out)");
@@ -3735,8 +3737,8 @@ async fn drive_small(
             "strong etag confirmed by probe; range requests carry if-match");
         ctx.headers.push(("if-match".into(), etag));
     }
-    set_state(mirror, "downloading");
-    row.state = "downloading".into();
+    set_state(mirror, TaskPhase::Downloading);
+    row.state = TaskPhase::Downloading.as_v1_str().into();
     if let Err(e) = upsert_row(run.persist.as_ref(), &row).await {
         warn!(target: "taiji::core::http", gid = %gid_hex, %e, "http row persist failed");
     }
@@ -4243,7 +4245,7 @@ async fn drive_small(
             scheme = cs.split('=').next().unwrap_or(""),
             "checksum verified before finalize");
     }
-    set_state(mirror, STATE_DONE);
+    set_state(mirror, TaskPhase::Done);
     let intent = RenameIntent {
         gid: gid_hex.clone(),
         part_path: paths.part_path.clone(),
@@ -4259,7 +4261,7 @@ async fn drive_small(
         Ok(FinalizeOutcome::Completed { .. }) => {
             live.rename_pending.store(false, Ordering::Relaxed);
             trace.mark("fin");
-            let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, STATE_DONE)).await;
+            let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
             trace.mark("row_done");
             // `--remote-time`: after the rename settles, set the final
             // file's mtime from the remote Last-Modified; best effort
@@ -4289,7 +4291,7 @@ async fn drive_small(
             // task-removal path backstops).
             final_lease.persist();
             live.rename_pending.store(true, Ordering::Relaxed);
-            let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, STATE_DONE)).await;
+            let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
             info!(target: "taiji::core::http", gid = %gid_hex,
                 path = %paths.final_path.display(),
                 "small download done with renamePending (retry closes out)");
@@ -5357,15 +5359,15 @@ async fn upsert_row(p: Option<&PersistHandle>, row: &HttpTaskRow) -> Result<(), 
 }
 
 /// Mirror row snapshot (state already set; the upsert input).
-fn mirror_row(mirror: &StdMutex<HttpTaskRow>, state: &str) -> HttpTaskRow {
+fn mirror_row(mirror: &StdMutex<HttpTaskRow>, phase: TaskPhase) -> HttpTaskRow {
     let mut row = crate::lock(mirror).clone();
-    row.state = state.to_string();
+    row.state = phase.as_v1_str().to_string();
     row
 }
 
 /// Mirror row state marker.
-fn set_state(mirror: &StdMutex<HttpTaskRow>, state: &str) {
-    crate::lock(mirror).state = state.to_string();
+fn set_state(mirror: &StdMutex<HttpTaskRow>, phase: TaskPhase) {
+    crate::lock(mirror).state = phase.as_v1_str().to_string();
 }
 
 /// Pipeline row progress face -> row mirror back-sync: the block-grid
@@ -5399,8 +5401,8 @@ async fn cancelled_row(
     pause: &Arc<AtomicBool>,
 ) -> DriveStop {
     if pause.load(Ordering::Relaxed) {
-        set_state(mirror, "paused");
-        let paused = mirror_row(mirror, "paused");
+        set_state(mirror, TaskPhase::Paused);
+        let paused = mirror_row(mirror, TaskPhase::Paused);
         let _ = upsert_row(run.persist.as_ref(), &paused).await;
     }
     DriveStop::Cancelled
@@ -5417,8 +5419,8 @@ async fn fail(
     failure: super::super::view::EngineFailure,
     msg: String,
 ) -> DriveStop {
-    set_state(mirror, "error");
-    let mut row = mirror_row(mirror, "error");
+    set_state(mirror, TaskPhase::Error);
+    let mut row = mirror_row(mirror, TaskPhase::Error);
     warn!(target: "taiji::core::http", gid = %row.gid, code = %failure.code, note = %msg, "http task failed");
     row.error_code = Some(failure.code.clone());
     row.error_msg = Some(msg.clone());
@@ -6338,7 +6340,7 @@ mod tests {
             url: String::new(),
             final_url: String::new(),
             mirrors_json: None,
-            state: STATE_DONE.into(),
+            state: taiji_http::finalize::STATE_DONE.into(),
             queue_pos: 0,
             dir: "/dl".into(),
             out: "f.bin".into(),

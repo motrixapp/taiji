@@ -105,7 +105,8 @@ pub enum PersistJob {
         reply: oneshot::Sender<Result<PersistOutcome, StoreError>>,
     },
     /// Recovery read face (startup bootstrap): all rows in the
-    /// active set ([`super::TORRENT_ACTIVE_STATES`]) + their file sets,
+    /// active set (the torrent-family active derivation,
+    /// [`super::TaskPhase::active_words`]) + their file sets,
     /// in `queue_pos, created_at` order. Terminal rows (done/error) are
     /// not on this read face (persisted DownloadResults go through
     /// [`PersistJob::LoadDownloadResult`]).

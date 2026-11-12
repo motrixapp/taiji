@@ -190,29 +190,32 @@ mod tests {
         );
     }
 
-    /// Migration-ledger discipline: a v1 old db upgrades to the latest
-    /// ledger (through v2, v3) — legacy data intact column by column
-    /// (read/write locked), appended tables created, user_version advanced,
-    /// reopen idempotent.
+    /// Migration-ledger discipline: a v1 old db upgrades row-preserving
+    /// through v2+v3 — legacy data intact column by column (read/write
+    /// locked), appended tables created, user_version advanced, reopen
+    /// idempotent. Since ledger v4 (the one-shot state-CHECK rebuild)
+    /// the full open face wipes the rows by design, so the losslessness
+    /// pin rides the parameterized ceiling `open_and_migrate_up_to(_,
+    /// 3)` (the isomorphic old-binary face); the v4 wipe semantics are
+    /// pinned in persist/mod.rs (`old_v3_db_opens_to_v4_rebuilt_with_check`).
     #[test]
-    fn v1_to_latest_migration_preserves_legacy_rows_and_adds_tables() {
+    fn v1_to_v3_migration_preserves_legacy_rows_and_adds_tables() {
         let path = tmp_db("v1-to-v2");
         let gid = "8000000000000042";
         legacy_v1_db(&path, gid);
-        // Upgrade: open_and_migrate advances v1 -> latest ledger.
+        // Upgrade: the ceiling-3 open advances v1 -> v3, rows preserved.
         {
             let conn = ok(
-                crate::persist::open_and_migrate(&path),
-                "migrate v1->latest",
+                crate::persist::open_and_migrate_up_to(&path, 3),
+                "migrate v1->v3",
             );
             let version: i64 = ok(
                 conn.query_row("PRAGMA user_version", [], |r| r.get(0)),
                 "user_version",
             );
             assert_eq!(
-                version,
-                crate::persist::schema::LATEST_VERSION,
-                "the ledger advanced to the latest"
+                version, 3,
+                "the ledger advanced to the v3 ceiling (v4 rebuilds; see the test doc)"
             );
             // Legacy data undamaged: parent row + file row read back column
             // by column (cross-check).
@@ -251,14 +254,14 @@ mod tests {
             );
             assert_eq!(count, 0);
         }
-        // Reopen idempotent: all migrations skipped.
+        // Reopen idempotent at the same ceiling: migrations skipped.
         {
-            let conn = ok(crate::persist::open_and_migrate(&path), "reopen");
+            let conn = ok(crate::persist::open_and_migrate_up_to(&path, 3), "reopen");
             let version: i64 = ok(
                 conn.query_row("PRAGMA user_version", [], |r| r.get(0)),
                 "user_version",
             );
-            assert_eq!(version, crate::persist::schema::LATEST_VERSION);
+            assert_eq!(version, 3);
         }
         let _ = std::fs::remove_file(&path);
     }

@@ -23,7 +23,7 @@
 //! Upstream anchor mapping: docs/design/core.md
 
 use taiji_bt::filetree::SwarmKind;
-use taiji_store::persist::{TorrentFileRow, TorrentRow};
+use taiji_store::persist::{TaskPhase, TorrentFileRow, TorrentRow};
 
 use crate::metainfo::{MetaFile, Metainfo, TorrentMeta};
 
@@ -264,10 +264,13 @@ pub(crate) fn derive_name(meta: &TorrentMeta) -> String {
 
 /// `torrent` parent-row base (identity / metadata / kind fields are
 /// filled by the caller per task shape — torrent tasks carry the raw
-/// bytes, magnet tasks have metadata = NULL).
+/// bytes, magnet tasks have metadata = NULL). The state arrives as the
+/// unified vocabulary's enum ([`TaskPhase`]) and serializes through its
+/// canonical `as_v1_str` table — no raw row word enters the assembly
+/// face.
 pub(crate) fn torrent_row(
     gid_hex: &str,
-    state: &str,
+    state: TaskPhase,
     queue_pos: i64,
     name: &str,
     cfg: &PersistedTaskConfig,
@@ -276,7 +279,7 @@ pub(crate) fn torrent_row(
     TorrentRow {
         gid: gid_hex.to_string(),
         name: name.to_string(),
-        state: state.to_string(),
+        state: state.as_v1_str().to_string(),
         queue_pos,
         dir: cfg.dir.clone(),
         config_json: cfg.to_json(),

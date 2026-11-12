@@ -33,6 +33,7 @@ use crate::error::StoreError;
 
 use super::job::PersistOutcome;
 use super::rows::{TASK_KIND_HTTP, TASK_KIND_MEDIA, TaskCookieRow};
+use super::task_phase::TaskPhase;
 
 pub(super) const TASK_COOKIE_COLS: &str =
     "gid, task_kind, name, domain, path, value, expires_utc, secure, host_only, creation_utc";
@@ -248,18 +249,23 @@ pub(super) fn sweep_task_cookies(
     // row's own state decides the done/error classification; the
     // cookie row's task_kind is reported verbatim (the rare re-labeled
     // row — a DirectLink-converted task's pre-conversion rows — still
-    // clears with its gid).
+    // clears with its gid). The two terminal words walk the vocabulary
+    // (word from the emission face, classification from the variant —
+    // no bare state literal rides the loop), and the word binds as a
+    // parameter.
     let mut error_cleared: Vec<TaskCookieSweepEntry> = Vec::new();
     let mut done_cleared: usize = 0;
-    for (state, is_error) in [("error", true), ("done", false)] {
+    for phase in [TaskPhase::Error, TaskPhase::Done] {
+        let is_error = phase == TaskPhase::Error;
+        let state = phase.as_v1_str();
         for parent in ["http_task", "media_task"] {
             let sql = format!(
                 "SELECT c.gid, c.task_kind, COUNT(*) FROM task_cookie c
-                 JOIN {parent} t ON t.gid = c.gid AND t.state = '{state}'
+                 JOIN {parent} t ON t.gid = c.gid AND t.state = ?1
                  GROUP BY c.gid, c.task_kind"
             );
             let mut stmt = tx.prepare(&sql)?;
-            let rows = stmt.query_map([], |r| {
+            let rows = stmt.query_map(params![state], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -280,12 +286,23 @@ pub(super) fn sweep_task_cookies(
             }
         }
     }
+    // The terminal set binds as parameters (the vocabulary's terminal
+    // derivation); both family subqueries share the same word set, so
+    // the parameter iterator chains it twice.
+    let terminal_states = TaskPhase::terminal_words();
+    let placeholders = terminal_states
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
     let terminal = tx.execute(
-        "DELETE FROM task_cookie WHERE gid IN (
-             SELECT gid FROM http_task WHERE state IN ('done','error'))
-         OR gid IN (
-             SELECT gid FROM media_task WHERE state IN ('done','error'))",
-        [],
+        &format!(
+            "DELETE FROM task_cookie WHERE gid IN (
+                 SELECT gid FROM http_task WHERE state IN ({placeholders}))
+             OR gid IN (
+                 SELECT gid FROM media_task WHERE state IN ({placeholders}))"
+        ),
+        rusqlite::params_from_iter(terminal_states.iter().chain(terminal_states.iter())),
     )?;
     tx.commit()?;
     debug_assert_eq!(

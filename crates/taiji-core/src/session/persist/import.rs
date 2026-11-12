@@ -12,9 +12,11 @@
 
 use std::path::{Path, PathBuf};
 
+use tracing::warn;
+
 use taiji_store::persist::{
-    Aria2ControlFile, Aria2CtrlError, ForkTaskRow, PersistHandle, PersistWriter, TorrentFileRow,
-    TorrentProgressRow, TorrentRow, TrackerRow, collect_aria2_files,
+    Aria2ControlFile, Aria2CtrlError, ForkTaskRow, ForkTaskState, PersistHandle, PersistWriter,
+    TaskPhase, TorrentFileRow, TorrentProgressRow, TorrentRow, TrackerRow, collect_aria2_files,
     completed_length_from_bitfield, count_fork_tasks, expected_bitfield_len, load_fork_bt_tasks,
     open_fork_readonly, parse_aria2_control,
 };
@@ -186,12 +188,30 @@ pub async fn collect_fork_tasks(
 /// `<dir>/<hex(info_hash)>.torrent` -> `bt_local_path`; the
 /// non-network priorities 3-5 are deliberately not implemented — noted
 /// in the report).
+///
+/// The parked judgment reads `task.state` through the fork archive
+/// vocabulary's parse face ([`ForkTaskState::parse`]) — no bare word
+/// comparison. An unknown fork state (a hand-edited or unknown-schema
+/// fork database) is explicit, never silent: warn (fork gid + the raw
+/// value) and land the row **paused** — the conservative state (an
+/// import whose archived intent cannot be read must not silently
+/// auto-start; the user sees the parked row and unpauses it).
 pub fn source_task_from_fork(
     task: &ForkTaskRow,
     db_path: &Path,
     fallback_dir: &Path,
 ) -> Option<SourceTask> {
     let progress = ControlProgress::from_fork(task)?;
+    let fork_paused = match ForkTaskState::parse(&task.state) {
+        Ok(ForkTaskState::Paused) => true,
+        Ok(ForkTaskState::Waiting) => false,
+        Err(e) => {
+            warn!(target: "taiji::core::persist", fork_gid = %task.gid, %e,
+                "fork task state outside the paused|waiting archive domain; \
+                 imported paused (conservative state)");
+            true
+        }
+    };
     let options = parse_input_file(&task.serialized);
     let dir = options
         .dir
@@ -219,7 +239,7 @@ pub fn source_task_from_fork(
         source_key: source.source_key(),
         fork_gid: Some(task.gid.clone()),
         queue_pos: task.queue_position,
-        paused: task.state == "paused" || options.paused,
+        paused: fork_paused || options.paused,
         options,
         target_path: None,
         source,
@@ -501,12 +521,16 @@ pub fn assemble(input: AssembleInput) -> Result<PlannedImport, String> {
         }
     }
 
-    let state = if degraded {
-        "checking".to_string()
+    // Admission state through the unified vocabulary's enum (the row
+    // word serializes only inside the assembly face): degraded progress
+    // re-verifies on disk (checking), a parked import lands paused, the
+    // rest queued.
+    let phase = if degraded {
+        TaskPhase::Checking
     } else if input.paused {
-        "paused".to_string()
+        TaskPhase::Paused
     } else {
-        "queued".to_string()
+        TaskPhase::Queued
     };
 
     // ---- torrent parent row + file rows (the persist/mod.rs assembly
@@ -520,7 +544,7 @@ pub fn assemble(input: AssembleInput) -> Result<PlannedImport, String> {
         max_upload_limit: input.options.max_upload_limit.unwrap_or(0),
         ..Default::default()
     };
-    let mut row = torrent_row(&input.gid_hex, &state, input.queue_pos, "", &cfg);
+    let mut row = torrent_row(&input.gid_hex, phase, input.queue_pos, "", &cfg);
     fill_torrent_identity(&mut row, &meta, input.meta.bytes.clone());
     let files = file_rows(&input.gid_hex, &meta.meta.files);
 
@@ -582,7 +606,9 @@ pub fn assemble(input: AssembleInput) -> Result<PlannedImport, String> {
         source: input.source,
         fork_gid,
         gid: input.gid_hex.clone(),
-        state,
+        // Report face keeps the plain row word (queued | paused |
+        // checking), serialized from the unified vocabulary's enum.
+        state: phase.as_v1_str().to_string(),
         degraded,
         degrade_reason,
         metadata_path: input.meta.path.clone(),

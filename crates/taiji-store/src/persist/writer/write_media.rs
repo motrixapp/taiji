@@ -17,6 +17,7 @@
 //! rebuild.
 
 use rusqlite::{Connection, OptionalExtension, params};
+use tracing::warn;
 
 use crate::error::StoreError;
 
@@ -24,6 +25,7 @@ use super::job::PersistOutcome;
 use super::rows::{
     MediaArchiveRow, MediaFormatRow, MediaKeyRow, MediaSegmentRow, MediaTaskRow, MediaTrackRow,
 };
+use super::task_phase::{TaskFamily, TaskPhase};
 
 fn now_epoch_secs() -> i64 {
     std::time::SystemTime::now()
@@ -78,10 +80,13 @@ pub(super) fn fail_media_task(
     error_code: &str,
     error_msg: &str,
 ) -> Result<PersistOutcome, StoreError> {
+    // The error-terminal word binds as a parameter (the vocabulary's
+    // emission face — no quoted state literal rides the SQL text).
+    let error_state = TaskPhase::Error.as_v1_str();
     let n = conn.execute(
-        "UPDATE media_task SET state = 'error', error_code = ?2, error_msg = ?3, updated_at = ?4 \
+        "UPDATE media_task SET state = ?5, error_code = ?2, error_msg = ?3, updated_at = ?4 \
          WHERE gid = ?1",
-        params![gid, error_code, error_msg, now_epoch_secs()],
+        params![gid, error_code, error_msg, now_epoch_secs(), error_state],
     )?;
     Ok(if n > 0 {
         PersistOutcome::Written
@@ -94,6 +99,11 @@ pub(super) fn upsert_media_task(
     conn: &mut Connection,
     row: &MediaTaskRow,
 ) -> Result<PersistOutcome, StoreError> {
+    // Write-point validation: the payload `state` must parse in the
+    // unified vocabulary and belong to the media family
+    // ([`super::validate_task_state`]) — an unknown or cross-family
+    // word is an explicit error, never a silent row.
+    let phase = super::validate_task_state(&row.state, TaskFamily::Media, "media_task")?;
     let existing: Option<MediaTaskRow> = conn
         .query_row(
             &format!("SELECT {MEDIA_TASK_READ_COLS} FROM media_task WHERE gid = ?1"),
@@ -115,7 +125,8 @@ pub(super) fn upsert_media_task(
     }
     // Guarded-state guard (the http_task upsert's discipline): a
     // live-phase state never overwrites a guarded row (paused/
-    // error/done — [`MEDIA_TASK_GUARDED_STATES`]; `paused` is not
+    // error/done — the vocabulary's guarded derivation,
+    // [`TaskPhase::is_guarded`]; `paused` is not
     // terminal: restart recovery resumes it, hence it sits in the
     // active set too). Real race this closes (found in review): the
     // media pipeline's phase writes are partly detached tasks — a
@@ -124,10 +135,27 @@ pub(super) fn upsert_media_task(
     // live phase. Leaving a guarded state goes through the explicit
     // faces (reopen_media_task for error/done; the paused→queued
     // unpause job) — never the plain upsert.
+    //
+    // The stored value comes from a single-row SELECT with no word-set
+    // filter, so a hand-poisoned row is reachable here. Parse it:
+    // Ok -> classify by variant; Err -> warn (gid + the raw value) and
+    // keep the old contains=false reading — not guarded, the upsert
+    // overwrites and repairs the poison. No silent else.
     if let Some(cur) = existing.as_ref() {
-        let guarded = MEDIA_TASK_GUARDED_STATES.contains(&cur.state.as_str());
-        let incoming_guarded = MEDIA_TASK_GUARDED_STATES.contains(&row.state.as_str());
-        if guarded && !incoming_guarded {
+        let guarded = match TaskPhase::parse_v1(&cur.state) {
+            Ok(p) => p.is_guarded(),
+            Err(_) => {
+                warn!(
+                    gid = %row.gid,
+                    raw_state = %cur.state,
+                    "media_task stored state is outside the unified vocabulary; the guarded-state \
+                     guard reads it as unguarded and lets the upsert overwrite (poisoned-row \
+                     repair)"
+                );
+                false
+            }
+        };
+        if guarded && !phase.is_guarded() {
             return Ok(PersistOutcome::SkippedUnchanged);
         }
     }
@@ -480,30 +508,17 @@ pub(super) fn delete_media_task(
 
 // ---- media_format + the orchestration read/reopen set ----
 
-/// media_task active-state domain (the startup recovery read face):
-/// every state except the two terminals (`done`/`error` — the
-/// established http_task read-face shape; terminal rows are not
-/// re-enqueued after restart).
-pub const MEDIA_TASK_ACTIVE_STATES: &[&str] = &[
-    "queued",
-    "resolving",
-    "downloading",
-    "recording",
-    "processing",
-    "verifying",
-    "finalizing",
-    "paused",
-];
-
-/// media_task guarded-state domain (the upsert guard's refuse set):
-/// the two terminals plus `paused`. `paused` deliberately sits in
-/// BOTH lists — active because restart recovery resumes it, guarded
-/// because the teardown's `paused` row must survive a late detached
-/// phase write (the name avoids "terminal": a paused task is not
-/// finished, it is parked). Leaving this set goes only through the
-/// explicit faces: [`unpause_media_task`] (paused→queued) /
-/// [`reopen_media_task`] (error|done→resolving).
-pub const MEDIA_TASK_GUARDED_STATES: &[&str] = &["paused", "error", "done"];
+// The media_task state domains live in the unified vocabulary now (no
+// per-file word tables): the startup recovery read face uses the
+// family derivation [`TaskPhase::active_words`] (every non-terminal
+// member of the declared media domain — terminal rows are not
+// re-enqueued after restart), and the upsert guard's refuse set uses
+// [`TaskPhase::is_guarded`] / [`TaskPhase::guarded_words`] (the two
+// terminals plus `paused`; `paused` deliberately sits in BOTH sets —
+// active because restart recovery resumes it, guarded because the
+// teardown's `paused` row must survive a late detached phase write).
+// Both are pinned word for word against frozen tables in
+// task_phase.rs's tests and schema.rs's comment-consistency pin.
 
 /// Upsert one media_format row (row-comparison skip; created_at keeps
 /// its initial value). A dangling FK (no media_task row) = an
@@ -573,22 +588,27 @@ pub(super) fn load_media_format(
 }
 
 /// Startup recovery read face: all media_task rows in the active set
-/// ([`MEDIA_TASK_ACTIVE_STATES`]), created_at order (the restore
-/// order anchor — media rows carry no queue_pos; the arrival order is
-/// the stable key).
+/// (the media-family derivation [`TaskPhase::active_words`]; the words
+/// bind as parameters — no quoted state literal rides the SQL text),
+/// created_at order (the restore order anchor — media rows carry no
+/// queue_pos; the arrival order is the stable key).
 pub(super) fn load_media_tasks_at_startup(
     conn: &Connection,
 ) -> Result<Vec<MediaTaskRow>, StoreError> {
+    let active_states = TaskPhase::active_words(TaskFamily::Media);
+    let placeholders = active_states
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut stmt = conn.prepare(&format!(
-        "SELECT {MEDIA_TASK_READ_COLS} FROM media_task WHERE state IN ({}) \
-         ORDER BY created_at, gid",
-        MEDIA_TASK_ACTIVE_STATES
-            .iter()
-            .map(|s| format!("'{s}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        "SELECT {MEDIA_TASK_READ_COLS} FROM media_task WHERE state IN ({placeholders}) \
+         ORDER BY created_at, gid"
     ))?;
-    let rows = stmt.query_map([], read_media_task_row)?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(active_states.iter()),
+        read_media_task_row,
+    )?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -637,15 +657,18 @@ pub(super) fn load_media_task_gc_refs(
 /// memory cleared, progress retained. Hit = `Written`; missing row /
 /// not-paused = `SkippedUnchanged` (idempotent). Routed through this
 /// explicit job because the upsert's guarded-state guard refuses
-/// live-phase overwrites of `paused`.
+/// live-phase overwrites of `paused`. The SET/WHERE words bind as
+/// parameters (the vocabulary's emission face).
 pub(super) fn unpause_media_task(
     conn: &mut Connection,
     gid: &str,
 ) -> Result<PersistOutcome, StoreError> {
+    let queued_state = TaskPhase::Queued.as_v1_str();
+    let paused_state = TaskPhase::Paused.as_v1_str();
     let n = conn.execute(
-        "UPDATE media_task SET state = 'queued', phase_detail_json = NULL, updated_at = ?2 \
-         WHERE gid = ?1 AND state = 'paused'",
-        params![gid, now_epoch_secs()],
+        "UPDATE media_task SET state = ?3, phase_detail_json = NULL, updated_at = ?2 \
+         WHERE gid = ?1 AND state = ?4",
+        params![gid, now_epoch_secs(), queued_state, paused_state],
     )?;
     Ok(if n > 0 {
         PersistOutcome::Written
@@ -659,16 +682,35 @@ pub(super) fn unpause_media_task(
 /// (the re-probe semantics — the media counterpart goes
 /// straight to Resolving), error fields + phase memory cleared,
 /// progress retained. Hit = `Written`; missing row / non-terminal
-/// state = `SkippedUnchanged` (idempotent).
+/// state = `SkippedUnchanged` (idempotent). The SET word and the WHERE
+/// terminal set both bind as parameters (words from the vocabulary's
+/// emission/derivation faces).
 pub(super) fn reopen_media_task(
     conn: &mut Connection,
     gid: &str,
 ) -> Result<PersistOutcome, StoreError> {
+    let reopen_state = TaskPhase::Resolving.as_v1_str();
+    let terminal_states = TaskPhase::terminal_words();
+    let placeholders = terminal_states
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Bind order: ?1 gid, ?2 the reopen word, ?3 updated_at, ?4.. the
+    // terminal words (mixed str/i64 binds — the same slice shape
+    // `params!` builds).
+    let updated_at = now_epoch_secs();
+    let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&gid, &reopen_state, &updated_at];
+    for word in &terminal_states {
+        binds.push(word);
+    }
     let n = conn.execute(
-        "UPDATE media_task SET state = 'resolving', error_code = NULL, error_msg = NULL, \
-         phase_detail_json = NULL, updated_at = ?2 \
-         WHERE gid = ?1 AND state IN ('error', 'done')",
-        params![gid, now_epoch_secs()],
+        &format!(
+            "UPDATE media_task SET state = ?2, error_code = NULL, error_msg = NULL, \
+             phase_detail_json = NULL, updated_at = ?3 \
+             WHERE gid = ?1 AND state IN ({placeholders})"
+        ),
+        binds.as_slice(),
     )?;
     Ok(if n > 0 {
         PersistOutcome::Written
@@ -1264,5 +1306,119 @@ mod tests {
             Some(PersistOutcome::Written)
         );
         assert!(load_media_format(&c, gid).ok().flatten().is_none());
+    }
+
+    /// Write-point state validation (the upsert entry's parse_v1 +
+    /// family filter): an unknown word (case drift, a projection word)
+    /// and a cross-family word (torrent-only or http-only phases
+    /// presented as a media row) are explicit errors that never touch
+    /// the row; the error carries the offending value verbatim. The
+    /// media family's own ten words — fold words are torrent-only and
+    /// therefore refused here — all keep landing.
+    #[test]
+    fn media_task_upsert_refuses_unknown_and_cross_family_states() {
+        let mut c = conn();
+        let gid = "80000000000000a7";
+        assert!(upsert_media_task(&mut c, &task_row(gid)).is_ok());
+        for bad in [
+            "Paused", "active", "metadata", "checking", "seeding", "probing",
+        ] {
+            let mut row = task_row(gid);
+            row.state = bad.into();
+            let err = match upsert_media_task(&mut c, &row) {
+                Ok(_) => panic!("must refuse state {bad:?}"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains(bad),
+                "the error must carry the offending value {bad:?}: {err}"
+            );
+        }
+        // The stored row survived every refusal unchanged; the family's
+        // own full domain (active words + both terminals) keeps landing.
+        let loaded = load_media_task(&c, gid).ok().flatten();
+        assert_eq!(
+            loaded.map(|r| r.state),
+            Some("downloading".into()),
+            "the row is untouched by the refused payloads"
+        );
+        for good in [
+            "queued",
+            "resolving",
+            "recording",
+            "processing",
+            "verifying",
+            "finalizing",
+            "paused",
+            "error",
+            "done",
+        ] {
+            let mut row = task_row(gid);
+            row.state = good.into();
+            assert!(
+                upsert_media_task(&mut c, &row).is_ok(),
+                "{good} is inside the media family's declared domain"
+            );
+        }
+    }
+
+    /// The guarded-state guard's poisoned-row policy under the v4 CHECK
+    /// (two defense layers, pinned together): the stored value comes
+    /// from a single-row SELECT with no word-set filter, so the guard
+    /// must tolerate a poisoned row — an unparseable stored state reads
+    /// as unguarded, the exact semantics the old word-set contains-check
+    /// had (contains == false), so a live-phase upsert overwrites it
+    /// (the poison is repaired, warn emitted) instead of wedging the
+    /// row behind a guard. Since ledger v4 the plain SQL poison is
+    /// itself refused by the database-side CHECK (the outer layer —
+    /// asserted first); the guard's tolerance branch is then exercised
+    /// through sqlite's `PRAGMA ignore_check_constraints` (the
+    /// documented test bypass of the outer layer), standing in for the
+    /// non-SQL corruption faces the CHECK cannot see. Production code
+    /// never sets that pragma.
+    #[test]
+    fn media_task_guard_reads_poisoned_state_as_unguarded() {
+        let mut c = conn();
+        let gid = "80000000000000a8";
+        let mut paused = task_row(gid);
+        paused.state = "paused".into();
+        paused.phase_detail_json = Some("processing".into());
+        assert!(upsert_media_task(&mut c, &paused).is_ok());
+        // Layer 1 (the v4 CHECK): the direct-SQL poison is refused by
+        // the database itself — the out-of-domain word never lands.
+        assert!(
+            c.execute(
+                "UPDATE media_task SET state = 'Paused' WHERE gid = ?1",
+                [gid],
+            )
+            .is_err(),
+            "the v4 state CHECK must refuse the out-of-domain poison word"
+        );
+        // Layer 2 (the guard's tolerance): bypass the CHECK with
+        // sqlite's test pragma, poison the row, re-enable enforcement,
+        // then verify the guard repairs rather than wedges.
+        c.pragma_update(None, "ignore_check_constraints", "ON")
+            .unwrap_or_else(|e| panic!("disable checks (test bypass): {e}"));
+        c.execute(
+            "UPDATE media_task SET state = 'Paused' WHERE gid = ?1",
+            [gid],
+        )
+        .unwrap_or_else(|e| panic!("poison: {e}"));
+        c.pragma_update(None, "ignore_check_constraints", "OFF")
+            .unwrap_or_else(|e| panic!("re-enable checks: {e}"));
+        // A live-phase payload over the poisoned row: the guard reads
+        // the stored value as unguarded (warn + contains=false
+        // semantics) and the upsert lands, repairing the row.
+        let mut live = task_row(gid);
+        live.state = "downloading".into();
+        assert_eq!(
+            upsert_media_task(&mut c, &live).ok(),
+            Some(PersistOutcome::Written),
+            "the poisoned row is overwritten (repaired), not wedged"
+        );
+        assert_eq!(
+            load_media_task(&c, gid).ok().flatten().map(|r| r.state),
+            Some("downloading".into())
+        );
     }
 }

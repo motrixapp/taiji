@@ -136,7 +136,7 @@ with the full disk-write/rename pipeline. Module map:
   before rename (SPEC §4.5).
 - `finalize`: recoverable completion-rename semantics — DB as
   journal, intent before action, 3 backoff retries →
-  `Done + renamePending`, idempotent startup retry, and the
+  `Finalizing + renamePending`, idempotent startup retry, and the
   directory-fsync network-drive degradation contract (platform-split
   decision: Windows Win32 1/50, POSIX only EINVAL/EROFS —
   server-confirmed).
@@ -468,54 +468,18 @@ Connection-establishment timing middleware
 
 ## finalize.rs
 
-Recoverable rename semantics for task completion (`crates/taiji-http/
-src/finalize.rs`): the database is the journal.
+HTTP publication is owned by taiji. The exact source, selected target and
+publication phase persist in `http_task.config_json`; `state=finalizing`
+is non-terminal and does not occupy a payload slot. All transfer modes
+verify requested checksums and close handles before entering this phase.
+No complete event is emitted until the final file is published.
 
-Design input: Motrix PR #2132's SMB lesson — its finalize lived
-outside the engine and had to build a separate journal subsystem.
-taiji's structural advantage is that the sqlite single writer *is*
-the journal: completion state and the rename intent are recorded
-before the action in the same transaction, so the crash window cannot
-lose the intent. The recovery surface has only two reachable states
-(not yet renamed / renamed but not cleared), both converged by
-idempotent close-out.
-
-Crash matrix (the self-evidencing property of DB-as-journal):
-
-| Crash point | Recovery |
-|---|---|
-| Before the intent is journaled | No trace; task not complete (bitmap/`.part` resume as usual) |
-| Intent journaled, before the rename | Pending in the journal; startup retry performs the rename |
-| Renamed, before the directory fsync | Target present with matching size → idempotent close-out |
-| Renamed, before clearing | Same (clear_intent is idempotent) |
-
-Directory fsync degradation contract (Motrix PR #2132 same
-semantics): a network drive's "unsupported" answer is accepted as
-server acknowledgement only for Win32 error 1/50 on the Windows face
-and errno EINVAL(22)/EROFS(30) on the POSIX face — relaxable only
-with an SMB 2+ handle confirmation. The same numeric value means
-different things across the faces (errno 1 = EPERM, 50 = Darwin
-ENETDOWN), so the verdict is platform-scoped with hardcoded constants
-(no libc dependency). File fsync is never relaxed — it lives in
-`partfile::PartFile::sync_all`.
-
-Windows platform note: std `File::open` rejects directories (always
-Access Denied — which once made every local-disk finalize rename look
-fatal, pinning tasks in RenamePending forever because the journal was
-write-only), so the directory handle is opened via
-`OpenOptionsExt::custom_flags` with `FILE_FLAG_BACKUP_SEMANTICS` (a
-safe API, no unsafe; same platform-abstraction precedent as the store
-disk layer) and `FlushFileBuffers` lands on the handle through
-`File::sync_all`.
-
-Known TOCTOU window: a foreign file appearing at the target path
-between the close-out probe and the rename is atomically overwritten
-by posix rename / Windows MoveFileEx. No rollback: `RENAME_NOREPLACE`
-semantics would need platform syscall faces beyond std; the target
-path was already conflict-resolved at creation time by
-`crate::naming::plan_output`, so occupation inside the window is a
-hostile cross-process writer (aria2 has no such state: its finalize
-resolves conflicts at creation time).
+The fixed host API, restart migration, collision handling, filesystem
+fallbacks and crash matrix are documented in [HTTP publication](../http-publication.md).
+This replaces the former `Done + renamePending` close-out and its size-only
+adoption rule. Normal Motrix downloads require one native rename and one
+logical application transaction; plugin replacements retain their own
+exceptional publication transaction.
 
 ## batch.rs
 

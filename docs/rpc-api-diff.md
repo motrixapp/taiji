@@ -496,7 +496,7 @@ differences all fall under the following entries:
 
 - **`http` subdict** (a taiji extension; absent on the fork):
   `finalUrl`/`connections`/`extentsActive`/`blocksDone`/`blocksTotal`/`encoding`
-  (unset = key absent)/`renamePending`/`sources[{url,rate,state}]`. Anchor:
+  (unset = key absent)/`renamePending`/`hostControlled`/`sources[{url,rate,state}]`. Anchor:
   `taiji-rpc::dispatch::view` (`status_entry_json`).
 - **`media` subdict** (a taiji extension; absent on the fork —
   declared fields): `kind` (`hls`) / `phase` (the media

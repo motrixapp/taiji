@@ -123,6 +123,8 @@ impl SessionActor {
     /// activated payload round-trips through [`Self::job_config`]).
     pub(super) fn patch_config(&self, patch: &TaskOptionPatch) -> PersistedTaskConfig {
         PersistedTaskConfig {
+            magnet_flags: None,
+            output_paths: Default::default(),
             dir: patch
                 .dir
                 .clone()
@@ -182,6 +184,12 @@ impl SessionActor {
     pub(super) fn job_config(&self, gid: &Gid) -> PersistedTaskConfig {
         match self.jobs.get(gid) {
             Some(Job::Torrent(tj)) => PersistedTaskConfig {
+                magnet_flags: None,
+                output_paths: self
+                    .rows
+                    .get(&gid.to_string())
+                    .map(|(row, _)| PersistedTaskConfig::from_json(&row.config_json).output_paths)
+                    .unwrap_or_default(),
                 dir: tj.dir.display().to_string(),
                 seed_ratio: tj.seed.seed_ratio,
                 seed_time_min: tj.seed.seed_time.as_secs_f64() / 60.0,
@@ -218,6 +226,14 @@ impl SessionActor {
                 bt_stop_timeout_secs: tj.seed.stop_timeout.as_secs(),
             },
             Some(Job::Magnet(mj)) => PersistedTaskConfig {
+                magnet_flags: Some(crate::session::persist::PersistedMagnetFlags::from(
+                    &mj.options,
+                )),
+                output_paths: self
+                    .rows
+                    .get(&gid.to_string())
+                    .map(|(row, _)| PersistedTaskConfig::from_json(&row.config_json).output_paths)
+                    .unwrap_or_default(),
                 dir: mj.dest.display().to_string(),
                 seed_ratio: mj.seed.seed_ratio,
                 seed_time_min: mj.seed.seed_time.as_secs_f64() / 60.0,
@@ -236,9 +252,8 @@ impl SessionActor {
                 // No file face during the magnet metadata phase (the
                 // torrent task carries it after upgrade).
                 file_priorities: None,
-                // Always default in the magnet metadata phase (the
-                // switch face belongs to the torrent task).
-                holepunch: true,
+                // Preserve the metadata rendezvous policy across restart.
+                holepunch: mj.options.holepunch,
                 // The scheduling policy mirrors the magnet (carried
                 // during the metadata phase, passed through the upgrade
                 // chain — projection of the bt-sequential-download
@@ -270,6 +285,12 @@ impl SessionActor {
                 enable_http_seeding,
                 ..
             }) => PersistedTaskConfig {
+                magnet_flags: None,
+                output_paths: self
+                    .rows
+                    .get(&gid.to_string())
+                    .map(|(row, _)| PersistedTaskConfig::from_json(&row.config_json).output_paths)
+                    .unwrap_or_default(),
                 dir: dir.display().to_string(),
                 seed_ratio: 0.0,
                 seed_time_min: 0.0,
@@ -306,10 +327,22 @@ impl SessionActor {
             // arm exists only for match exhaustiveness (returns the
             // default payload).
             Some(Job::Http(_) | Job::Media(_)) => PersistedTaskConfig {
+                magnet_flags: None,
+                output_paths: self
+                    .rows
+                    .get(&gid.to_string())
+                    .map(|(row, _)| PersistedTaskConfig::from_json(&row.config_json).output_paths)
+                    .unwrap_or_default(),
                 dir: self.global.dir.display().to_string(),
                 ..PersistedTaskConfig::default()
             },
             None => PersistedTaskConfig {
+                magnet_flags: None,
+                output_paths: self
+                    .rows
+                    .get(&gid.to_string())
+                    .map(|(row, _)| PersistedTaskConfig::from_json(&row.config_json).output_paths)
+                    .unwrap_or_default(),
                 dir: self.global.dir.display().to_string(),
                 ..PersistedTaskConfig::default()
             },

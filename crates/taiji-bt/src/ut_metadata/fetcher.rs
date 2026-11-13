@@ -38,6 +38,8 @@ pub const MAX_METADATA_SIZE: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum MetadataError {
+    #[error("metadata coordinator capacity exceeded ({kind})")]
+    CoordinatorCapacity { kind: &'static str },
     #[error(
         "metadata_size {got} out of range: must be 0 < size <= {max} (HandshakeExtensionMessage.cc)"
     )]

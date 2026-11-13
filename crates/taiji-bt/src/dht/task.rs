@@ -3,7 +3,7 @@
 //! Mechanism: two queues with 15 concurrent slots each and refill
 //! semantics (remove finished tasks, then start tasks from the queue
 //! head; tasks that finish during startup do not occupy a slot); a
-//! node/peer lookup state machine with an ALPHA=3 in-flight cap; ping
+//! node/peer lookup state machine with an ALPHA=5 in-flight cap; ping
 //! tasks with bounded retry; bucket refresh that dispatches one node
 //! lookup per due bucket and completes immediately. Two queues are an
 //! intentional simplification of upstream's three (periodic1/periodic2
@@ -26,15 +26,15 @@ use super::routing_table::K;
 pub const NUM_CONCURRENT_TASK: usize = 15;
 
 /// Per-lookup in-flight query cap. aria2 `src/DHTAbstractNodeLookupTask.h`
-/// (`static const size_t ALPHA = 3`).
-pub const ALPHA: usize = 3;
+/// (initial width follows libtorrent RC_2_0; the aria2 reference used 3).
+pub const ALPHA: usize = 5;
 
 /// Default get_peers/find_node candidate frontier width: the truncation
 /// bound applied after the candidate table is sorted and deduplicated
 /// ([`LookupTask::sort_dedup_truncate`]). aria2's
 /// `DHTAbstractNodeLookupTask.h` uses the routing bucket width K=8; this
 /// side takes 16 (width x2) to widen discovery — the per-iteration
-/// contacted-node count grows with the frontier while the ALPHA=3
+/// contacted-node count grows with the frontier while the ALPHA=5
 /// in-flight cap is untouched (each new contactable candidate is still
 /// probed 3 at a time) and outbound politeness is independently limited
 /// by the DHT per-source query token bucket (engine/query_limit.rs); the
@@ -140,6 +140,8 @@ pub struct LookupTask {
     frontier: usize,
     entries: Vec<LookupEntry>,
     in_flight: usize,
+    // Value=true means this request yielded its concurrency slot on soft timeout.
+    pending: HashMap<SocketAddr, bool>,
     /// Announce tokens of probed nodes (DHTPeerLookupTask.cc, keyed by node
     /// ID).
     tokens: HashMap<NodeId, Vec<u8>>,
@@ -166,6 +168,7 @@ impl LookupTask {
             frontier,
             entries: Vec::new(),
             in_flight: 0,
+            pending: HashMap::new(),
             tokens: HashMap::new(),
             finished: false,
         }
@@ -198,12 +201,16 @@ impl LookupTask {
     /// per-entry shape of upstream `sendMessage`). None when in-flight is at
     /// ALPHA or no unused candidate remains.
     pub fn next_outgoing(&mut self) -> Option<DhtNode> {
-        if self.finished || self.in_flight >= ALPHA {
+        if self.finished || self.in_flight >= ALPHA || self.pending.len() >= ALPHA * 3 {
             return None;
         }
-        let entry = self.entries.iter_mut().find(|e| !e.used)?;
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|e| !e.used && !self.pending.contains_key(&e.node.addr()))?;
         entry.used = true;
         self.in_flight += 1;
+        self.pending.insert(entry.node.addr(), false);
         Some(entry.node.clone())
     }
 
@@ -222,7 +229,9 @@ impl LookupTask {
         nodes: Vec<DhtNode>,
         local_id: &NodeId,
     ) {
-        self.in_flight = self.in_flight.saturating_sub(1);
+        if !self.pending.remove(&from.addr()).unwrap_or(false) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
         for entry in &mut self.entries {
             if entry.node.addr() == from.addr() {
                 entry.node = from.clone();
@@ -244,16 +253,28 @@ impl LookupTask {
 
     /// Transaction timeout / send failure (upstream `onTimeout`): in-flight -1, entry removed.
     pub fn on_timeout(&mut self, id: &NodeId, addr: SocketAddr) {
-        self.in_flight = self.in_flight.saturating_sub(1);
+        if !self.pending.remove(&addr).unwrap_or(false) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
         self.entries
             .retain(|e| !(e.node.id() == id && e.node.addr() == addr));
+    }
+
+    /// Release only the scheduling opportunity; late replies remain valid.
+    pub fn on_soft_timeout(&mut self, address: SocketAddr) {
+        if let Some(soft) = self.pending.get_mut(&address) {
+            if !*soft {
+                *soft = true;
+                self.in_flight = self.in_flight.saturating_sub(1);
+            }
+        }
     }
 
     /// Completion check (the closing half of upstream
     /// `sendMessageAndCheckFinish`: once the engine has drained the
     /// candidates, `in_flight == 0` means finished).
     pub fn check_finished(&mut self) -> bool {
-        if !self.finished && self.in_flight == 0 {
+        if !self.finished && self.in_flight == 0 && self.pending.is_empty() {
             self.finished = true;
         }
         self.finished
@@ -288,6 +309,21 @@ impl LookupTask {
         self.entries
             .dedup_by(|a, b| a.node.id() == b.node.id() && a.node.addr() == b.node.addr());
         self.entries.truncate(self.frontier);
+        // Closer discoveries get query opportunities immediately; outstanding
+        // distant requests remain correlated and can still deliver late peers.
+        let closest: std::collections::HashSet<_> = self
+            .entries
+            .iter()
+            .filter(|entry| !entry.used || self.pending.contains_key(&entry.node.addr()))
+            .take(ALPHA)
+            .map(|entry| entry.node.addr())
+            .collect();
+        for (address, soft) in &mut self.pending {
+            if !*soft && !closest.contains(address) {
+                *soft = true;
+                self.in_flight = self.in_flight.saturating_sub(1);
+            }
+        }
     }
 }
 
@@ -430,6 +466,31 @@ impl Default for TaskQueue {
 }
 
 impl TaskQueue {
+    pub fn cancel_peer_lookups(&mut self, target: NodeId) -> Vec<TaskId> {
+        let mut cancelled = Vec::new();
+        let mut retain = |(id, task): &(TaskId, Task)| {
+            let matches = matches!(task,Task::Lookup(lookup) if lookup.target==target && matches!(lookup.kind,LookupKind::Peers {..}));
+            if matches {
+                cancelled.push(*id);
+            }
+            !matches
+        };
+        self.waiting.retain(&mut retain);
+        self.executing.retain(&mut retain);
+        cancelled
+    }
+
+    pub fn references_bootstrap_round(&self, round: usize) -> bool {
+        self.waiting
+            .iter()
+            .chain(self.executing.iter())
+            .any(|(_, task)| matches!(task,Task::Ping(ping) if ping.round==Some(round)))
+    }
+
+    pub fn has_peer_lookup(&self, target: NodeId) -> bool {
+        self.waiting.iter().chain(self.executing.iter()).any(|(_, task)| matches!(task, Task::Lookup(lookup) if lookup.target == target && matches!(lookup.kind, LookupKind::Peers { .. })))
+    }
+
     pub fn new() -> Self {
         TaskQueue {
             capacity: NUM_CONCURRENT_TASK,
@@ -569,9 +630,13 @@ mod tests {
         assert_eq!(s2.id().0[19], 0x01);
         let s3 = some(l.next_outgoing(), "third");
         assert_eq!(s3.id().0[19], 0x02);
+        for index in 3..ALPHA {
+            let node = some(l.next_outgoing(), "remaining initial concurrency");
+            assert_eq!(usize::from(node.id().0[19]), index);
+        }
         assert!(
             l.next_outgoing().is_none(),
-            "in-flight capped once ALPHA=3 is used up"
+            "initial concurrency is bounded"
         );
         assert_eq!(l.in_flight(), ALPHA);
         let _ = (s1, s2, s3);
@@ -823,5 +888,78 @@ mod tests {
 
     fn distance_cmp(target: &NodeId, a: &DhtNode, b: &DhtNode) -> Ordering {
         xor_distance(target, a.id()).cmp(&xor_distance(target, b.id()))
+    }
+}
+
+#[cfg(test)]
+mod adaptive_lookup_tests {
+    use super::*;
+    fn node(n: u8) -> DhtNode {
+        DhtNode::new(
+            NodeId([n; 20]),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 1000 + u16::from(n))),
+        )
+    }
+    #[test]
+    fn soft_timeout_replaces_opportunity_without_losing_late_response_or_exceeding_cap() {
+        let mut lookup = LookupTask::new(
+            NodeId([0; 20]),
+            LookupKind::Peers {
+                announce_port: None,
+            },
+            DhtSwarmKind::V1,
+        );
+        lookup.seed((1..=16).map(node).collect());
+        let mut sent = Vec::new();
+        for _ in 0..ALPHA {
+            sent.push(lookup.next_outgoing().unwrap_or_else(|| panic!("initial")));
+        }
+        assert!(lookup.next_outgoing().is_none());
+        lookup.on_soft_timeout(sent[0].addr());
+        assert_eq!(lookup.in_flight(), ALPHA - 1);
+        let replacement = lookup
+            .next_outgoing()
+            .unwrap_or_else(|| panic!("replacement"));
+        lookup.on_response(&sent[0], Some(b"token"), Vec::new(), &NodeId([0; 20]));
+        assert_eq!(
+            lookup.in_flight(),
+            ALPHA,
+            "late reply must not release an active replacement slot"
+        );
+        sent.push(replacement);
+        loop {
+            for peer in &sent {
+                lookup.on_soft_timeout(peer.addr());
+            }
+            let Some(peer) = lookup.next_outgoing() else {
+                break;
+            };
+            sent.push(peer);
+        }
+        assert!(lookup.pending.len() <= ALPHA * 3);
+        assert!(!lookup.check_finished());
+        for peer in &sent {
+            lookup.on_timeout(peer.id(), peer.addr());
+        }
+        while let Some(peer) = lookup.next_outgoing() {
+            lookup.on_timeout(peer.id(), peer.addr());
+        }
+        assert!(lookup.check_finished());
+    }
+    #[test]
+    fn newly_discovered_closer_nodes_do_not_wait_for_far_queries() {
+        let mut lookup = LookupTask::new(NodeId([0; 20]), LookupKind::Nodes, DhtSwarmKind::V1);
+        lookup.seed((100..110).map(node).collect());
+        let first = lookup.next_outgoing().unwrap_or_else(|| panic!("first"));
+        for _ in 1..ALPHA {
+            lookup.next_outgoing();
+        }
+        lookup.on_response(&first, None, (1..=5).map(node).collect(), &NodeId([0; 20]));
+        let mut fresh = Vec::new();
+        while let Some(peer) = lookup.next_outgoing() {
+            fresh.push(peer);
+        }
+        assert_eq!(fresh.len(), ALPHA);
+        assert!(fresh.iter().all(|peer| peer.id().0[0] <= 5));
     }
 }

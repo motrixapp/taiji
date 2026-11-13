@@ -208,6 +208,15 @@ impl PersistHandle {
     /// (cross-table MAX over torrent full-state + http_task full-state; all
     /// empty = 0). Consumer: core bootstrap's row_seq seeding (enqueue keys
     /// continue increasing from the bound, monotonic across restarts).
+    pub async fn load_task_gids(&self) -> Result<Vec<String>, StoreError> {
+        let (tx, rx) = oneshot::channel();
+        self.job_tx
+            .send(PersistJob::LoadTaskGids { reply: tx })
+            .await
+            .map_err(|_| StoreError::WriterClosed)?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     pub async fn load_max_queue_pos(&self) -> Result<i64, StoreError> {
         let (tx, rx) = oneshot::channel();
         self.job_tx

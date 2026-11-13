@@ -430,6 +430,21 @@ fn http_collect_entry(
         }
         Ok(_) => {}
     }
+    let mut progress = row.progress.as_ref().and_then(HttpProgressFacts::from_fork);
+    if let Some(checkpoint) = &row.checkpoint_path {
+        let checkpoint = PathBuf::from(checkpoint);
+        if out_opt.is_none() && checkpoint.parent() == Some(Path::new(&dir)) {
+            out_opt = checkpoint
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+        }
+        let expected = out_opt.as_ref().map(|out| PathBuf::from(&dir).join(out));
+        let matches = expected.as_ref().is_some_and(|expected| expected == &checkpoint ||
+            matches!((std::fs::canonicalize(expected), std::fs::canonicalize(&checkpoint)), (Ok(a), Ok(b)) if a == b));
+        if !matches {
+            progress = None;
+        }
+    }
     HttpCollectEntry::Ready(Box::new(HttpSourceTask {
         source_key: source.source_key(),
         fork_gid: Some(row.gid.clone()),
@@ -440,7 +455,7 @@ fn http_collect_entry(
         dir,
         out: out_opt,
         options,
-        progress: row.progress.as_ref().and_then(HttpProgressFacts::from_fork),
+        progress,
         source,
     }))
 }
@@ -839,6 +854,10 @@ impl HttpImportPlanner {
             }
         }
         let cfg = HttpPersistConfig {
+            retain_request_context: task
+                .options
+                .iter()
+                .any(|(key, value)| key == "http-resume-context" && value == "true"),
             imported_options: Some(task.options.clone()),
             // Bitmap rows set the flag — the criterion bit that disables
             // auto-rename at activation (adopted data meeting an existing
@@ -995,93 +1014,188 @@ pub async fn apply_http_import(
     persist: &PersistHandle,
     planned: &[PlannedHttpImport],
 ) -> Vec<AppliedTask> {
-    let mut out = Vec::with_capacity(planned.len());
-    for p in planned {
-        adopt_fork_data_file(p).await;
-        let mut err: Option<String> = None;
-        if let Err(e) = persist.upsert_http_task(p.row.clone()).await {
-            err = Some(format!("http_task row: {e}"));
-        }
-        if err.is_none() {
-            if let Err(e) = persist.put_kv(&p.source_key, &p.gid).await {
-                err = Some(format!("imported_from kv: {e}"));
+    apply_http_import_with_state(persist, planned, &ForkHttpState::default()).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetainedHttpContext {
+    pub source_hash: String,
+    pub resource_hash: String,
+    pub output_path: String,
+    pub validator_kind: String,
+    pub validator: String,
+    pub total_length: i64,
+}
+
+pub(crate) fn request_uri_hash(uri: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(uri.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[derive(Default)]
+pub struct ForkHttpState {
+    pub cookies: std::collections::BTreeMap<String, Vec<taiji_store::persist::TaskCookieRow>>,
+    pub contexts: std::collections::BTreeMap<String, RetainedHttpContext>,
+}
+
+/// Read credential and validator extensions from fork schema 2..6 without
+/// touching the source. Empty task-scoped jars stay isolated in taiji.
+pub async fn read_fork_http_state(path: PathBuf) -> Result<ForkHttpState, String> {
+    tokio::task::spawn_blocking(move || {
+        let conn = open_fork_readonly(&path).map_err(|e| e.to_string())?;
+        let has = |name: &str| conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)", [name], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string());
+        let mut state = ForkHttpState::default();
+        let mut contexts = std::collections::HashSet::new();
+        if has("task_cookie_context")? {
+            let mut stmt = conn.prepare("SELECT gid FROM task_cookie_context").map_err(|e| e.to_string())?;
+            for gid in stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())? {
+                contexts.insert(gid.map_err(|e| e.to_string())?);
             }
         }
+        let mut stmt = conn.prepare("SELECT gid, serialized FROM task").map_err(|e| e.to_string())?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(|e| e.to_string())? {
+            let (gid, text) = row.map_err(|e| e.to_string())?;
+            if text.lines().any(|line| line.trim() == "require-task-cookies=true") && !contexts.contains(&gid) {
+                return Err("legacy task cookie context is missing".into());
+            }
+        }
+        if has("task_cookie")? {
+            let mut stmt = conn.prepare("SELECT gid, name, value, domain, path, host_only, secure, persistent, expires_at_unix_s, creation_time_unix_s FROM task_cookie").map_err(|e| e.to_string())?;
+            let now = now_epoch();
+            let rows = stmt.query_map([], |row| {
+                let persistent: bool = row.get(7)?;
+                Ok(taiji_store::persist::TaskCookieRow {
+                    gid: row.get(0)?, task_kind: "http".into(), name: row.get(1)?, value: row.get(2)?,
+                    domain: row.get::<_, String>(3)?.trim_start_matches('.').to_ascii_lowercase(), path: row.get(4)?,
+                    host_only: row.get(5)?, secure: row.get(6)?, expires_utc: if persistent { Some(row.get(8)?) } else { None }, creation_utc: row.get(9)?,
+                })
+            }).map_err(|e| e.to_string())?;
+            for row in rows {
+                let row = row.map_err(|e| e.to_string())?;
+                if row.expires_utc.is_some_and(|expiry| expiry <= now) { continue; }
+                let cookies = state.cookies.entry(row.gid.clone()).or_default();
+                if cookies.len() >= 300 { return Err("legacy task cookie count exceeds the native limit".into()); }
+                cookies.push(row);
+            }
+        }
+        if has("task_http_context")? {
+            let mut stmt = conn.prepare("SELECT gid, source_hash, resource_hash, output_path, validator_kind, validator, total_length FROM task_http_context").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, RetainedHttpContext {
+                source_hash: row.get(1)?, resource_hash: row.get(2)?, output_path: row.get(3)?,
+                validator_kind: row.get(4)?, validator: row.get(5)?, total_length: row.get(6)?,
+            }))).map_err(|e| e.to_string())?;
+            for row in rows {
+                let (gid, context) = row.map_err(|e| e.to_string())?;
+                if ![&context.source_hash, &context.resource_hash].iter().all(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())) ||
+                    !matches!(context.validator_kind.as_str(), "etag" | "last-modified") || context.validator.is_empty() || context.validator.len() > 512 || context.validator.contains(['\r', '\n']) || context.total_length <= 0 {
+                    return Err("invalid legacy HTTP request identity".into());
+                }
+                state.contexts.insert(gid, context);
+            }
+        }
+        Ok(state)
+    }).await.map_err(|e| e.to_string())?
+}
+
+pub async fn restore_imported_http_state(
+    persist: &PersistHandle,
+    row: &HttpTaskRow,
+    old_gid: &str,
+    state: &ForkHttpState,
+) -> Result<(), String> {
+    let mut cookies = state.cookies.get(old_gid).cloned().unwrap_or_default();
+    for cookie in &mut cookies {
+        cookie.gid = row.gid.clone();
+    }
+    persist
+        .upsert_task_cookies(&row.gid, "http", cookies)
+        .await
+        .map_err(|e| e.to_string())?;
+    adopt_imported_http_data(row).await
+}
+
+pub async fn apply_http_import_with_state(
+    persist: &PersistHandle,
+    planned: &[PlannedHttpImport],
+    state: &ForkHttpState,
+) -> Vec<AppliedTask> {
+    let mut out = Vec::with_capacity(planned.len());
+    for plan in planned {
+        let mut row = plan.row.clone();
+        let result = async {
+            if let Some(context) = plan.fork_gid.as_ref().and_then(|gid| state.contexts.get(gid)) {
+                let expected = PathBuf::from(&row.dir).join(&row.out);
+                let source = request_uri_hash(&row.url);
+                let same_path = Path::new(&context.output_path) == expected ||
+                    matches!((std::fs::canonicalize(&expected), std::fs::canonicalize(&context.output_path)), (Ok(a), Ok(b)) if a == b);
+                if source != context.source_hash || !same_path || plan.uri_count != 1 {
+                    return Err("legacy HTTP source or output identity changed".into());
+                }
+                let mut context = context.clone();
+                context.output_path = expected.display().to_string();
+                let mut cfg = HttpPersistConfig::from_json(&row.config_json);
+                cfg.http_resume_context = Some(context);
+                cfg.retain_request_context = true;
+                row.config_json = cfg.to_json();
+            }
+            // The durable row precedes payload adoption. A crash before the
+            // reverse index is written is recoverable from origin_fork_key.
+            persist.upsert_http_task(row.clone()).await.map_err(|e| e.to_string())?;
+            restore_imported_http_state(persist, &row, plan.fork_gid.as_deref().unwrap_or(""), state).await?;
+            persist.put_kv(&plan.source_key, &plan.gid).await.map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        }.await;
         out.push(AppliedTask {
-            gid: p.gid.clone(),
-            source_key: p.source_key.clone(),
-            error: err,
+            gid: plan.gid.clone(),
+            source_key: plan.source_key.clone(),
+            error: result.err(),
         });
     }
     out
 }
 
-/// Adoption: archive-rename the fork data file of a bitmap row,
-/// `<out>` -> `<out><suffix>`. The fork writes partial HTTP data straight
-/// to the final path, while the taiji resume face only accepts
-/// `<out>.part` — without adoption, activation resumes with
-/// PartFileMissing -> FromZero, the bitmap is cleared, and the fork
-/// partial data and the imported bitmap are lost together. Guards (skip
-/// adoption rather than destroy data):
-/// - bitmap rows only (`block_bitmap` present): renaming a row without a
-///   bitmap would let an activation-time Restart truncate it = data
-///   destruction; the final file is left to the auto-rename semantics
-///   (the data survives the rename);
-/// - the part slot is free (`<out><suffix>` absent): if taken, the two
-///   data sets cannot be merged and both stay as-is — auto-rename is
-///   disabled for bitmap rows, so activation reports the conflict
-///   explicitly;
-/// - `<out>` is a regular file: directories and other shapes are not
-///   adopted (an explicit conflict at activation);
-/// - `out` is set: unset = the name is only fixed at activation, nothing
-///   to adopt at import time;
-/// - a failed rename is not fatal: the row is stored as usual and the
-///   activation defenses take over (equivalent to the pre-fix behavior,
-///   never silently destroying data).
-async fn adopt_fork_data_file(p: &PlannedHttpImport) {
-    if p.row.block_bitmap.is_none() || p.row.out.is_empty() {
-        return;
+/// Idempotent adoption, only after the target row is durable. Never overwrite
+/// either file when both names exist; a failed move prevents startup release.
+pub async fn adopt_imported_http_data(row: &HttpTaskRow) -> Result<(), String> {
+    if row.block_bitmap.is_none()
+        || row.out.is_empty()
+        || TaskPhase::parse_v1(&row.state).is_ok_and(|phase| phase.is_terminal())
+    {
+        return Ok(());
     }
-    let final_path = PathBuf::from(&p.row.dir).join(&p.row.out);
-    let suffix = HttpPersistConfig::from_json(&p.row.config_json).incomplete_suffix;
-    let mut part_os = final_path.as_os_str().to_os_string();
-    part_os.push(&suffix);
-    let part_path = PathBuf::from(part_os);
-    let part_in_closure = part_path.clone();
-    let renamed = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        match std::fs::metadata(&final_path) {
-            Ok(m) if m.is_file() => {}
-            Ok(_) => return Ok(false),  // a directory shape: not adopted
-            Err(_) => return Ok(false), // the final file is not on disk: nothing to adopt
+    let final_path = PathBuf::from(&row.dir).join(&row.out);
+    let suffix = HttpPersistConfig::from_json(&row.config_json).incomplete_suffix;
+    let mut part = final_path.as_os_str().to_os_string();
+    part.push(suffix);
+    let part_path = PathBuf::from(part);
+    tokio::task::spawn_blocking(move || {
+        let original = match std::fs::symlink_metadata(&final_path) {
+            Ok(info) => Some(info),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        let part = match std::fs::symlink_metadata(&part_path) {
+            Ok(info) => Some(info),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        if original.is_none() {
+            return if part.is_none_or(|info| info.is_file()) {
+                Ok(())
+            } else {
+                Err("invalid adopted partial file".into())
+            };
         }
-        if part_in_closure.symlink_metadata().is_ok() {
-            return Ok(false); // part slot taken: the two data sets cannot be merged, keep both
+        if !original.is_some_and(|info| info.is_file()) || part.is_some() {
+            return Err("legacy partial path conflicts with the native output".into());
         }
-        std::fs::rename(&final_path, &part_in_closure)
-            .map(|_| true)
-            .map_err(|e| {
-                format!(
-                    "rename {} -> {}: {e}",
-                    final_path.display(),
-                    part_in_closure.display()
-                )
-            })
+        std::fs::rename(final_path, part_path).map_err(|e| e.to_string())
     })
-    .await;
-    match renamed {
-        Ok(Ok(true)) => tracing::info!(
-            target: "taiji::core::import",
-            gid = %p.gid,
-            part = %part_path.display(),
-            "fork partial data adopted as resume input (<out> -> <out><suffix>)"
-        ),
-        Ok(Ok(false)) => {}
-        Ok(Err(e)) => tracing::warn!(target: "taiji::core::import", gid = %p.gid, "{e}; \
-            the row is imported as-is and activation will adjudicate from disk facts"),
-        Err(e) => {
-            tracing::warn!(target: "taiji::core::import", gid = %p.gid, "fork data adoption join: {e}")
-        }
-    }
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Async wrapper for preflight item 1 (fork process exited / lock
@@ -3142,9 +3256,16 @@ mod tests {
         let (handle, join) = ok(PersistWriter::spawn(db.clone()).await, "spawn writer");
         let applied = apply_http_import(&handle, &planned).await;
         assert!(
-            applied.iter().all(|a| a.error.is_none()),
+            applied.iter().enumerate().all(|(i, a)| if i == 1 {
+                a.error
+                    .as_ref()
+                    .is_some_and(|error| error.contains("conflicts"))
+            } else {
+                a.error.is_none()
+            }),
             "apply errors: {applied:?}"
         );
+        assert!(ok(handle.get_kv("k-b").await, "conflicting adoption marker").is_none());
         // a: adopted — the final file is archived as `.part`, bytes
         // intact.
         assert!(

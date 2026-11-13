@@ -544,7 +544,7 @@ const DECLARED_DIFFERENCE_REGISTRY: &[(&str, &[&str])] = &[
         &[
             "split (only the initial extent reference under dynamic)",
             "min-split-size (same as split)",
-            "max-connection-per-server (the AIMD growth cap, domain 1-16)",
+            "max-connection-per-server (the AIMD growth cap, domain 1-64)",
         ],
     ),
     (

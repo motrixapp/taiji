@@ -74,6 +74,7 @@ pub(super) fn handle_slow_tick(
     actual_port: u16,
     announce_interval: Duration,
     pex_enabled: bool,
+    actor_cmds: &[Option<mpsc::Sender<TrackerCommand>>],
 ) {
     // Sweep the whole expired-ban table (the 1h cadence gate lives in the
     // ledger; aria2 `DefaultPeerStorage.cc` — the sweep cadence is
@@ -134,28 +135,32 @@ pub(super) fn handle_slow_tick(
         state.completed,
         super::ecology::seed_passive_dht_enabled(),
     );
-    if !dht_wiring.is_empty() && !passive_dht && state.last_dht_announce.elapsed() >= dht_cadence {
-        spawn_dht_announces(dht_wiring, &state.faces, actual_port, actual_port);
+    let ports = nat.as_ref().map(|n| n.external_ports()).unwrap_or_default();
+    let udp_port = ports.udp.unwrap_or(actual_port);
+    if !passive_dht
+        && (state.last_nat_announced_port != udp_port
+            || (!dht_wiring.is_empty() && state.last_dht_announce.elapsed() >= dht_cadence))
+    {
+        spawn_dht_announces(dht_wiring, &state.faces, udp_port, actual_port);
         state.last_dht_announce = Instant::now();
+        state.last_nat_announced_port = udp_port;
     }
-    // NAT external-port change couples into the DHT announce port: when
-    // the gateway grants a different mapped port, re-register with the
-    // actual external port (the DHT engine keeps announcing the new port
-    // from the registry). Only the v4 face consumes the external-port
-    // snapshot; the v6 face always uses actual_port (v6 has no NAT
-    // semantics — a v4 NAT port must not pollute v6 discovery). See
-    // the taiji_domain::nat module docs for the tracker-side slot.
-    // Under passive DHT the re-register is skipped with it (nothing is
-    // being announced; the base port reading stays as-is so a future
-    // mode change re-registers on the next real change).
-    if let Some(nat_engine) = nat {
-        let effective = nat_engine.external_ports().effective(actual_port);
-        if effective != state.last_nat_announced_port && !passive_dht {
-            info!(target: "taiji::core::engine",
-                from = state.last_nat_announced_port, to = effective,
-                "external port changed, re-announcing dht with mapped port");
-            spawn_dht_announces(dht_wiring, &state.faces, effective, actual_port);
-            state.last_nat_announced_port = effective;
+    for actor in actor_cmds.iter().flatten() {
+        let _ = actor.try_send(TrackerCommand::SetListenPort {
+            port: ports.effective(actual_port),
+        });
+    }
+    for face in &state.faces {
+        for (handle, cuid) in face.peers.iter().zip(&face.peer_cuids) {
+            if let Some(peer) = face.peer_state.get(cuid).and_then(|p| p.meta.as_ref()) {
+                let port = taiji_domain::nat::peer_announce_port(
+                    nat.as_ref(),
+                    actual_port,
+                    peer.ip,
+                    peer.transport,
+                );
+                let _ = handle.command(taiji_bt::peer::PeerCommand::SetListenPort(port));
+            }
         }
     }
     // Dispatch (independent per face; each face's TrackerActor drives its

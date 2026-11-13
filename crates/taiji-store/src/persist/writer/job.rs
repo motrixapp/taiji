@@ -120,6 +120,9 @@ pub enum PersistJob {
     /// recovery continue above the bound (a new key is always strictly
     /// greater than every stored key, terminal rows included). A
     /// read-only job, serialized through the single write connection.
+    LoadTaskGids {
+        reply: oneshot::Sender<Result<Vec<String>, StoreError>>,
+    },
     LoadMaxQueuePos {
         reply: oneshot::Sender<Result<i64, StoreError>>,
     },

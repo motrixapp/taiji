@@ -55,3 +55,6 @@ ehthumbs.db
 *.stackdump
 [Dd]esktop.ini
 $RECYCLE.BIN/
+
+# Python packaging verification
+__pycache__/

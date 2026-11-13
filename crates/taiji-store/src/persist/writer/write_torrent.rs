@@ -325,30 +325,36 @@ pub(super) fn insert_download_result(
 /// removes dependents). The terminal set binds as parameters (the
 /// vocabulary's terminal derivation).
 pub(super) fn purge_download_results(conn: &mut Connection) -> Result<PersistOutcome, StoreError> {
+    let tx = conn.transaction()?;
     let terminal_states = TaskPhase::terminal_words();
     let placeholders = terminal_states
         .iter()
         .map(|_| "?")
         .collect::<Vec<_>>()
         .join(", ");
-    let n = conn.execute(
-        &format!("DELETE FROM torrent WHERE state IN ({placeholders})"),
-        rusqlite::params_from_iter(terminal_states.iter()),
-    )?;
-    Ok(if n > 0 {
+    tx.execute(&format!("DELETE FROM task_cookie WHERE gid IN (SELECT gid FROM http_task WHERE state IN ({placeholders})) OR gid IN (SELECT gid FROM media_task WHERE state IN ({placeholders}))"), rusqlite::params_from_iter(terminal_states.iter().chain(terminal_states.iter())))?;
+    tx.execute(&format!("DELETE FROM session_kv WHERE key LIKE 'imported_from:%' AND value IN (SELECT gid FROM torrent WHERE state IN ({placeholders}) UNION SELECT gid FROM http_task WHERE state IN ({placeholders}) UNION SELECT gid FROM media_task WHERE state IN ({placeholders}))"), rusqlite::params_from_iter(terminal_states.iter().chain(terminal_states.iter()).chain(terminal_states.iter())))?;
+    let mut count = 0;
+    for table in ["torrent", "http_task", "media_task"] {
+        count += tx.execute(
+            &format!("DELETE FROM {table} WHERE state IN ({placeholders})"),
+            rusqlite::params_from_iter(terminal_states.iter()),
+        )?;
+    }
+    tx.commit()?;
+    Ok(if count > 0 {
         PersistOutcome::Written
     } else {
         PersistOutcome::SkippedUnchanged
     })
 }
 
-/// Remove one persisted DownloadResult: only terminal rows can be removed
-/// (active-set rows cannot be deleted through the result face — aria2
-/// removeDownloadResult only acts on the result table).
+/// Remove one terminal task across all families in the same transaction.
 pub(super) fn remove_download_result(
     conn: &mut Connection,
     gid: &str,
 ) -> Result<PersistOutcome, StoreError> {
+    let tx = conn.transaction()?;
     let terminal_states = TaskPhase::terminal_words();
     let placeholders = terminal_states
         .iter()
@@ -358,11 +364,32 @@ pub(super) fn remove_download_result(
     let sql_params: Vec<&str> = std::iter::once(gid)
         .chain(terminal_states.iter().copied())
         .collect();
-    let n = conn.execute(
-        &format!("DELETE FROM torrent WHERE gid = ?1 AND state IN ({placeholders})"),
-        rusqlite::params_from_iter(sql_params),
+    let mut count = 0;
+    for table in ["torrent", "http_task", "media_task"] {
+        let active: bool = tx.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM {table} WHERE gid=? AND state NOT IN ({placeholders}))"
+            ),
+            rusqlite::params_from_iter(sql_params.iter()),
+            |row| row.get(0),
+        )?;
+        if active {
+            return Err(StoreError::Internal(
+                "cannot remove an active task through the result API".into(),
+            ));
+        }
+        count += tx.execute(
+            &format!("DELETE FROM {table} WHERE gid=? AND state IN ({placeholders})"),
+            rusqlite::params_from_iter(sql_params.iter()),
+        )?;
+    }
+    tx.execute("DELETE FROM task_cookie WHERE gid=?1", [gid])?;
+    tx.execute(
+        "DELETE FROM session_kv WHERE key LIKE 'imported_from:%' AND value=?1",
+        [gid],
     )?;
-    Ok(if n > 0 {
+    tx.commit()?;
+    Ok(if count > 0 {
         PersistOutcome::Written
     } else {
         PersistOutcome::SkippedUnchanged

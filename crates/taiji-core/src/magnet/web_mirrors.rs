@@ -31,7 +31,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use taiji_bt::bencode::{self, Value};
-use taiji_bt::peer::ExpectedInfoHash;
 use taiji_bt::tracker::{HttpAnnounce, TrackerOptions};
 use taiji_store::merkle;
 
@@ -182,13 +181,16 @@ enum WebFetchOutcome {
 async fn fetch_from_mirror(
     client: &HttpAnnounce,
     template: &str,
-    btih: [u8; 20],
+    btih: Option<[u8; 20]>,
     btmh: Option<[u8; 32]>,
 ) -> WebFetchOutcome {
-    let url = template.replace(WEB_MIRROR_PLACEHOLDER, &hex_lower(&btih));
+    let url = template.replace(
+        WEB_MIRROR_PLACEHOLDER,
+        &btih.map(|hash| hex_lower(&hash)).unwrap_or_default(),
+    );
     let body = match client.get_body(&url).await {
         Ok(b) => b,
-        Err(e) => return WebFetchOutcome::Network(e.to_string()),
+        Err(_) => return WebFetchOutcome::Network("metadata source request failed".into()),
     };
     if body.len() > WEB_MIRROR_BODY_CAP {
         return WebFetchOutcome::Miss("response body over cap");
@@ -212,7 +214,7 @@ async fn fetch_from_mirror(
 /// void reason, a static string for log dedup).
 fn verify_web_torrent(
     body: &[u8],
-    btih: [u8; 20],
+    btih: Option<[u8; 20]>,
     btmh: Option<[u8; 32]>,
 ) -> Result<WebMetadata, &'static str> {
     let (value, span) =
@@ -223,7 +225,13 @@ fn verify_web_torrent(
     let info = body[span.start..span.end].to_vec();
     // Identity comparison (SPEC §2.1.7: raw-slice hashing; hybrid
     // verifies both identities).
-    check_identity(&info, Some(btih), btmh).map_err(|_| "infohash mismatch")?;
+    check_identity(&info, btih, btmh).map_err(|_| "infohash mismatch")?;
+    if btmh.is_some() {
+        let decoded = bencode::decode(&info).map_err(|_| "invalid v2 info dictionary")?;
+        if decoded.get(b"meta version").and_then(Value::as_int) != Some(2) {
+            return Err("v2 identity requires BEP52 metadata");
+        }
+    }
     let bytes = Bytes::from(info);
     // Piece-layer completeness: the layers hybrid/v2 needs must come
     // with the response and validate down to the pieces roots —
@@ -267,37 +275,32 @@ fn verify_web_torrent(
 /// recorded for health, Miss only debugged.
 pub(super) fn spawn_web_mirrors(
     cfg: &MagnetTaskConfig,
-    faces: &[MetaFace],
+    _faces: &[MetaFace],
     md_token: &CancellationToken,
 ) -> Option<mpsc::Receiver<WebMetadata>> {
     const LOG_TARGET: &str = "taiji::core::magnet";
-    let mirrors = cfg.web.as_ref()?;
-    // The public cache site index ecosystem is v1: no btih face =
-    // skip (honestly, without pretending v2 support).
-    let btih = faces
-        .iter()
-        .find(|f| matches!(f.expected, ExpectedInfoHash::V1(_)))
-        .map(|f| f.info_hash)?;
-    let btmh = faces
-        .iter()
-        .find(|f| matches!(f.expected, ExpectedInfoHash::V2(_)))
-        .and_then(|f| match f.expected {
-            ExpectedInfoHash::V2(h) => Some(h),
-            _ => None,
-        });
-    let eligible: Vec<String> = mirrors
-        .templates
-        .iter()
-        .filter(|t| {
-            if mirrors.health.blocked(t) {
-                debug!(target: LOG_TARGET, template = %t, "web mirror in cooldown; skipped");
-                false
-            } else {
-                true
+    let magnet = taiji_bt::magnet::parse(&cfg.magnet_uri).ok()?;
+    let btih = magnet.btih;
+    let btmh = magnet.btmh;
+    let health = cfg
+        .web
+        .as_ref()
+        .map(|mirrors| mirrors.health.clone())
+        .unwrap_or_else(|| Arc::new(WebMirrorHealth::new()));
+    let mut eligible = magnet.metadata_sources;
+    if btih.is_some() {
+        if let Some(mirrors) = &cfg.web {
+            for template in mirrors
+                .templates
+                .iter()
+                .filter(|template| !mirrors.health.blocked(template))
+            {
+                if !eligible.contains(template) {
+                    eligible.push(template.clone());
+                }
             }
-        })
-        .cloned()
-        .collect();
+        }
+    }
     if eligible.is_empty() {
         return None;
     }
@@ -310,39 +313,22 @@ pub(super) fn spawn_web_mirrors(
             return None;
         }
     };
-    let (tx, rx) = mpsc::channel::<WebMetadata>(eligible.len());
-    for template in eligible {
-        let client = client.clone();
-        let health = Arc::clone(&mirrors.health);
-        let tx = tx.clone();
-        let token = md_token.child_token();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = token.cancelled() => {}
-                outcome = fetch_from_mirror(&client, &template, btih, btmh) => {
-                    match outcome {
-                        WebFetchOutcome::Ok(m) => {
-                            health.note_success(&template);
-                            // Lossy send (capacity = mirror count,
-                            // normally lossless; a send failure after
-                            // task teardown = the result is no longer
-                            // useful).
-                            let _ = tx.send(m).await;
-                        }
-                        WebFetchOutcome::Network(e) => {
-                            health.note_failure(&template);
-                            debug!(target: LOG_TARGET, template = %template, %e,
-                                "web mirror network failure (recorded for cooldown)");
-                        }
-                        WebFetchOutcome::Miss(reason) => {
-                            debug!(target: LOG_TARGET, template = %template, reason,
-                                "web mirror response rejected (content miss; not a network failure)");
-                        }
-                    }
+    let (tx, rx) = mpsc::channel::<WebMetadata>(4);
+    let token = md_token.child_token();
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        futures::stream::iter(eligible.into_iter().enumerate()).for_each_concurrent(3,|(index,template)|{
+            let client=client.clone();let health=health.clone();let tx=tx.clone();let token=token.clone();
+            async move {tokio::select! {
+                _=token.cancelled()=>{},
+                outcome=fetch_from_mirror(&client,&template,btih,btmh)=>match outcome {
+                    WebFetchOutcome::Ok(metadata)=>{health.note_success(&template);let _=tx.send(metadata).await;}
+                    WebFetchOutcome::Network(reason)=>{health.note_failure(&template);debug!(target:LOG_TARGET,index,%reason,"metadata source unavailable");}
+                    WebFetchOutcome::Miss(reason)=>{debug!(target:LOG_TARGET,index,reason,"metadata source failed identity validation");}
                 }
-            }
-        });
-    }
+            }}
+        }).await;
+    });
     Some(rx)
 }
 
@@ -416,7 +402,7 @@ mod tests {
     fn verify_web_torrent_accepts_valid_and_rejects_forgeries() {
         let (torrent, btih, info) = web_mirror_torrent();
         // The genuine body: identity + structure all pass.
-        let got = verify_web_torrent(&torrent, btih, None)
+        let got = verify_web_torrent(&torrent, Some(btih), None)
             .unwrap_or_else(|e| panic!("valid torrent rejected: {e}"));
         assert_eq!(got.info.as_ref(), info.as_slice(), "raw info-section bytes");
         assert!(got.layers.is_empty(), "v1-only carries no layers");
@@ -424,7 +410,7 @@ mod tests {
         let wrong: [u8; 20] = Sha1::digest(b"wrong").into();
         assert!(
             matches!(
-                verify_web_torrent(&torrent, wrong, None),
+                verify_web_torrent(&torrent, Some(wrong), None),
                 Err("infohash mismatch")
             ),
             "identity forgery must be rejected"
@@ -432,7 +418,7 @@ mod tests {
         // Non-bencode response (an HTML error page) -> void.
         assert!(
             matches!(
-                verify_web_torrent(b"<html>not found</html>", btih, None),
+                verify_web_torrent(b"<html>not found</html>", Some(btih), None),
                 Err("response not a bencode torrent")
             ),
             "error page must be rejected"
@@ -441,7 +427,7 @@ mod tests {
         // fetch_from_mirror verdict; here only the structural face is
         // exercised: an empty body has no info dict -> void).
         assert!(
-            verify_web_torrent(b"de", btih, None).is_err(),
+            verify_web_torrent(b"de", Some(btih), None).is_err(),
             "empty dict has no info"
         );
     }
@@ -494,6 +480,13 @@ mod tests {
         deadline: Duration,
     ) -> MagnetEnd {
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: format!(
                 "magnet:?xt=urn:btih:{}&tr=http://127.0.0.1:1/ann",
@@ -538,6 +531,31 @@ mod tests {
         MagnetEngine::spawn(cfg, &root)
             .await
             .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[tokio::test]
+    async fn explicit_magnet_source_works_without_trackers_or_implicit_mirrors() {
+        let (torrent, btih, _) = crate::magnet::tests::web_mirror_torrent();
+        let (address, hits) = web_mirror_server(0, torrent).await;
+        let dir = std::env::temp_dir().join(format!("taiji-xs-{}", rand::random::<u64>()));
+        let mut cfg = crate::magnet::tests::metadata_fixture_config(btih, dir.clone());
+        cfg.magnet_uri = format!(
+            "magnet:?xt=urn:btih:{}&xs=http%3A%2F%2F{}%2Fmetadata.torrent",
+            hex_lower(&btih),
+            address
+        );
+        cfg.web = None;
+        cfg.dht_enabled = false;
+        let root = CancellationToken::new();
+        let end = super::super::MagnetEngine::spawn(cfg, &root)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            matches!(end, super::super::MagnetEnd::MetadataFetched { .. }),
+            "{end:?}"
+        );
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+        std::fs::remove_dir_all(dir).unwrap_or_else(|e| panic!("{e}"));
     }
 
     #[tokio::test]

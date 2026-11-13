@@ -10,17 +10,16 @@
 //!
 //! Hard invariants: every identity a magnet carries is checked against
 //! the raw info bytes (SHA-1 for btih, SHA-256 for btmh); a magnet with
-//! no `tr` and no saved metadata fails explicitly (the upgraded torrent
-//! needs announce); v2/hybrid metadata without a verifiable
+//! no tracker, DHT, LSD, explicit peer or metadata source fails explicitly; v2/hybrid metadata without a verifiable
 //! `piece layers` fails instead of upgrading; a metadata deadline, when
 //! set, fails honestly rather than faking completion; all metadata-phase
-//! subtasks hang off one token that is cancelled as soon as metadata is
-//! ready.
+//! connections are cancelled after metadata/layer retrieval. Their swarm
+//! subscription is withdrawn immediately; session discovery stays warm.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -100,9 +99,11 @@ pub struct MagnetOptions {
     pub bt_load_saved_metadata: bool,
     /// `bt-peer-connection-type` (default prefer-tcp): the outbound
     /// transport plan of the upgraded engine (metadata-phase connections
-    /// are always TCP — the standalone minimal dial loop has no uTP face;
+    /// honor the same TCP/uTP policy as the payload engine;
     /// the gap is declared explicitly).
     pub bt_peer_connection_type: taiji_bt::utp::PeerConnectionType,
+    /// Enable BEP55 metadata connections (independent of router mapping).
+    pub holepunch: bool,
 }
 
 impl Default for MagnetOptions {
@@ -114,6 +115,7 @@ impl Default for MagnetOptions {
             pause_metadata: false,
             bt_load_saved_metadata: false,
             bt_peer_connection_type: taiji_bt::utp::PeerConnectionType::default(),
+            holepunch: true,
         }
     }
 }
@@ -125,10 +127,11 @@ pub struct MetadataPhaseConfig {
     /// The BT listen port shared by the metadata phase and the upgraded
     /// engine.
     pub listen_port: u16,
-    /// Cap on the number of DISTINCT addresses dialed during the whole
-    /// metadata phase (discovery results beyond it are not dialed; a
-    /// local resource cap with no aria2 counterpart constant).
+    /// Maximum concurrent metadata peer attempts. Closed and unresponsive
+    /// peers release their slots so later discovery results can be tried.
     pub max_metadata_peers: usize,
+    /// Budget for one connected peer to deliver verified metadata.
+    pub peer_metadata_timeout: Duration,
     /// The rediscovery beat while there is no metadata (re-issue get_peers +
     /// dial new addresses; tracker/LSD retry inside their own actors and
     /// are not repeated here — tracker min-interval is respected).
@@ -136,17 +139,8 @@ pub struct MetadataPhaseConfig {
     /// The total metadata-phase budget (None = wait honestly; tests
     /// inject small values).
     pub metadata_deadline: Option<Duration>,
-    /// The budget for waiting on DHT bootstrap before the phase starts
-    /// work: it only bounds how long the metadata phase waits for
-    /// "entry-point resolution and bootstrap receipts". After the timeout
-    /// the phase starts anyway (announce/get_peers go out as usual); the
-    /// engine-side bootstrap rounds are unaffected, finish in the
-    /// background, and naturally produce PeersFound once the table
-    /// fills.
-    ///
-    /// Motivation: entry-point DNS/bootstrap can block indefinitely in
-    /// offline/restricted networks; the metadata phase must not be starved
-    /// by it (tracker/LSD continue as fallbacks).
+    /// Budget for asynchronous DHT initialization. Tracker, direct-peer and
+    /// LSD discovery continue while bootstrap DNS and receipts are pending.
     pub dht_bootstrap_budget: Duration,
 }
 
@@ -154,7 +148,8 @@ impl Default for MetadataPhaseConfig {
     fn default() -> Self {
         MetadataPhaseConfig {
             listen_port: 0,
-            max_metadata_peers: 8,
+            max_metadata_peers: 24,
+            peer_metadata_timeout: Duration::from_secs(30),
             discovery_round: Duration::from_secs(15),
             metadata_deadline: None,
             dht_bootstrap_budget: Duration::from_secs(10),
@@ -162,41 +157,17 @@ impl Default for MetadataPhaseConfig {
     }
 }
 
-/// DHT engine lease: handle + event receiver (no session yet; the owner
-/// "lends" the engine to this module and does not shut it down at task
-/// end — the lifecycle belongs to the owner, closed out by the session
-/// later).
+/// An injected DHT engine or scoped receiver for session-owned discovery.
+/// The Network subscription owns registration lifetime; handles are borrowed.
 pub struct DhtLease {
     pub handle: DhtHandle,
+    pub extra_handles: Vec<DhtHandle>,
     pub events: mpsc::Receiver<DhtEvent>,
 }
 
-/// Metadata-phase DhtEngine assembly (called by the session at Job::Magnet
-/// when the session enables DHT; the product hangs off
-/// [`MagnetTaskConfig::dht`]).
-///
-/// - A standalone ephemeral UDP carrier (a single v4 demux instance; the
-///   tracker/uTP channels are dropped unconsumed — announce goes through
-///   each tracker actor's own UDP carrier, and metadata-phase connections
-///   are always TCP). Independent of the upgraded engine's DHT assembly
-///   (engine.rs).
-/// - BEP42: the external address is probed at assembly and handed down
-///   (node_id derivation/re-derivation semantics in bt::dht::security; a
-///   failed probe = keep the random id, the task does not fail).
-/// - bootstrap/get_peers/announce are driven by the metadata-phase task
-///   ([`discover_and_fetch`]); PeersFound events are consumed in that
-///   loop too.
-/// - `restore`: a session-persisted dht_state (the
-///   `load_dht_restore_state` product; the aria2 single-DHTRegistry
-///   semantics — the metadata phase reuses the persisted routing-table
-///   cache so a restart skips bootstrapping from zero; None = from
-///   zero).
-/// - demux lifecycle: cancelled by the shutdown token (task close-out) or
-///   when all handles drop (engine exit -> the forward bridge task ends),
-///   whichever comes first; a keepalive task holds one handle clone until
-///   the token cancels, keeping the demux present for the whole phase.
-/// - Assembly failure = None (tracker/LSD discovery remain as fallbacks;
-///   the DHT face is not faked).
+/// Standalone IPv4 DHT assembly for embedding callers and integration tests.
+/// Production sessions reuse MagnetServices and its shared TCP/uTP/DHT socket.
+/// Restore state is optional; cancelling the token closes this standalone demux.
 pub async fn spawn_phase_dht(
     shutdown: tokio_util::sync::CancellationToken,
     restore: Option<taiji_bt::dht::DhtRestoreState>,
@@ -219,6 +190,16 @@ pub async fn spawn_phase_dht(
     // channels (see the port-sharing note above).
     drop(channels.tracker);
     drop(channels.utp);
+    spawn_phase_dht_on(channels.dht, demux, shutdown, restore).await
+}
+
+async fn spawn_phase_dht_on(
+    inbound: mpsc::Receiver<taiji_io::udp_demux::InboundPacket>,
+    demux: taiji_io::udp_demux::UdpDemuxHandle,
+    shutdown: CancellationToken,
+    restore: Option<taiji_bt::dht::DhtRestoreState>,
+) -> Option<DhtLease> {
+    const LOG_TARGET: &str = "taiji::core::magnet";
     let (out_tx, out_rx) = mpsc::channel(taiji_bt::dht::COMMAND_CHANNEL_CAPACITY);
     let (ev_tx, ev_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
     let dht_port = demux.bound_addr().port();
@@ -227,7 +208,7 @@ pub async fn spawn_phase_dht(
         dht_port,
         DhtEngineConfig::default(),
         DhtTransport {
-            inbound: channels.dht,
+            inbound,
             outbound: out_tx,
         },
         restore,
@@ -256,6 +237,7 @@ pub async fn spawn_phase_dht(
     });
     info!(target: LOG_TARGET, port = dht_port, "metadata-phase dht engine spawned");
     Some(DhtLease {
+        extra_handles: Vec::new(),
         handle,
         events: ev_rx,
     })
@@ -269,6 +251,14 @@ pub struct LsdLease {
 
 /// magnet task configuration.
 pub struct MagnetTaskConfig {
+    pub services: Option<Arc<MagnetServices>>,
+    pub dht_ipv6_enabled: bool,
+    pub dht_entry_point_v6_override: Option<String>,
+    pub dht_message_timeout: Duration,
+    /// Listener mapping supplied by the session or embedding host.
+    pub nat: Option<crate::nat::NatEngine>,
+    /// Session tracker configuration, including updates while fetching metadata.
+    pub tracker_updates: Option<tokio::sync::watch::Receiver<Vec<(usize, String)>>>,
     /// Task GID (allocated by the caller — session/tests — from
     /// [`crate::gid::GidAllocator`]). The in-place upgrade keeps this
     /// GID.
@@ -282,12 +272,14 @@ pub struct MagnetTaskConfig {
     pub peer_id: [u8; 20],
     pub options: MagnetOptions,
     pub phase: MetadataPhaseConfig,
-    /// DHT lease (None = no DHT discovery; a magnet cannot be private ->
-    /// BEP27 always allows).
+    /// Optional injected DHT lease. Otherwise services provide discovery when
+    /// dht_enabled permits it; known private metadata never enters this phase.
     pub dht: Option<DhtLease>,
     /// DHT bootstrap entry points (empty = resolve the hardcoded
     /// routers; tests pass a loopback entry explicitly).
     pub dht_entry_points: Vec<std::net::SocketAddr>,
+    /// Optional host:port override supplied by the session configuration.
+    pub dht_entry_point_override: Option<String>,
     /// DHT switch of the upgraded engine (passes through
     /// [`EngineConfig::dht`]'s `DhtWireConfig::enabled` — the session
     /// `--enable-dht` global semantics). Without this passthrough the
@@ -400,6 +392,15 @@ impl MetadataChain {
 // Only the module declaration + re-export sit here — the session-side
 // `crate::magnet::{WebMirrors, WebMirrorHealth, parse_web_mirror_templates}`
 // and this file's call sites (spawn_web_mirrors) keep unchanged paths.
+mod candidates;
+mod services;
+pub use services::MagnetServices;
+mod network;
+mod peers;
+use peers::{
+    handle_metadata_holepunch, retry_metadata_rendezvous, spawn_dial_with_network,
+    spawn_incoming_peer,
+};
 mod web_mirrors;
 
 use self::web_mirrors::spawn_web_mirrors;
@@ -448,7 +449,49 @@ pub enum MagnetEnd {
 }
 
 /// Pool of live metadata connections (face index -> PeerTask handle).
-type LivePeers = Arc<std::sync::Mutex<Vec<(usize, PeerTaskHandle)>>>;
+#[derive(Clone)]
+struct MetadataPeer {
+    face: usize,
+    id: u64,
+    address: std::net::SocketAddr,
+    handle: PeerTaskHandle,
+    token: CancellationToken,
+    transport: taiji_bt::utp::Transport,
+    peer_id: [u8; 20],
+    inbound: bool,
+}
+type LivePeers = Arc<std::sync::Mutex<Vec<MetadataPeer>>>;
+
+struct PeerSignals {
+    network: Arc<network::Dialer>,
+    candidates: std::sync::Mutex<candidates::Candidates>,
+    metadata: Vec<Arc<taiji_bt::ut_metadata::MetadataCoordinator>>,
+    pex: mpsc::Sender<taiji_bt::peer::PexEvent>,
+    holepunch: mpsc::Sender<taiji_bt::peer::HolepunchEvent>,
+    reports: mpsc::Sender<PeerReport>,
+    next_id: AtomicU64,
+    introducers: AtomicUsize,
+    max_introducers: usize,
+    enabled: bool,
+}
+
+enum PeerReport {
+    Connected {
+        face: usize,
+        address: std::net::SocketAddr,
+        id: u64,
+        source: &'static str,
+    },
+    Slow {
+        face: usize,
+        address: std::net::SocketAddr,
+    },
+    Failed {
+        face: usize,
+        address: std::net::SocketAddr,
+    },
+    Closed(u64),
+}
 
 /// The metadata-phase product: metadata bytes + the live connection pool
 /// (for BEP52 piece-layer prefetch — magnet metadata lacks the top-level
@@ -457,6 +500,7 @@ type LivePeers = Arc<std::sync::Mutex<Vec<(usize, PeerTaskHandle)>>>;
 /// the upgrade) + the phase token.
 struct MetadataPhase {
     metadata: Bytes,
+    _network: network::Network,
     /// Live metadata peers (face index, PeerTask handle); cancelled
     /// together at phase close-out.
     peers: LivePeers,
@@ -508,6 +552,7 @@ async fn udp_carrier(
 }
 
 /// One swarm face of the metadata phase (one per magnet identity).
+#[derive(Clone)]
 struct MetaFace {
     /// Face index (for connection-pool attribution).
     index: usize,
@@ -519,15 +564,16 @@ struct MetaFace {
     dht_kind: DhtSwarmKind,
 }
 
-/// The metadata-phase SwarmView (announce readings: total=completed=0,
-/// mirroring aria2 magnet tasks' totalLengthIsUnknown -> left=0).
+/// Announce as an incomplete peer while payload size is unknown. A nonzero
+/// sentinel follows libtorrent's bytes_left() fallback and avoids seed filtering.
+/// This view is tracker-only; it does not fabricate task progress or file size.
 struct MetaSwarmView {
     peers: Arc<AtomicUsize>,
 }
 
 impl taiji_bt::tracker::actor::SwarmView for MetaSwarmView {
     fn total_length(&self) -> u64 {
-        0
+        16 * 1024
     }
     fn completed_length(&self) -> u64 {
         0
@@ -754,25 +800,41 @@ async fn run(
     // than filtered, because lossy always yields non-empty output for
     // non-empty input; no second empty filter, which would be a
     // always-true dead branch).
-    let trs: Vec<String> = magnet
+    let mut trs: Vec<String> = magnet
         .tr
         .iter()
         .filter(|u| !u.is_empty())
         .map(|u| String::from_utf8_lossy(u).into_owned())
         .collect();
-    if trs.is_empty() && !cfg.options.bt_load_saved_metadata {
-        // Divergence 2 (docs/design/core.md): no tr and no saved-metadata
-        // path -> the upgraded torrent would carry no announce; fail
-        // explicitly (honest waiting is not faked completability).
+    if let Some(updates) = &cfg.tracker_updates {
+        trs = updates
+            .borrow()
+            .iter()
+            .map(|(_, tracker)| tracker.clone())
+            .collect();
+    }
+    let cached_metadata = cfg
+        .services
+        .as_ref()
+        .and_then(|services| services.cached(magnet.btih, magnet.btmh));
+    if trs.is_empty()
+        && cached_metadata.is_none()
+        && !cfg.options.bt_load_saved_metadata
+        && !cfg.dht_enabled
+        && cfg.lsd.is_none()
+        && magnet.xpe.is_none()
+        && magnet.metadata_sources.is_empty()
+        && cfg.web.as_ref().is_none_or(|web| web.templates.is_empty())
+    {
+        // Trackerless metadata is valid. Reject only when the caller has
+        // disabled every discovery source; DHT magnets remain pending until
+        // peers supply metadata or the caller cancels them.
         transit(&mut state, TorrentState::Error, cfg.gid);
         return MagnetEnd::Failed(
-            "magnet carries no tr tracker list; metadata could still be fetched \
-             via DHT but the upgraded torrent needs announce (Metainfo contract); \
-             enable bt-load-saved-metadata or provide tr parameters"
-                .into(),
+            "magnet carries no tr tracker list and no enabled peer discovery source".into(),
         );
     }
-    let tiers: Vec<(usize, String)> = trs
+    let mut tiers: Vec<(usize, String)> = trs
         .iter()
         .enumerate()
         .map(|(i, u)| (i, u.clone()))
@@ -813,6 +875,39 @@ async fn run(
         metainfo = MagnetEngine::load_saved(&cfg.dest, &id_bytes, btih, btmh).await;
     }
 
+    if metainfo.is_none() {
+        if let Some(cached) = cached_metadata {
+            let trackers = trs.clone();
+            let btih = magnet.btih;
+            let btmh = magnet.btmh;
+            metainfo = tokio::task::spawn_blocking(move || {
+                let (_, span) = taiji_bt::bencode::decode_with_info_span(&cached).ok()?;
+                check_identity(&cached[span.clone()], btih, btmh).ok()?;
+                let bytes =
+                    metadata2torrent(&cached[span], &trackers, &services::cached_layers(&cached));
+                let meta = Metainfo::parse(&bytes).ok()?;
+                Some((meta, bytes))
+            })
+            .await
+            .ok()
+            .flatten();
+            if metainfo.is_some() {
+                info!(target:"taiji::core::magnet","verified session metadata cache hit");
+            }
+        }
+    }
+
+    if metainfo.is_none()
+        && trs.is_empty()
+        && !cfg.dht_enabled
+        && cfg.lsd.is_none()
+        && magnet.xpe_peers.is_empty()
+        && magnet.metadata_sources.is_empty()
+        && cfg.web.as_ref().is_none_or(|web| web.templates.is_empty())
+    {
+        return MagnetEnd::Failed("no verified cached metadata or enabled discovery source".into());
+    }
+
     // ---- metadata phase (discovery + ut_metadata fetch) ----
     let phase: Option<MetadataPhase> = if metainfo.is_some() {
         None // bt-load-saved-metadata short circuit: no metadata phase
@@ -829,7 +924,7 @@ async fn run(
             &mut lsd_lease,
             &faces,
             &tiers,
-            magnet.xpe,
+            &magnet.xpe_peers,
             &md_token,
             &face_by_hash,
         )
@@ -849,6 +944,10 @@ async fn run(
         (None, None) => unreachable!("phase or saved metadata must exist"),
     };
 
+    if let Some(updates) = &cfg.tracker_updates {
+        tiers = updates.borrow().clone();
+        trs = tiers.iter().map(|(_, url)| url.clone()).collect();
+    }
     // ---- rebuild + verify + options + upgrade ----
     finalize(
         cfg, magnet, trs, tiers, metadata, metainfo, phase, faces, state, parent, upgrade_tx,
@@ -876,16 +975,54 @@ async fn discover_and_fetch(
     lsd: &mut Option<LsdLease>,
     faces: &[MetaFace],
     tiers: &[(usize, String)],
-    xpe: Option<std::net::SocketAddr>,
+    xpe: &[std::net::SocketAddr],
     md_token: &CancellationToken,
     face_by_hash: &(dyn Fn(&[u8; 20]) -> Option<usize> + Sync),
 ) -> Result<MetadataPhase, String> {
+    let phase_started = std::time::Instant::now();
+    let mut network = if let Some(services) = &cfg.services {
+        let (network, lease) = services.open(cfg, faces, md_token).await?;
+        if dht.is_none() {
+            *dht = lease;
+        }
+        network
+    } else {
+        network::Network::bind(
+            cfg.phase.listen_port,
+            cfg.peer_id,
+            faces
+                .iter()
+                .map(|face| (face.info_hash, face.reserved))
+                .collect(),
+            cfg.nat.clone(),
+            md_token,
+        )
+        .await?
+    };
+    let actual_port = network.dialer.port;
+    if dht.is_none() && cfg.dht_enabled {
+        if let Some((inbound, demux)) = network.dht.take() {
+            let restore = match cfg.persist.as_ref() {
+                Some((_, handle)) => {
+                    crate::engine::load_dht_restore_state(handle, DhtFamily::V4).await
+                }
+                None => None,
+            };
+            *dht = spawn_phase_dht_on(inbound, demux, md_token.clone(), restore).await;
+        }
+    }
+    let phase_nat = network.dialer.nat.clone();
+    let mut external_ports = phase_nat.as_ref().map(|nat| nat.subscribe_external_ports());
     // Split the leases: the handle (Clone semantics, for
     // announce/get_peers) and the event receiver (moved; recv needs
     // exclusivity).
+    let mut extra_dht_handles = Vec::new();
     let (dht_handle, mut dht_events): (Option<DhtHandle>, Option<mpsc::Receiver<DhtEvent>>) =
         match dht.take() {
-            Some(l) => (Some(l.handle), Some(l.events)),
+            Some(lease) => {
+                extra_dht_handles = lease.extra_handles;
+                (Some(lease.handle), Some(lease.events))
+            }
             None => (None, None),
         };
     let (lsd_handle, mut lsd_events): (Option<LsdHandle>, Option<mpsc::Receiver<LsdEvent>>) =
@@ -901,6 +1038,8 @@ async fn discover_and_fetch(
     let (agg_tx, mut agg_rx) =
         mpsc::channel::<(usize, TrackerActorEvent)>(EVENT_CHANNEL_CAPACITY * faces.len());
 
+    let mut tracker_updates = cfg.tracker_updates.clone();
+
     // ---- one TrackerActor per face (announce self-driven; identical
     // wiring) ----
     // Actor command handles: held until phase close-out (dropping all of
@@ -911,12 +1050,18 @@ async fn discover_and_fetch(
     // IPv6 (probed once; failure / no global address = None = omitted;
     // probe implementation in bt::dht::security probe_source_ip — v6 = a
     // bounded TCP connect probe).
-    let local_ipv6 = taiji_bt::dht::security::probe_source_ip(true)
-        .await
-        .and_then(|ip| match ip {
-            std::net::IpAddr::V6(v6) => Some(v6),
-            std::net::IpAddr::V4(_) => None,
-        });
+    // Route probing is supplementary. It must never delay a ready tracker,
+    // explicit peer or DHT result; activate IPv6 tracker paths when ready.
+    let ipv6_probe = async {
+        taiji_bt::dht::security::probe_source_ip(true)
+            .await
+            .and_then(|ip| match ip {
+                std::net::IpAddr::V6(ip) => Some(ip),
+                _ => None,
+            })
+    };
+    tokio::pin!(ipv6_probe);
+    let mut ipv6_probe_done = !cfg.dht_ipv6_enabled;
     let mut actor_cmds: Vec<mpsc::Sender<TrackerCommand>> = Vec::new();
     for (face_i, face) in faces.iter().enumerate() {
         let (face_ev_tx, mut face_ev_rx) =
@@ -928,15 +1073,14 @@ async fn discover_and_fetch(
             TrackerActorConfig {
                 info_hash: face.info_hash,
                 peer_id: cfg.peer_id,
-                // Note: the announce reported port stays
-                // phase.listen_port — the metadata phase has no NAT
-                // consumption face (the supply chain only feeds
-                // EngineConfig; MagnetTaskConfig has no nat slot), so the
-                // external-port story does not reach this phase and is
-                // not faked.
-                listen_port: cfg.phase.listen_port,
+                // The tracker follows the actual bound port and any later
+                // gateway grant through SetListenPort below.
+                listen_port: phase_nat
+                    .as_ref()
+                    .map(|n| n.external_ports().effective(actual_port))
+                    .unwrap_or(actual_port),
                 options: TrackerOptions {
-                    local_ipv6,
+                    local_ipv6: None,
                     ..TrackerOptions::default()
                 },
                 // The pre-MSE-negotiation rule (same as the engine): the
@@ -978,53 +1122,75 @@ async fn discover_and_fetch(
 
     // ---- DHT: bootstrap + announce (a magnet cannot be private -> BEP27
     // always allows) ----
-    if let Some(dht) = dht_handle.as_ref() {
-        // The bootstrap wait is bounded by
-        // [`MetadataPhaseConfig::dht_bootstrap_budget`] (entry DNS /
-        // restricted networks can block indefinitely): the timeout only
-        // gives up waiting; the engine-side bootstrap rounds keep running
-        // in the background (receipt-driven node_lookup + refresh), and
-        // periodic get_peers/announce naturally produce PeersFound once
-        // the table fills.
-        let boot = async {
-            let entry_points = resolve_entry_points(&cfg.dht_entry_points).await;
-            dht.bootstrap(entry_points).await
-        };
-        match tokio::time::timeout(cfg.phase.dht_bootstrap_budget, boot).await {
-            Ok(Ok(n)) => {
-                info!(target: "taiji::core::magnet", reachable = n, "dht bootstrap done")
-            }
-            Ok(Err(e)) => warn!(target: "taiji::core::magnet", %e, "dht bootstrap failed"),
-            Err(_) => warn!(target: "taiji::core::magnet",
+    let bootstrap = async {
+        if let Some(dht) = dht_handle.as_ref() {
+            // The bootstrap wait is bounded by
+            // [`MetadataPhaseConfig::dht_bootstrap_budget`] (entry DNS /
+            // restricted networks can block indefinitely): the timeout only
+            // gives up waiting; the engine-side bootstrap rounds keep running
+            // in the background (receipt-driven node_lookup + refresh), and
+            // periodic get_peers/announce naturally produce PeersFound once
+            // the table fills.
+            if cfg.services.is_none() {
+                let boot = async {
+                    let entry_points = if let Some(endpoint) = &cfg.dht_entry_point_override {
+                        resolve_bootstrap_override(endpoint).await
+                    } else {
+                        resolve_entry_points(&cfg.dht_entry_points).await
+                    };
+                    dht.bootstrap(entry_points).await
+                };
+                match tokio::time::timeout(cfg.phase.dht_bootstrap_budget, boot).await {
+                    Ok(Ok(n)) => {
+                        info!(target: "taiji::core::magnet", reachable = n, "dht bootstrap done")
+                    }
+                    Ok(Err(e)) => warn!(target: "taiji::core::magnet", %e, "dht bootstrap failed"),
+                    Err(_) => warn!(target: "taiji::core::magnet",
                 budget = ?cfg.phase.dht_bootstrap_budget,
                 "dht bootstrap wait budget exceeded; phase continues (engine-side bootstrap keeps running)"),
-        }
-        for face in faces {
-            match DhtTarget::new(face.info_hash, face.dht_kind, false) {
-                Ok(target) => {
-                    if let Err(e) = dht.announce(target, cfg.phase.listen_port).await {
-                        warn!(target: "taiji::core::magnet", %e, "dht announce rejected");
-                    }
                 }
-                Err(e) => warn!(target: "taiji::core::magnet", %e, "dht target gate refused"),
+            }
+            for face in faces {
+                match DhtTarget::new(face.info_hash, face.dht_kind, false) {
+                    Ok(target) => {
+                        if let Err(e) = dht
+                            .announce(
+                                target,
+                                phase_nat
+                                    .as_ref()
+                                    .and_then(|nat| nat.external_ports().udp)
+                                    .unwrap_or(actual_port),
+                            )
+                            .await
+                        {
+                            warn!(target: "taiji::core::magnet", %e, "dht announce rejected");
+                        }
+                    }
+                    Err(e) => warn!(target: "taiji::core::magnet", %e, "dht target gate refused"),
+                }
             }
         }
-    }
+        for handle in &extra_dht_handles {
+            for face in faces {
+                if let Ok(target) = DhtTarget::new(face.info_hash, face.dht_kind, false) {
+                    let _ = handle.announce(target, actual_port).await;
+                }
+            }
+        }
+    };
+    tokio::pin!(bootstrap);
+    let mut bootstrap_done = false;
 
     // ---- LSD: the BEP14 payload is a 20B infohash — only the btih face
     // is announced (truncated v2 has no interop story; honest, not faked)
     // ----
-    // Note: the port stays phase.listen_port (no NAT consumption face in
-    // the metadata phase; same note as the tracker actor above).
+    // LAN discovery advertises the local listener, independent of NAT.
     if let Some(lsd) = lsd_handle.as_ref() {
         if let Some(btih_face) = faces
             .iter()
             .find(|f| matches!(f.expected, ExpectedInfoHash::V1(_)))
         {
-            if let Err(e) = lsd
-                .announce(btih_face.info_hash, cfg.phase.listen_port)
-                .await
-            {
+            if let Err(e) = lsd.announce(btih_face.info_hash, actual_port).await {
                 warn!(target: "taiji::core::magnet", %e, "lsd announce failed");
             }
         } else {
@@ -1042,8 +1208,39 @@ async fn discover_and_fetch(
     let dialed_total = Arc::new(AtomicUsize::new(0));
     // Live connection pool (feeds the post-metadata piece-layer
     // prefetch).
-    let live: Arc<std::sync::Mutex<Vec<(usize, PeerTaskHandle)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let live: LivePeers = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let (pex_tx, mut pex_rx) = mpsc::channel(128);
+    let (hp_tx, mut hp_rx) = mpsc::channel(64);
+    let (report_tx, mut report_rx) = mpsc::channel(128);
+    let signals = Arc::new(PeerSignals {
+        network: network.dialer.clone(),
+        candidates: std::sync::Mutex::new(candidates::Candidates::new()),
+        metadata: faces
+            .iter()
+            .map(|face| {
+                Arc::new(taiji_bt::ut_metadata::MetadataCoordinator::new(
+                    face.expected,
+                ))
+            })
+            .collect(),
+        pex: pex_tx,
+        holepunch: hp_tx,
+        reports: report_tx,
+        next_id: AtomicU64::new(1),
+        introducers: AtomicUsize::new(0),
+        max_introducers: cfg.phase.max_metadata_peers.saturating_sub(1).min(4),
+        enabled: cfg.options.holepunch
+            && cfg.options.bt_peer_connection_type != taiji_bt::utp::PeerConnectionType::Tcp,
+    });
+    let mut hp_books: Vec<_> = faces
+        .iter()
+        .map(|_| taiji_bt::holepunch::HolepunchBook::new(512))
+        .collect();
+    let mut pending_rendezvous = Vec::new();
+    let mut pending_peers = VecDeque::new();
+    let mut peer_slots = tokio::time::interval(Duration::from_millis(100));
+    peer_slots.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // Periodic rediscovery (re-issue DHT get_peers; tracker/LSD
     // self-drive).
@@ -1063,21 +1260,134 @@ async fn discover_and_fetch(
     tokio::pin!(deadline);
 
     loop {
+        while dialed_total.load(Ordering::Relaxed)
+            < cfg.phase.max_metadata_peers
+                + if pending_peers
+                    .front()
+                    .is_some_and(|(_, _, source)| matches!(*source, "holepunch" | "relay-utp"))
+                {
+                    4
+                } else {
+                    0
+                }
+        {
+            let connected: Vec<_> = crate::lock(&live)
+                .iter()
+                .filter(|peer| !peer.token.is_cancelled())
+                .map(|peer| peer.address)
+                .collect();
+            let candidate = crate::lock(&signals.candidates).pop(
+                &mut pending_peers,
+                &connected,
+                std::time::Instant::now(),
+            );
+            let Some((face_i, addr, source)) = candidate else {
+                break;
+            };
+            spawn_dial_with_network(
+                cfg,
+                faces,
+                face_i,
+                addr,
+                source,
+                &swarm_peers,
+                &dialed,
+                &dialed_total,
+                &live,
+                md_tx.clone(),
+                md_token,
+                Some(signals.clone()),
+            );
+        }
         tokio::select! {
             biased;
             _ = md_token.cancelled() => {
                 return Err("metadata phase cancelled".into());
             }
+            _ = peer_slots.tick() => {
+                if signals.enabled { retry_metadata_rendezvous(&live, &mut hp_books, &mut pending_peers, &mut pending_rendezvous); }
+            }
+            incoming = network.incoming.recv() => {
+                if let Some(incoming) = incoming {
+                    spawn_incoming_peer(cfg, faces, incoming, &swarm_peers, &dialed_total, &live, md_tx.clone(), md_token, signals.clone());
+                }
+            }
+            Some(event) = pex_rx.recv() => {
+                let peer = crate::lock(&live).iter().find(|p| p.id == event.from && !p.token.is_cancelled()).cloned();
+                if let Some(peer) = peer {
+                    for address in event.fresh {
+                        if let Some(address) = crate::engine::addr_hygiene::sanitize_discovered_addr(address) {
+                            hp_books[peer.face].note_introduced(address, peer.id, std::time::Instant::now());
+                            let capability = event.capabilities.iter().find(|p| p.addr == address);
+                            let source = if capability.is_some_and(|p| p.supports_holepunch) { "pex-holepunch" } else if capability.is_some_and(|p| p.supports_utp) { "pex-utp" } else { "pex" };
+                            queue_metadata_peer(&mut pending_peers, peer.face, address, source);
+                        }
+                    }
+                }
+                if signals.enabled { retry_metadata_rendezvous(&live, &mut hp_books, &mut pending_peers, &mut pending_rendezvous); }
+            }
+            Some(report) = report_rx.recv() => {
+                match report {
+                    PeerReport::Slow { face, address } | PeerReport::Failed { face, address } => hp_books[face].note_dial_failed(address, std::time::Instant::now()),
+                    PeerReport::Closed(id) => { for book in &mut hp_books { book.remove_introducer(id); } },
+                    PeerReport::Connected { face, address, id, source } => {
+                        hp_books[face].note_dial_connected(&address);
+                        if source == "relay-utp" {
+                            for &(f, relay, target) in &pending_rendezvous {
+                                if f == face && relay == address { hp_books[face].note_introduced(target, id, std::time::Instant::now()); }
+                            }
+                        }
+                    }
+                }
+                if signals.enabled { retry_metadata_rendezvous(&live, &mut hp_books, &mut pending_peers, &mut pending_rendezvous); }
+            }
+            Some(event) = hp_rx.recv(), if signals.enabled => {
+                handle_metadata_holepunch(event, &live, &mut pending_peers);
+            }
+            changed = async {
+                match external_ports.as_mut() { Some(ports) => ports.changed().await.is_ok(), None => std::future::pending().await }
+            } => {
+                if !changed { external_ports = None; continue; }
+                let ports = external_ports.as_ref().map(|ports| *ports.borrow()).unwrap_or_default();
+                for actor in &actor_cmds { let _ = actor.send(TrackerCommand::SetListenPort { port: ports.effective(actual_port) }).await; }
+                if let Some(dht) = &dht_handle {
+                    for face in faces { if let Ok(target) = DhtTarget::new(face.info_hash, face.dht_kind, false) { let _ = dht.announce(target, ports.udp.unwrap_or(actual_port)).await; } }
+                }
+                for peer in crate::lock(&live).iter() {
+                    let port = signals.network.advertised(peer.transport, peer.address);
+                    let _ = peer.handle.command(PeerCommand::SetListenPort(port));
+                }
+            }
+            address = &mut ipv6_probe, if !ipv6_probe_done => {
+                ipv6_probe_done = true;
+                if address.is_some() {for actor in &actor_cmds {let _=actor.send(TrackerCommand::SetIpv6 {address}).await;}}
+            }
+            _ = &mut bootstrap, if !bootstrap_done => { bootstrap_done = true; }
+            changed = async {
+                match tracker_updates.as_mut() {
+                    Some(updates) => updates.changed().await.is_ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                if !changed { tracker_updates = None; continue; }
+                let tiers = tracker_updates.as_ref().map(|updates| updates.borrow().clone()).unwrap_or_default();
+                for actor in &actor_cmds {
+                    let (reply, _) = tokio::sync::oneshot::channel();
+                    let _ = actor.send(TrackerCommand::SetTrackers { tiers: tiers.clone(), reply }).await;
+                }
+            }
             fetched = md_rx.recv() => match fetched {
                 Some(MetadataFetched::Complete(bytes)) => {
-                    info!(target: "taiji::core::magnet", len = bytes.len(),
+                    info!(target: "taiji::core::magnet", len = bytes.len(), elapsed_ms = phase_started.elapsed().as_millis() as u64,
                         "metadata fetched: identity verified (ut_metadata)");
                     let peers = {
                         let pool = crate::lock(&live);
                         pool.clone()
                     };
+                    network.release_registration();
                     return Ok(MetadataPhase {
                         metadata: bytes,
+                        _network: network,
                         peers: Arc::new(std::sync::Mutex::new(peers)),
                         token: md_token.clone(),
                         web_layers: None,
@@ -1103,8 +1413,10 @@ async fn discover_and_fetch(
                         let pool = crate::lock(&live);
                         pool.clone()
                     };
+                    network.release_registration();
                     return Ok(MetadataPhase {
                         metadata: m.info,
+                        _network: network,
                         peers: Arc::new(std::sync::Mutex::new(peers)),
                         token: md_token.clone(),
                         web_layers: Some(m.layers),
@@ -1112,7 +1424,12 @@ async fn discover_and_fetch(
                 }
                 // All mirror tasks ended without a winner: close this arm
                 // and fall back to P2P.
-                None => web_rx = None,
+                None => {
+                    web_rx=None;
+                    if dht_handle.is_none() && lsd_handle.is_none() && tiers.is_empty() && xpe.is_empty() {
+                        return Err("explicit metadata sources returned no verified torrent".into());
+                    }
+                },
             },
             ev = agg_rx.recv() => {
                 // Announce/scrape events: the metadata phase stores no
@@ -1123,7 +1440,7 @@ async fn discover_and_fetch(
                 for p in peers.iter().map(|p| std::net::SocketAddr::from((p.ip, p.port)))
                     .chain(peers6.iter().map(|p| std::net::SocketAddr::from((p.ip, p.port))))
                 {
-                    spawn_dial(cfg, faces, face_i, p, "tracker", &swarm_peers, &dialed, &dialed_total, &live, md_tx.clone(), md_token);
+                    queue_metadata_peer(&mut pending_peers, face_i, p, "tracker");
                 }
             }
             ev = async {
@@ -1132,10 +1449,11 @@ async fn discover_and_fetch(
                     None => std::future::pending().await,
                 }
             } => {
+                if ev.is_none() { dht_events = None; continue; }
                 let Some(DhtEvent::PeersFound { info_hash, peers, .. }) = ev else { continue };
                 let Some(face_i) = face_by_hash(&info_hash) else { continue };
                 for addr in peers {
-                    spawn_dial(cfg, faces, face_i, addr, "dht", &swarm_peers, &dialed, &dialed_total, &live, md_tx.clone(), md_token);
+                    queue_metadata_peer(&mut pending_peers, face_i, addr, "dht");
                 }
             }
             ev = async {
@@ -1144,9 +1462,10 @@ async fn discover_and_fetch(
                     None => std::future::pending().await,
                 }
             } => {
+                if ev.is_none() { lsd_events = None; continue; }
                 let Some(LsdEvent::PeerFound { info_hash, peer }) = ev else { continue };
                 let Some(face_i) = face_by_hash(&info_hash) else { continue };
-                spawn_dial(cfg, faces, face_i, peer, "lsd", &swarm_peers, &dialed, &dialed_total, &live, md_tx.clone(), md_token);
+                queue_metadata_peer(&mut pending_peers, face_i, peer, "lsd");
             }
             _ = round.tick() => {
                 // Rediscovery beat: re-issue DHT get_peers (announce
@@ -1158,6 +1477,9 @@ async fn discover_and_fetch(
                             let _ = dht.get_peers(target).await;
                         }
                     }
+                }
+                for handle in &extra_dht_handles {
+                    for face in faces { if let Ok(target)=DhtTarget::new(face.info_hash,face.dht_kind,false) {let _=handle.get_peers(target).await;} }
                 }
                 // ---- `x.pe` direct-source re-issue (the interval's first
                 // tick fires immediately = dial at phase start; the same
@@ -1172,31 +1494,10 @@ async fn discover_and_fetch(
                 // and retries naturally next round (the static-address
                 // rediscovery backstop).
                 //
-                // Face choice: x.pe gives only an endpoint, no swarm
-                // identity (the BEP9-ecosystem extension syntax is in
-                // bt/magnet.rs) — parse the first valid single address
-                // (same shape as xt), so only faces[0] is dialed: the
-                // btih face takes priority (the x.pe ecosystem is mostly
-                // v1; a hybrid does not dial the same address twice; with
-                // only a btmh, faces[0] is the v2 truncated identity
-                // face). A v2-only direct peer failing a btih handshake =
-                // the honest failure path (a failed dial_metadata_peer
-                // leaves bookkeeping, the deadline backstops); no
-                // identity-guessing extra dials.
-                if let (Some(addr), Some(face)) = (xpe, faces.first()) {
-                    spawn_dial(
-                        cfg,
-                        faces,
-                        face.index,
-                        addr,
-                        "xpe",
-                        &swarm_peers,
-                        &dialed,
-                        &dialed_total,
-                        &live,
-                        md_tx.clone(),
-                        md_token,
-                    );
+                // Explicit peers participate in each declared swarm face;
+                // address hygiene, retry history and dial budgets still apply.
+                for address in xpe {
+                    for face in faces {queue_metadata_peer(&mut pending_peers,face.index,*address,"xpe");}
                 }
             }
             _ = &mut deadline => {
@@ -1207,6 +1508,22 @@ async fn discover_and_fetch(
                 ));
             }
         }
+    }
+}
+
+fn queue_metadata_peer(
+    queue: &mut VecDeque<(usize, std::net::SocketAddr, &'static str)>,
+    face: usize,
+    address: std::net::SocketAddr,
+    source: &'static str,
+) {
+    if matches!(source, "holepunch" | "relay-utp") {
+        queue.retain(|(f, a, _)| *f != face || *a != address);
+        if queue.len() < 1024 {
+            queue.push_front((face, address, source));
+        }
+    } else if queue.len() < 1024 && !queue.iter().any(|(f, a, _)| *f == face && *a == address) {
+        queue.push_back((face, address, source));
     }
 }
 
@@ -1231,193 +1548,85 @@ async fn resolve_entry_points_with(
     if !explicit.is_empty() {
         return explicit.to_vec();
     }
-    let mut out = Vec::new();
+    use futures::StreamExt as _;
+    let mut pending = futures::stream::FuturesUnordered::new();
     for (host, port) in taiji_bt::dht::DEFAULT_BOOTSTRAP_NODES {
-        match dns.resolve_for_transport(host, *port).await {
-            // The first-address rule as before (the same shape as the
-            // pre-migration lookup_host iterator's next(); the address
-            // family follows the list's first item; consumers do not fall
-            // back across families).
-            Ok(addrs) => {
-                if let Some(a) = addrs.into_iter().next() {
-                    out.push(a);
-                }
+        pending.push(async move {
+            match tokio::time::timeout(
+                Duration::from_secs(3),
+                dns.resolve_for_transport(host, *port),
+            )
+            .await
+            {
+                Ok(Ok(addresses)) => addresses
+                    .into_iter()
+                    .filter(std::net::SocketAddr::is_ipv4)
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
             }
-            Err(e) => {
-                debug!(target: "taiji::core::magnet", host, %e, "bootstrap resolve failed")
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(addresses) = pending.next().await {
+        for address in addresses {
+            if !out.contains(&address) {
+                out.push(address);
             }
         }
     }
     out
 }
 
-/// The dial-dedup check + spawn a metadata peer task (a synchronous
-/// check, asynchronous execution). `source` = the discovery source label
-/// (dht/tracker/lsd; the x.pe direct source appends "xpe"; it goes into
-/// the debug log field and changes no behavior).
+async fn resolve_bootstrap_override(endpoint: &str) -> Vec<std::net::SocketAddr> {
+    if let Ok(address) = endpoint.parse::<std::net::SocketAddr>() {
+        return if address.is_ipv4() {
+            vec![address]
+        } else {
+            Vec::new()
+        };
+    }
+    let Some((host, port)) = endpoint.rsplit_once(':') else {
+        return Vec::new();
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return Vec::new();
+    };
+    let dns = taiji_io::dns::SharedDns::shared_default();
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        dns.resolve_for_transport(host, port),
+    )
+    .await
+    {
+        Ok(Ok(addresses)) => addresses
+            .into_iter()
+            .filter(std::net::SocketAddr::is_ipv4)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
-    reason = "dial bookkeeping handles are passed explicitly; bundling is a later phase"
+    reason = "test adapter preserves the explicit dial identity and lifecycle arguments"
 )]
 fn spawn_dial(
     cfg: &MagnetTaskConfig,
     faces: &[MetaFace],
-    face_i: usize,
-    addr: std::net::SocketAddr,
+    face: usize,
+    address: std::net::SocketAddr,
     source: &'static str,
-    swarm_peers: &Arc<AtomicUsize>,
+    peers: &Arc<AtomicUsize>,
     dialed: &Arc<std::sync::Mutex<HashSet<(usize, std::net::SocketAddr)>>>,
-    dialed_total: &Arc<AtomicUsize>,
-    live: &Arc<std::sync::Mutex<Vec<(usize, PeerTaskHandle)>>>,
-    md_tx: mpsc::Sender<MetadataFetched>,
-    md_token: &CancellationToken,
+    total: &Arc<AtomicUsize>,
+    live: &LivePeers,
+    tx: mpsc::Sender<MetadataFetched>,
+    token: &CancellationToken,
 ) {
-    // Address hygiene (the same rule as the engine, reusing the
-    // single-point predicate): x.pe is a URI-carried untrusted endpoint;
-    // tracker/DHT/LSD discovered addresses are the same kind — v4-mapped
-    // normalization + bogon rejection; a rejected address never enters
-    // the dialed bookkeeping (zero pollution).
-    let Some(addr) = crate::engine::addr_hygiene::sanitize_discovered_addr(addr) else {
-        debug!(target: "taiji::core::magnet", raw = %addr, source,
-            "metadata peer rejected by address hygiene ");
-        return;
-    };
-    // The session-level IpGuard snapshot ban gate — one gate for all four
-    // discovery sources (tracker/DHT/LSD/x.pe); this function is the
-    // single dial choke point. Two independent defense lines with address
-    // hygiene (hygiene = address classification, IpGuard = dynamic
-    // bans); both must pass. A hit = no dial, no bookkeeping/cap
-    // accounting (the next rediscovery round retries naturally; a hot
-    // unban recovers); every check reads the latest arc-swap snapshot —
-    // session hot reloads take effect on live tasks immediately. None =
-    // no gate (existing tests/bare runs unchanged).
-    if let Some(guard) = cfg.ip_guard.as_ref() {
-        if let Some(block) = guard
-            .load()
-            .blocks(addr.ip(), crate::engine::addr_hygiene::epoch_secs())
-        {
-            debug!(target: "taiji::core::magnet", %addr, source, block = %block,
-                "metadata peer dial skipped by IpGuard ");
-            return;
-        }
-    }
-    // Never connect to ourselves (the extended predicate, reusing
-    // addr_hygiene): loopback/unspecified/v4-mapped loopback/the local
-    // interface address set (a snapshot taken at process start) AND the
-    // announce port; the engine's four arms share the rule
-    // (is_self_endpoint).
-    if crate::engine::addr_hygiene::is_self_endpoint(
-        addr,
-        cfg.phase.listen_port,
-        crate::engine::addr_hygiene::LocalIpSet::shared(),
-    ) {
-        return;
-    }
-    {
-        let mut book = crate::lock(dialed);
-        if !book.insert((face_i, addr)) {
-            return; // already dialed
-        }
-    }
-    if dialed_total.load(Ordering::Relaxed) >= cfg.phase.max_metadata_peers {
-        debug!(target: "taiji::core::magnet", %addr, source, cap = cfg.phase.max_metadata_peers,
-            "metadata peer cap reached: discovery result not dialed");
-        // Not occupying bookkeeping (future discovery windows may still
-        // try).
-        let mut book = crate::lock(dialed);
-        book.remove(&(face_i, addr));
-        return;
-    }
-    dialed_total.fetch_add(1, Ordering::Relaxed);
-    debug!(target: "taiji::core::magnet", %addr, source,
-        "metadata peer dial dispatched (discovery source recorded)");
-    let face = &faces[face_i];
-    let face = MetaFace {
-        index: face.index,
-        info_hash: face.info_hash,
-        reserved: face.reserved,
-        expected: face.expected,
-        dht_kind: face.dht_kind,
-    };
-    let swarm_peers = swarm_peers.clone();
-    let dialed = dialed.clone();
-    let dialed_total = dialed_total.clone();
-    let live = live.clone();
-    let token = md_token.child_token();
-    let peer_id = cfg.peer_id;
-    let key = (face_i, addr);
-    let limits = cfg.limiter.clone();
-    tokio::spawn(async move {
-        swarm_peers.fetch_add(1, Ordering::Relaxed);
-        let ok = dial_metadata_peer(addr, &face, peer_id, md_tx, Some(&live), token, limits).await;
-        swarm_peers.fetch_sub(1, Ordering::Relaxed);
-        if !ok {
-            // Dial/handshake failed: leave the bookkeeping (the next
-            // discovery window can retry).
-            crate::lock(&dialed).remove(&key);
-            dialed_total.fetch_sub(1, Ordering::Relaxed);
-        }
-    });
-}
-
-/// Dial + handshake + PeerTask (the ut_metadata request face); returns
-/// whether the connection was established. `live` = when Some, register
-/// the live PeerTask handle into the connection pool (for layer
-/// prefetch). `limits` = the rate-limit topology (None = unmounted; when
-/// mounted, metadata-piece traffic obeys the global/per-task bucket
-/// chain).
-async fn dial_metadata_peer(
-    addr: std::net::SocketAddr,
-    face: &MetaFace,
-    peer_id: [u8; 20],
-    md_tx: mpsc::Sender<MetadataFetched>,
-    live: Option<&LivePeers>,
-    token: CancellationToken,
-    limits: Option<Arc<LimiterSet>>,
-) -> bool {
-    let connect = tokio::net::TcpStream::connect(addr);
-    let stream = match tokio::time::timeout(DIAL_TIMEOUT, connect).await {
-        Ok(Ok(s)) => s,
-        _ => {
-            debug!(target: "taiji::core::magnet", %addr, "metadata peer connect failed");
-            return false;
-        }
-    };
-    let stream = match taiji_bt::peer::handshake_exchange(
-        stream,
-        &face.info_hash,
-        &peer_id,
-        face.reserved,
-        HANDSHAKE_TIMEOUT,
-    )
-    .await
-    {
-        Ok((s, _)) => s,
-        Err(e) => {
-            debug!(target: "taiji::core::magnet", %addr, %e, "metadata peer handshake failed");
-            return false;
-        }
-    };
-    let config = PeerConfig {
-        addressing: taiji_bt::piece_id::Addressing::Flat,
-        ext: taiji_bt::peer::ExtConfig::fetch(MetadataFetchSpec {
-            expected: face.expected,
-            tx: md_tx,
-        }),
-        ..PeerConfig::flat()
-    };
-    let face_index = face.index;
-    // The triple lives for the task lifetime (the md_token close-out
-    // exits all of them); data_rx is dropped (the metadata phase has no
-    // piece space; peer_loop's send side tolerates `let _ =`).
-    // The post-handshake transport stream is rate-limited (None/unlimited
-    // bucket = zero-overhead passthrough).
-    let (handle, _join, _data_rx) =
-        PeerTask::spawn(&token, Throttled::maybe(stream, limits), config);
-    if let Some(pool) = live {
-        crate::lock(pool).push((face_index, handle));
-    }
-    true
+    spawn_dial_with_network(
+        cfg, faces, face, address, source, peers, dialed, total, live, tx, token, None,
+    );
 }
 
 /// The post-metadata close-out: identity review -> rebuild -> verify ->
@@ -1493,6 +1702,8 @@ async fn finalize(
         None => Vec::new(), // bt-load-saved-metadata: the file carries its own piece layers
     };
 
+    drop(phase);
+
     // ---- rebuild + parse verification (incl. v2 layer checks; parses
     // >1MiB go to spawn_blocking) ----
     // The artifact bytes are preserved end to end (the torrent row's
@@ -1525,6 +1736,10 @@ async fn finalize(
         }
     };
 
+    if let Some(services) = &cfg.services {
+        services.remember(magnet.btih, magnet.btmh, &torrent_bytes);
+    }
+
     // ---- bt-save-metadata (before the metadata-only branch, matching the
     // reference order) ----
     if cfg.options.bt_save_metadata {
@@ -1541,15 +1756,19 @@ async fn finalize(
         // async context).
         let write = {
             let path = path.clone();
-            tokio::task::spawn_blocking(move || std::fs::write(&path, &payload)).await
+            tokio::task::spawn_blocking(move || {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, &payload)
+            })
+            .await
         };
         match write {
             Ok(Ok(())) => info!(target: "taiji::core::magnet", path = %path.display(),
                 "metadata saved (bt-save-metadata)"),
-            Ok(Err(e)) => warn!(target: "taiji::core::magnet", path = %path.display(), %e,
-                "metadata save failed (bt-save-metadata)"),
-            Err(e) => warn!(target: "taiji::core::magnet", %e,
-                "metadata save task join failed"),
+            Ok(Err(e)) => return MagnetEnd::Failed(format!("metadata save failed: {e}")),
+            Err(e) => return MagnetEnd::Failed(format!("metadata save task join failed: {e}")),
         }
     }
 
@@ -1619,6 +1838,13 @@ async fn finalize(
     // DhtWireConfig::default() = false — without the passthrough the
     // engine-side DHT stays off).
     engine_cfg.dht.enabled = cfg.dht_enabled;
+    engine_cfg.dht.engine.message_timeout = cfg.dht_message_timeout;
+    if let Some(entry) = cfg.dht_entry_point_override {
+        engine_cfg.dht.entry_points_v4 = vec![entry];
+    }
+    if let Some(entry) = cfg.dht_entry_point_v6_override {
+        engine_cfg.dht.entry_points_v6 = vec![entry];
+    }
     // The webseeding switch passes to the upgraded engine (BEP19; the
     // torrent activation path overwrites at the same point in
     // build_engine_config — per-task `enable-http-seeding` off = clear
@@ -1669,6 +1895,7 @@ async fn finalize(
     // Controlled spawn — the upgrade notification face (the EngineHandle
     // goes to the session, bounded(1) lossy; see
     // spawn_with_upgrade_notify) + the upgraded engine's live readings.
+    engine_cfg.nat = cfg.nat.clone();
     let (upgraded_handle, engine_join) = DownloadEngine::spawn_controlled(
         engine_cfg,
         TrackerWireConfig {
@@ -1681,7 +1908,7 @@ async fn finalize(
         },
         &parent,
         // The outbound transport plan passes with the session options to
-        // the upgraded engine (metadata-phase connections are always TCP —
+        // the upgraded engine (the metadata transport is selected independently —
         // the standalone dial loop has no uTP face; the gap is noted on
         // the option field).
         cfg.options.bt_peer_connection_type,
@@ -1860,7 +2087,11 @@ async fn prefetch_piece_layers(
         let pool = crate::lock(&phase.peers);
         let mut v2: Vec<PeerTaskHandle> = Vec::new();
         let mut rest: Vec<PeerTaskHandle> = Vec::new();
-        for (fi, h) in pool.iter() {
+        for peer in pool.iter() {
+            let (fi, h, token) = (&peer.face, &peer.handle, &peer.token);
+            if token.is_cancelled() {
+                continue;
+            }
             let is_v2 = faces
                 .get(*fi)
                 .map(|f| matches!(f.expected, ExpectedInfoHash::V2(_)))
@@ -2097,6 +2328,13 @@ mod tests {
     #[tokio::test]
     async fn run_fails_fast_on_bad_magnet_uri() {
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: "http://not-a-magnet".into(),
             dest: PathBuf::from("/tmp/taiji-magnet-test"),
@@ -2175,9 +2413,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_fails_fast_when_no_tr_and_no_saved_metadata() {
-        // A pure btmh magnet with no tr: the upgraded torrent would have
-        // no announce -> an explicit failure at creation.
+        // A pure btmh magnet with every discovery source disabled fails
+        // immediately instead of waiting without a path to metadata.
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+        dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: "magnet:?xt=urn:btmh:12203da388b8b84c2a5be2af96f9a2de039f258a9ed45bdf1a219b4fcfc9c8a5885f".into(),
             dest: PathBuf::from("/tmp/taiji-magnet-test"),
@@ -2226,6 +2471,14 @@ mod tests {
     async fn spawn_xpe_metadata_seeder(
         metadata: Arc<Vec<u8>>,
         btih: [u8; 20],
+    ) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+        spawn_metadata_peer(metadata, btih, true).await
+    }
+
+    async fn spawn_metadata_peer(
+        metadata: Arc<Vec<u8>>,
+        btih: [u8; 20],
+        responsive: bool,
     ) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
         use taiji_bt::ut_metadata::{ServeOutcome, UtMetadata, serve_request as ut_serve};
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -2304,6 +2557,9 @@ mod tests {
                         if body[0] != 20 || body.len() < 2 || body[1] != 2 {
                             continue;
                         }
+                        if !responsive {
+                            continue;
+                        }
                         let Ok(UtMetadata::Request { index }) = UtMetadata::decode(&body[2..])
                         else {
                             continue;
@@ -2339,6 +2595,204 @@ mod tests {
         (addr, hits)
     }
 
+    async fn metadata_tracker(peers: Vec<std::net::SocketAddr>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut compact = Vec::new();
+        for peer in peers {
+            let std::net::IpAddr::V4(ip) = peer.ip() else {
+                panic!("v4 fixture")
+            };
+            compact.extend_from_slice(&ip.octets());
+            compact.extend_from_slice(&peer.port().to_be_bytes());
+        }
+        let mut body = format!("d8:intervali3600e5:peers{}:", compact.len()).into_bytes();
+        body.extend(compact);
+        body.push(b'e');
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 1024];
+                    while request.len() < 8192
+                        && !request.windows(4).any(|window| window == b"\r\n\r\n")
+                    {
+                        let Ok(n) = socket.read(&mut buffer).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&buffer[..n]);
+                    }
+                    // A seed-filtering tracker does not return seeds to clients
+                    // claiming to have completed the payload (left=0).
+                    let path = String::from_utf8_lossy(&request)
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string();
+                    let incomplete = path.split_once('?').is_some_and(|(_, query)| {
+                        query.split('&').any(|pair| {
+                            pair.split_once('=').is_some_and(|(key, value)| {
+                                key == "left" && value.parse::<u64>().is_ok_and(|left| left > 0)
+                            })
+                        })
+                    });
+                    let body = if incomplete {
+                        body
+                    } else {
+                        b"d8:intervali3600e5:peers0:e".to_vec()
+                    };
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                });
+            }
+        });
+        format!("http://{address}/announce")
+    }
+
+    pub(super) fn metadata_fixture_config(btih: [u8; 20], directory: PathBuf) -> MagnetTaskConfig {
+        MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
+            gid: gid(),
+            magnet_uri: format!("magnet:?xt=urn:btih:{}", hex_lower(&btih)),
+            dest: directory,
+            peer_id: *b"-TJ0001-METADATAFIX1",
+            options: MagnetOptions {
+                bt_metadata_only: true,
+                bt_save_metadata: true,
+                ..Default::default()
+            },
+            phase: MetadataPhaseConfig {
+                metadata_deadline: Some(Duration::from_secs(8)),
+                ..Default::default()
+            },
+            dht: None,
+            dht_entry_points: vec![],
+            dht_enabled: false,
+            webseeding_enabled: true,
+            lsd: None,
+            seed: SeedPolicy::default(),
+            seed_after_complete: false,
+            persist: None,
+            select_file: None,
+            limiter: None,
+            hook: None,
+            web: None,
+            stats: None,
+            ip_guard: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn tracker_updates_bypass_pending_dht_and_recreate_metadata_directory() {
+        let (_torrent, btih, info) = web_mirror_torrent();
+        let (peer, _) = spawn_xpe_metadata_seeder(Arc::new(info.to_vec()), btih).await;
+        let tracker = metadata_tracker(vec![peer]).await;
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let directory =
+            std::env::temp_dir().join(format!("taiji-metadata-{}", rand::random::<u64>()));
+        let root = CancellationToken::new();
+        let mut cfg = metadata_fixture_config(btih, directory.clone());
+        let (updates, receiver) = tokio::sync::watch::channel(Vec::new());
+        cfg.tracker_updates = Some(receiver);
+        cfg.dht = spawn_phase_dht(root.child_token(), None).await;
+        cfg.dht_entry_points = vec![
+            blackhole
+                .local_addr()
+                .unwrap_or_else(|error| panic!("{error}")),
+        ];
+        cfg.dht_enabled = true;
+        let started = std::time::Instant::now();
+        let handle = tokio::spawn({
+            let root = root.clone();
+            async move { MagnetEngine::spawn(cfg, &root).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        updates.send_replace(vec![(0, tracker)]);
+        let end = tokio::time::timeout(Duration::from_secs(8), handle)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(matches!(end, MagnetEnd::MetadataFetched { .. }), "{end:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "DHT must not delay tracker discovery"
+        );
+        let saved = std::fs::read(directory.join(format!("{}.torrent", hex_lower(&btih))))
+            .unwrap_or_else(|error| panic!("{error}"));
+        let parsed = Metainfo::parse(&saved).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(parsed.info_bytes.as_ref(), info.as_slice());
+        root.cancel();
+        std::fs::remove_dir_all(directory).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[tokio::test]
+    async fn unresponsive_metadata_peer_releases_slot_for_queued_candidate() {
+        let (_torrent, btih, info) = web_mirror_torrent();
+        let (bad, bad_hits) = spawn_metadata_peer(Arc::new(info.to_vec()), btih, false).await;
+        let (good, good_hits) = spawn_xpe_metadata_seeder(Arc::new(info.to_vec()), btih).await;
+        let tracker = metadata_tracker(vec![bad, good]).await;
+        let directory =
+            std::env::temp_dir().join(format!("taiji-metadata-{}", rand::random::<u64>()));
+        let mut cfg = metadata_fixture_config(btih, directory.clone());
+        let (_updates, receiver) = tokio::sync::watch::channel(vec![(0, tracker)]);
+        cfg.tracker_updates = Some(receiver);
+        cfg.phase.max_metadata_peers = 1;
+        cfg.phase.peer_metadata_timeout = Duration::from_millis(300);
+        cfg.phase.discovery_round = Duration::from_secs(30);
+        let root = CancellationToken::new();
+        let end = MagnetEngine::spawn(cfg, &root)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(matches!(end, MagnetEnd::MetadataFetched { .. }), "{end:?}");
+        assert_eq!(bad_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(good_hits.load(Ordering::Relaxed), 1);
+        root.cancel();
+        std::fs::remove_dir_all(directory).unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    #[tokio::test]
+    async fn metadata_save_failure_never_reports_metadata_complete() {
+        let (_torrent, btih, info) = web_mirror_torrent();
+        let (peer, _) = spawn_xpe_metadata_seeder(Arc::new(info.to_vec()), btih).await;
+        let directory =
+            std::env::temp_dir().join(format!("taiji-metadata-file-{}", rand::random::<u64>()));
+        std::fs::write(&directory, b"not a directory").unwrap_or_else(|error| panic!("{error}"));
+        let mut cfg = metadata_fixture_config(btih, directory.clone());
+        cfg.magnet_uri.push_str(&format!("&x.pe={peer}"));
+        let root = CancellationToken::new();
+        let end = MagnetEngine::spawn(cfg, &root)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            matches!(end, MagnetEnd::Failed(ref message) if message.contains("metadata save failed")),
+            "{end:?}"
+        );
+        root.cancel();
+        std::fs::remove_file(directory).unwrap_or_else(|error| panic!("{error}"));
+    }
+
     /// The common face: a magnet (tr = an unreachable tracker + an
     /// optional x.pe direct endpoint) runs MagnetEngine to the
     /// bt-metadata-only terminal; DHT/LSD/web all off — x.pe is the only
@@ -2359,6 +2813,13 @@ mod tests {
             uri.push_str(&format!("&x.pe={a}"));
         }
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: uri,
             dest: PathBuf::from("/tmp/taiji-magnet-xpe-test"),
@@ -2521,6 +2982,13 @@ mod tests {
     async fn spawn_dial_guards_self_connect_and_duplicates() {
         let btih: [u8; 20] = Sha1::digest(b"xpe-guard-test").into();
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: format!("magnet:?xt=urn:btih:{}", hex_lower(&btih)),
             dest: PathBuf::from("/tmp/taiji-magnet-xpe-guard"),
@@ -2560,8 +3028,7 @@ mod tests {
         let dialed: Arc<std::sync::Mutex<HashSet<(usize, std::net::SocketAddr)>>> =
             Arc::new(std::sync::Mutex::new(HashSet::new()));
         let dialed_total = Arc::new(AtomicUsize::new(0));
-        let live: Arc<std::sync::Mutex<Vec<(usize, PeerTaskHandle)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let live: LivePeers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (md_tx, _md_rx) = mpsc::channel(16);
         let token = CancellationToken::new();
         let peer: std::net::SocketAddr =
@@ -2686,6 +3153,13 @@ mod tests {
             "banned address must pass hygiene (this case proves the IpGuard gate works independently)"
         );
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: format!("magnet:?xt=urn:btih:{}", hex_lower(&btih)),
             dest: PathBuf::from("/tmp/taiji-magnet-p125-gate"),
@@ -2723,8 +3197,7 @@ mod tests {
         let dialed: Arc<std::sync::Mutex<HashSet<(usize, std::net::SocketAddr)>>> =
             Arc::new(std::sync::Mutex::new(HashSet::new()));
         let dialed_total = Arc::new(AtomicUsize::new(0));
-        let live: Arc<std::sync::Mutex<Vec<(usize, PeerTaskHandle)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let live: LivePeers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (md_tx, _md_rx) = mpsc::channel(16);
         let token = CancellationToken::new();
 
@@ -2798,6 +3271,13 @@ mod tests {
         let btih: [u8; 20] = Sha1::digest(b"p125-hot-ban").into();
         let guard = IpGuardHandle::new(IpGuard::default());
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: format!("magnet:?xt=urn:btih:{}", hex_lower(&btih)),
             dest: PathBuf::from("/tmp/taiji-magnet-p125-hot"),
@@ -2835,8 +3315,7 @@ mod tests {
         let dialed: Arc<std::sync::Mutex<HashSet<(usize, std::net::SocketAddr)>>> =
             Arc::new(std::sync::Mutex::new(HashSet::new()));
         let dialed_total = Arc::new(AtomicUsize::new(0));
-        let live: Arc<std::sync::Mutex<Vec<(usize, PeerTaskHandle)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let live: LivePeers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (md_tx, _md_rx) = mpsc::channel(16);
         let token = CancellationToken::new();
         let first: std::net::SocketAddr =
@@ -2940,6 +3419,13 @@ mod tests {
             uri.push_str(&format!("&x.pe={a}"));
         }
         let cfg = MagnetTaskConfig {
+            services: None,
+            dht_entry_point_v6_override: None,
+            dht_message_timeout: Duration::from_secs(10),
+            dht_ipv6_enabled: false,
+            tracker_updates: None,
+            nat: None,
+            dht_entry_point_override: None,
             gid: gid(),
             magnet_uri: uri,
             dest: PathBuf::from("/tmp/taiji-magnet-p125-e2e"),
@@ -3054,14 +3540,11 @@ mod tests {
         // table); the hanging node is skipped (not blocking).
         assert_eq!(
             out,
-            vec![
-                std::net::SocketAddr::new(
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)),
-                    6881
-                );
-                taiji_bt::dht::DEFAULT_BOOTSTRAP_NODES.len() - 1
-            ],
-            "only the hanging node is missing"
+            vec![std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)),
+                6881
+            )],
+            "healthy nodes are retained and duplicate addresses are deduplicated"
         );
         assert!(
             elapsed < Duration::from_secs(5),

@@ -908,6 +908,8 @@ fn bep21_flags_encode_table() {
             addr: v4([203, 0, 113, 10], 6881),
             encrypted: PrefersEncryption::Yes,
             upload_only: UploadOnly::Yes,
+            supports_utp: false,
+            supports_holepunch: false,
         },
         t0,
     );
@@ -1008,4 +1010,17 @@ fn bep21_flags_roundtrip_all_combinations() {
             );
         }
     }
+}
+
+#[test]
+fn transport_capabilities_survive_pex_wire_roundtrip() {
+    let now = Instant::now();
+    let mut message = PexMessage::new();
+    let peer = PexPeer::new(v4([10, 0, 0, 1], 40000), UploadOnly::Yes).with_transport_flags(0x0c);
+    assert!(message.add_fresh_peer(&PexCandidate::fresh(peer, now), now));
+    let bytes = ok(message.encode(), "encode capabilities");
+    let decoded = ok(PexMessage::decode(&bytes), "decode capabilities");
+    let peer = &decoded.fresh_peers()[0];
+    assert!(peer.supports_utp);
+    assert!(peer.supports_holepunch);
 }

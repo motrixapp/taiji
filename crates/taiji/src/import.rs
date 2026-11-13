@@ -95,6 +95,9 @@ pub struct ImportArgs {
     /// only after the automatic backup).
     #[arg(long)]
     dry_run: bool,
+    /// Preserve the existing Motrix task identity during an engine replacement.
+    #[arg(long)]
+    preserve_gids: bool,
     /// Explicit responsibility flag (preflight layer 3): when the fork
     /// live-fd scan cannot prove the old version is closed (platform
     /// unsupported, lsof missing, other "cannot prove" states), the
@@ -147,6 +150,15 @@ pub async fn run(args: ImportArgs) -> i32 {
         eprintln!("error: nothing to import (give --from-aria2-db and/or --from-aria2-dir)");
         return 1;
     }
+
+    let _target_lock = if args.dry_run {
+        None
+    } else {
+        match crate::http::acquire_db_lock(&args.sqlite3_db_path).await {
+            Ok(guard) => Some(guard),
+            Err(code) => return code,
+        }
+    };
 
     // ---- 0) Same-path guard: if `--sqlite3-db-path` and `--from-aria2-db`
     // canonicalize to the same file, the source database would be
@@ -228,6 +240,16 @@ pub async fn run(args: ImportArgs) -> i32 {
             }
         }
     }
+    let http_state = match args.from_aria2_db.clone() {
+        Some(path) => match import_http::read_fork_http_state(path).await {
+            Ok(state) => state,
+            Err(error) => {
+                eprintln!("error: cannot read legacy HTTP state: {error}");
+                return 1;
+            }
+        },
+        None => import_http::ForkHttpState::default(),
+    };
     let mut recon = None;
     if let Some(dir) = args.from_aria2_dir.clone() {
         match import::collect_ctrl_tasks(dir.clone()).await {
@@ -353,6 +375,44 @@ pub async fn run(args: ImportArgs) -> i32 {
     // A snapshot read failure (e.g. session_kv missing) means dedup
     // cross-validation is unavailable — the whole dry run is refused
     // explicitly, not degraded to "nothing imported yet".
+    let occupied_gids = if args.preserve_gids && target_exists {
+        let target = args.sqlite3_db_path.clone();
+        match tokio::task::spawn_blocking(
+            move || -> Result<std::collections::HashSet<String>, rusqlite::Error> {
+                let db = rusqlite::Connection::open_with_flags(
+                    target,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                let mut ids = std::collections::HashSet::new();
+                for table in ["torrent", "http_task", "media_task"] {
+                    let exists: bool = db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                        [table],
+                        |row| row.get(0),
+                    )?;
+                    if !exists {
+                        continue;
+                    }
+                    let mut query = db.prepare(&format!("SELECT gid FROM {table}"))?;
+                    for id in query.query_map([], |row| row.get::<_, String>(0))? {
+                        ids.insert(id?);
+                    }
+                }
+                Ok(ids)
+            },
+        )
+        .await
+        {
+            Ok(Ok(ids)) => ids,
+            _ => {
+                eprintln!("error: cannot inspect target identities safely");
+                return 1;
+            }
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
+
     let target_snapshot = if args.dry_run && target_exists {
         let mut keys: Vec<String> = bt_entries
             .iter()
@@ -483,7 +543,19 @@ pub async fn run(args: ImportArgs) -> i32 {
                 continue;
             }
         };
-        let gid_hex = gid_alloc.allocate().to_string();
+        let gid_hex = if args.preserve_gids {
+            task.fork_gid
+                .clone()
+                .unwrap_or_else(|| gid_alloc.allocate().to_string())
+        } else {
+            gid_alloc.allocate().to_string()
+        };
+        if args.preserve_gids
+            && (occupied_gids.contains(&gid_hex) || !valid_preserved_gid(&gid_hex))
+        {
+            eprintln!("error: preserved task identity conflicts with the target session");
+            return 1;
+        }
         let input = AssembleInput {
             source: task.source.clone(),
             source_key: task.source_key.clone(),
@@ -548,7 +620,7 @@ pub async fn run(args: ImportArgs) -> i32 {
                 // Failed on the real-import face, never silently degraded
                 // to "not imported" (live-row overwrite risk; a dry-run
                 // None is the snapshot key face).
-                let imported = match &writer {
+                let mut imported = match &writer {
                     Some(w) => match w.get_kv(&t.source_key).await {
                         Ok(v) => v,
                         Err(e) => {
@@ -578,7 +650,57 @@ pub async fn run(args: ImportArgs) -> i32 {
                         .cloned()
                         .flatten(),
                 };
-                let gid_hex = gid_alloc.allocate().to_string();
+                let gid_hex = if args.preserve_gids {
+                    t.fork_gid
+                        .clone()
+                        .unwrap_or_else(|| gid_alloc.allocate().to_string())
+                } else {
+                    gid_alloc.allocate().to_string()
+                };
+                if args.preserve_gids && imported.is_none() {
+                    if let Some(writer) = &writer {
+                        match writer.load_http_task(&gid_hex).await {
+                            Ok(Some(snapshot)) => {
+                                let config: serde_json::Value =
+                                    serde_json::from_str(&snapshot.row.config_json)
+                                        .unwrap_or_default();
+                                if config.get("origin_fork_key").and_then(|v| v.as_str())
+                                    == Some(t.source_key.as_str())
+                                {
+                                    if let Err(error) = import_http::restore_imported_http_state(
+                                        writer,
+                                        &snapshot.row,
+                                        t.fork_gid.as_deref().unwrap_or(""),
+                                        &http_state,
+                                    )
+                                    .await
+                                    {
+                                        eprintln!(
+                                            "error: interrupted HTTP adoption cannot resume: {error}"
+                                        );
+                                        return 1;
+                                    }
+                                    if writer.put_kv(&t.source_key, &gid_hex).await.is_err() {
+                                        return 1;
+                                    }
+                                    imported = Some(gid_hex.clone());
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                eprintln!("error: target identity lookup failed: {error}");
+                                return 1;
+                            }
+                        }
+                    }
+                }
+                if args.preserve_gids
+                    && imported.is_none()
+                    && (occupied_gids.contains(&gid_hex) || !valid_preserved_gid(&gid_hex))
+                {
+                    eprintln!("error: preserved task identity conflicts with the target session");
+                    return 1;
+                }
                 match planner.plan(HttpPlanInput {
                     task: t,
                     gid_hex,
@@ -868,7 +990,8 @@ pub async fn run(args: ImportArgs) -> i32 {
             }
         }
     }
-    let applied_http = import_http::apply_http_import(&writer, &planned_http).await;
+    let applied_http =
+        import_http::apply_http_import_with_state(&writer, &planned_http, &http_state).await;
     for (p, a) in planned_http.iter().zip(&applied_http) {
         match &a.error {
             Some(e) => {
@@ -1227,6 +1350,12 @@ async fn run_purge(url: &str, gids: &[String]) -> Result<(), String> {
         .map_err(|e| format!("purgeDownloadResult: {e}"))?;
     println!("aria2 purge done: {removed} active removed, results purged");
     Ok(())
+}
+
+fn valid_preserved_gid(gid: &str) -> bool {
+    gid.len() == 16
+        && gid.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && u64::from_str_radix(gid, 16).is_ok_and(|raw| raw != 0)
 }
 
 #[cfg(test)]

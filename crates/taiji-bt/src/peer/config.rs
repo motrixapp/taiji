@@ -163,6 +163,8 @@ pub struct PeerConfig {
     /// seeding-state transitions = [`PeerCommand::SetUploadOnly`].
     /// Default false (downloading).
     pub upload_only: bool,
+    /// Actual advertised peer-listener port (0 omits the BEP10 p field).
+    pub listen_port: u16,
     /// Inbound mirror of the peer's BEP21 upload_only: the `upload_only`
     /// advertisement in the peer's ext handshake (seeding/partial
     /// seeding — "Setting the value of this key to 1 indicates that this
@@ -318,6 +320,7 @@ impl PeerConfig {
             remote_ip: None,
             ext: ExtConfig::default(),
             upload_only: false,
+            listen_port: 0,
             super_seed: None,
             holepunch: None,
             client_deny: None,
@@ -390,9 +393,10 @@ pub struct PexEvent {
     /// Source connection of the report (the engine locates the owning
     /// torrent by it).
     pub from: u64,
-    /// `added`/`added6` (fresh; decode ignores added.f — frozen
-    /// semantics).
+    /// `added`/`added6` endpoint compatibility view.
     pub fresh: Vec<std::net::SocketAddr>,
+    /// Transport capabilities retained from BEP11 added.f.
+    pub capabilities: Vec<crate::pex::PexPeer>,
     /// `dropped`/`dropped6`.
     pub dropped: Vec<std::net::SocketAddr>,
 }

@@ -131,7 +131,14 @@ async fn remove_and_force_remove_publish_stop_without_spurious_error() {
 /// Error.
 #[tokio::test]
 async fn error_event_published_on_explicit_failure() {
-    let (handle, join) = SessionActor::spawn();
+    let (handle, join) = SessionActor::spawn_with(SessionOptions {
+        global: GlobalOptions {
+            enable_dht: false,
+            enable_dht6: false,
+            bt_lsd: false,
+            ..Default::default()
+        },
+    });
     let mut rx = handle.subscribe_events();
     let magnet = SessionCommand::AddUri {
         uris: vec!["magnet:?xt=urn:btih:1111111111111111111111111111111111111111".into()],

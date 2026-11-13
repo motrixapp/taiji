@@ -51,6 +51,10 @@ impl GidAllocator {
     /// Record a foreign GID as used (avoids re-issuing after persisted
     /// recovery: the session-recovery startup paths call this for every
     /// restored torrent/http row before rebuilding it).
+    pub fn reserve_unique(&mut self, raw: u64) -> bool {
+        self.used.insert(raw)
+    }
+
     pub fn reserve(&mut self, raw: u64) {
         self.used.insert(raw);
     }

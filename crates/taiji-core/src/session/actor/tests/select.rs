@@ -181,12 +181,14 @@ async fn selected_truth_projection_waiting_live_stopped_and_restore() {
     let bytes_b = multi_file_v1_torrent_with_pad(&dead_tracker(), "sel-b");
     let bytes_c = multi_file_v1_torrent_with_pad(&dead_tracker(), "sel-c");
     let cfg_base = || PersistedTaskConfig {
+        magnet_flags: None,
         dir: dir.display().to_string(),
         ..PersistedTaskConfig::default()
     };
     // Construct cfg.selected_files = Some(..) directly (partial
     // selection).
     let cfg_a = PersistedTaskConfig {
+        magnet_flags: None,
         selected_files: Some(vec![0, 2]),
         file_priorities: None,
         ..cfg_base()
@@ -209,6 +211,7 @@ async fn selected_truth_projection_waiting_live_stopped_and_restore() {
         "the so= parse channel's single-source anchor"
     );
     let cfg_b = PersistedTaskConfig {
+        magnet_flags: None,
         magnet_uri: Some(uri_b),
         selected_files: sel_b,
         file_priorities: None,
@@ -391,6 +394,7 @@ async fn selected_truth_projection_waiting_live_stopped_and_restore() {
     {
         let conn = ok(rusqlite::Connection::open(&db), "open for cfg rewrite");
         let cfg_c2 = PersistedTaskConfig {
+            magnet_flags: None,
             selected_files: Some(vec![2]),
             file_priorities: None,
             ..cfg_base()

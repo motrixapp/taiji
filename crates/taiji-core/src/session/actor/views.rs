@@ -25,6 +25,11 @@ impl SessionActor {
     /// Base view for the waiting/metadata stages (no live readings;
     /// full fields once metadata is available).
     pub(super) fn base_status_view(&self, gid: Gid, status: StatusKind) -> TorrentStatusView {
+        let status = if self.queue.startup_held.contains_key(&gid) {
+            StatusKind::Paused
+        } else {
+            status
+        };
         let mut view = TorrentStatusView::minimal(gid, status, 0, 0);
         // aria2 isSeeder: always false with no piece storage (the
         // "false" key is always present).
@@ -122,6 +127,7 @@ impl SessionActor {
             }
             None => {}
         }
+        resolve_file_paths(&view.dir, &mut view.files);
         view
     }
 
@@ -229,10 +235,11 @@ impl SessionActor {
                     .as_ref()
                     .map(|m| crate::lock(m).out.clone())
                     .filter(|o| !o.is_empty());
-                hj.dir
-                    .join(planned.or_else(|| hj.out.clone()).unwrap_or_default())
-                    .display()
-                    .to_string()
+                planned
+                    .or_else(|| hj.out.clone())
+                    .filter(|name| !name.is_empty())
+                    .map(|name| hj.dir.join(name).display().to_string())
+                    .unwrap_or_default()
             });
         let uris = live
             .map(|l| l.source_uris())
@@ -284,6 +291,7 @@ impl SessionActor {
             let checked = sink.load(std::sync::atomic::Ordering::Relaxed);
             view.completed_length = (checked.saturating_mul(piece_len)).min(total);
         }
+        resolve_file_paths(&view.dir, &mut view.files);
         view
     }
 
@@ -425,6 +433,7 @@ impl SessionActor {
         if let Ok(peers) = engine.query_peers_summary().await {
             view.num_seeders = peers.iter().filter(|p| p.seeder).count() as u64;
         }
+        resolve_file_paths(&view.dir, &mut view.files);
         view
     }
 
@@ -438,6 +447,7 @@ impl SessionActor {
     pub(super) async fn seeding_live_view(&mut self, gid: Gid) -> TorrentStatusView {
         let mut view = self.live_status_view(gid).await;
         view.status = StatusKind::Seeding;
+        resolve_file_paths(&view.dir, &mut view.files);
         view
     }
 
@@ -623,6 +633,7 @@ impl SessionActor {
             }
             None => {}
         }
+        resolve_file_paths(&e.dir, &mut e.files);
         e
     }
 }
@@ -833,4 +844,16 @@ pub(super) fn torrent_bittorrent_view(tj: &TorrentJob) -> BittorrentView {
 pub(super) fn random_session_id() -> String {
     let bytes: [u8; 16] = rand::random();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn resolve_file_paths(dir: &str, files: &mut [super::super::view::FileEntryView]) {
+    let root = std::path::Path::new(dir);
+    if !root.is_absolute() {
+        return;
+    }
+    for file in files {
+        if !file.path.is_empty() && !std::path::Path::new(&file.path).is_absolute() {
+            file.path = root.join(&file.path).display().to_string();
+        }
+    }
 }

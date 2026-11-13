@@ -4013,7 +4013,7 @@ fn http_task_option_tables_match_parsers() {
                     )
                     .is_err()
                     && http_task_runtime_options(
-                        &opts_of("max-connection-per-server", "17"),
+                        &opts_of("max-connection-per-server", "65"),
                         &http_task::HttpTaskOpts::default(),
                     )
                     .is_err()

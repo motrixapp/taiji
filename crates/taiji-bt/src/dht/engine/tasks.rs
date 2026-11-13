@@ -217,10 +217,20 @@ impl DhtEngine {
                 }
             }
             Task::Lookup(l) => {
-                if let LookupKind::Peers {
-                    announce_port: Some(port),
-                } = l.kind
-                {
+                // Read the live registry: a task can withdraw or change its
+                // mapped port while this query is still in flight.
+                let announce_port = self
+                    .our_announces
+                    .get(&l.target)
+                    .filter(|entry| {
+                        matches!(l.kind, LookupKind::Peers { .. })
+                            && (l.kind.announces()
+                                || entry
+                                    .last_announced
+                                    .is_none_or(|last| last < entry.last_requested))
+                    })
+                    .map(|entry| entry.port);
+                if let Some(port) = announce_port {
                     let mut sent = 0usize;
                     for (node, token) in l.announce_targets() {
                         // BEP42 enforcement: never store on a node whose id

@@ -73,6 +73,8 @@ pub enum PeerCommand {
     /// re-read the key; the libtorrent equivalent is
     /// `torrent::send_upload_only`'s state-change broadcast, torrent.cpp).
     SetUploadOnly(bool),
+    /// Refresh the advertised listener after a NAT mapping changes.
+    SetListenPort(u16),
     /// Attach BEP-16 super-seeding bookkeeping: issued by the engine when
     /// entering seeding state or when a new connection registers while
     /// seeding; Some = enable the request-serving gate (libtorrent

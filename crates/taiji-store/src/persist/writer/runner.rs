@@ -175,6 +175,15 @@ fn writer_loop(
             PersistJob::LoadTorrentsAtStartup { reply } => {
                 let _ = reply.send(load_torrents_at_startup(&conn));
             }
+            PersistJob::LoadTaskGids { reply } => {
+                let result = (|| -> Result<Vec<String>, StoreError> {
+                    let mut stmt = conn.prepare("SELECT gid FROM torrent UNION SELECT gid FROM http_task UNION SELECT gid FROM media_task")?;
+                    Ok(stmt
+                        .query_map([], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?)
+                })();
+                let _ = reply.send(result);
+            }
             PersistJob::LoadMaxQueuePos { reply } => {
                 let _ = reply.send(load_max_queue_pos(&conn));
             }

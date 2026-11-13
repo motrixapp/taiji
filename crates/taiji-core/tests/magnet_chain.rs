@@ -595,6 +595,13 @@ fn test_config(
     options: MagnetOptions,
 ) -> MagnetTaskConfig {
     MagnetTaskConfig {
+        services: None,
+        dht_entry_point_v6_override: None,
+        dht_message_timeout: Duration::from_secs(10),
+        dht_ipv6_enabled: false,
+        tracker_updates: None,
+        nat: None,
+        dht_entry_point_override: None,
         gid,
         magnet_uri,
         dest,
@@ -603,6 +610,7 @@ fn test_config(
         phase: MetadataPhaseConfig {
             listen_port,
             max_metadata_peers: 4,
+            peer_metadata_timeout: Duration::from_secs(10),
             discovery_round: Duration::from_millis(400),
             metadata_deadline: Some(Duration::from_secs(25)),
             // Bootstrap wait budget — short on the test face (entry
@@ -612,6 +620,7 @@ fn test_config(
             dht_bootstrap_budget: Duration::from_millis(300),
         },
         dht: dht.map(|handle| taiji_core::magnet::DhtLease {
+            extra_handles: Vec::new(),
             handle,
             events: dht_events.unwrap_or_else(|| mpsc::channel(64).1),
         }),

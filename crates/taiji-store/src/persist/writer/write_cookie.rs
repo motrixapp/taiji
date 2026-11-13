@@ -259,9 +259,14 @@ pub(super) fn sweep_task_cookies(
         let is_error = phase == TaskPhase::Error;
         let state = phase.as_v1_str();
         for parent in ["http_task", "media_task"] {
+            let retention = if parent == "http_task" && is_error {
+                "AND COALESCE(CASE WHEN json_valid(t.config_json) THEN json_extract(t.config_json,'$.retain_request_context') ELSE 0 END,0) != 1"
+            } else {
+                ""
+            };
             let sql = format!(
                 "SELECT c.gid, c.task_kind, COUNT(*) FROM task_cookie c
-                 JOIN {parent} t ON t.gid = c.gid AND t.state = ?1
+                 JOIN {parent} t ON t.gid = c.gid AND t.state = ?1 {retention}
                  GROUP BY c.gid, c.task_kind"
             );
             let mut stmt = tx.prepare(&sql)?;
@@ -289,20 +294,12 @@ pub(super) fn sweep_task_cookies(
     // The terminal set binds as parameters (the vocabulary's terminal
     // derivation); both family subqueries share the same word set, so
     // the parameter iterator chains it twice.
-    let terminal_states = TaskPhase::terminal_words();
-    let placeholders = terminal_states
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
     let terminal = tx.execute(
-        &format!(
-            "DELETE FROM task_cookie WHERE gid IN (
-                 SELECT gid FROM http_task WHERE state IN ({placeholders}))
-             OR gid IN (
-                 SELECT gid FROM media_task WHERE state IN ({placeholders}))"
-        ),
-        rusqlite::params_from_iter(terminal_states.iter().chain(terminal_states.iter())),
+        "DELETE FROM task_cookie WHERE gid IN (
+             SELECT gid FROM http_task WHERE state = ?1 OR (state = ?2 AND
+             COALESCE(CASE WHEN json_valid(config_json) THEN json_extract(config_json,'$.retain_request_context') ELSE 0 END,0) != 1))
+         OR gid IN (SELECT gid FROM media_task WHERE state IN (?1, ?2))",
+        params![TaskPhase::Done.as_v1_str(), TaskPhase::Error.as_v1_str()],
     )?;
     tx.commit()?;
     debug_assert_eq!(

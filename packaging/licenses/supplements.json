@@ -1,0 +1,72 @@
+{
+  "lazy-regex-proc_macros@3.6.1": [
+    {
+      "file": "lazy-regex-proc_macros-3.6.1-LICENSE",
+      "source": "https://github.com/Canop/lazy-regex/blob/39a459c01e1ba2488075be50a821e2d72e466241/LICENSE"
+    }
+  ],
+  "suppaftp@12.1.1": [
+    {
+      "file": "suppaftp-12.1.1-LICENSE-MIT",
+      "source": "https://github.com/veeso/suppaftp/blob/c5d0e1adc7dc90926e4290fee782c38e3b088af6/LICENSE-MIT"
+    },
+    {
+      "file": "suppaftp-12.1.1-LICENSE-APACHE",
+      "source": "https://github.com/veeso/suppaftp/blob/c5d0e1adc7dc90926e4290fee782c38e3b088af6/LICENSE-APACHE"
+    }
+  ],
+  "genawaiter@0.99.1": [
+    {
+      "upstreamMissingText": true,
+      "source": "https://github.com/whatisaphone/genawaiter/tree/b7e93c2d444a5c63e94e14f6809c8dc27785c1c7",
+      "note": "Upstream publishes the license declaration and package author in Cargo.toml but supplies no LICENSE or copyright notice in this crate or source revision. This notice records that omission; it does not replace or modify the upstream license."
+    }
+  ],
+  "genawaiter-macro@0.99.1": [
+    {
+      "upstreamMissingText": true,
+      "source": "https://github.com/whatisaphone/genawaiter/tree/f48046a9f66fbd2e535d5614fa7fe0d0b1a6a046",
+      "note": "Upstream publishes the license declaration and package author in Cargo.toml but supplies no LICENSE or copyright notice in this crate or source revision. This notice records that omission; it does not replace or modify the upstream license."
+    }
+  ],
+  "jni@0.22.4": [
+    {
+      "file": "jni-0.22.4-LICENSE-APACHE",
+      "source": "https://github.com/jni-rs/jni-rs/blob/5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7/LICENSE-APACHE"
+    },
+    {
+      "file": "jni-0.22.4-LICENSE-MIT",
+      "source": "https://github.com/jni-rs/jni-rs/blob/5ae9458a4ec44c5318f37ddc7569c1d4ae8a69e7/LICENSE-MIT"
+    }
+  ],
+  "jni-macros@0.22.4": [
+    {
+      "file": "jni-macros-0.22.4-LICENSE-APACHE",
+      "source": "https://github.com/jni-rs/jni-rs/blob/33045a124105c939d1e2cbdcb5a39e5d868ffa03/LICENSE-APACHE"
+    },
+    {
+      "file": "jni-macros-0.22.4-LICENSE-MIT",
+      "source": "https://github.com/jni-rs/jni-rs/blob/33045a124105c939d1e2cbdcb5a39e5d868ffa03/LICENSE-MIT"
+    }
+  ],
+  "jni-sys-macros@0.4.1": [
+    {
+      "file": "jni-sys-macros-0.4.1-LICENSE-APACHE",
+      "source": "https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-APACHE"
+    },
+    {
+      "file": "jni-sys-macros-0.4.1-LICENSE-MIT",
+      "source": "https://github.com/jni-rs/jni-sys/blob/64d77b7a5f119d7b55b4e2c169a4668067ff59e6/LICENSE-MIT"
+    }
+  ],
+  "rustls-platform-verifier-android@0.2.0": [
+    {
+      "file": "rustls-platform-verifier-android-0.2.0-LICENSE-APACHE",
+      "source": "https://github.com/rustls/rustls-platform-verifier/blob/252e25161a91af476cbea620e29d277592d27ec7/LICENSE-APACHE"
+    },
+    {
+      "file": "rustls-platform-verifier-android-0.2.0-LICENSE-MIT",
+      "source": "https://github.com/rustls/rustls-platform-verifier/blob/252e25161a91af476cbea620e29d277592d27ec7/LICENSE-MIT"
+    }
+  ]
+}

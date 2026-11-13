@@ -336,6 +336,7 @@ fn move_fifo<T: FifoMember>(
 pub(crate) struct QueueMan {
     reserved: VecDeque<ReservedEntry>,
     active: BTreeMap<Gid, ActiveRecord>,
+    metadata_only: std::collections::HashSet<Gid>,
     /// On-disk recheck-in-flight bookkeeping: gid -> paused intent.
     /// Tasks under verification **occupy no concurrency slot and cannot
     /// be activated by fillup** (engine assembly reads the bitmap from
@@ -397,6 +398,7 @@ pub(crate) struct QueueMan {
     /// [`ActiveRecord::pause_epoch`]/[`SeedingRecord::pause_epoch`]
     /// snapshot this at request time; finalization compares.
     pause_intent_epoch: u64,
+    pub(crate) startup_held: BTreeMap<Gid, bool>,
 }
 
 impl QueueMan {
@@ -404,6 +406,7 @@ impl QueueMan {
         QueueMan {
             reserved: VecDeque::new(),
             active: BTreeMap::new(),
+            metadata_only: std::collections::HashSet::new(),
             checking: BTreeMap::new(),
             check_pending: VecDeque::new(),
             seeding: BTreeMap::new(),
@@ -414,6 +417,7 @@ impl QueueMan {
             max_results: MAX_DOWNLOAD_RESULT,
             num_stopped_total: 0,
             pause_intent_epoch: 0,
+            startup_held: BTreeMap::new(),
         }
     }
 
@@ -543,16 +547,20 @@ impl QueueMan {
     /// front, order preserved.
     pub(crate) fn fillup(&mut self, max_concurrent: usize) -> Vec<Gid> {
         let mut to_spawn = Vec::new();
-        if max_concurrent <= self.active.len() {
+        let active = self.active_payload_len();
+        if max_concurrent <= active {
             return to_spawn;
         }
-        let mut budget = max_concurrent - self.active.len();
+        let mut budget = max_concurrent - active;
         let mut pending: Vec<ReservedEntry> = Vec::new();
         while budget > 0 {
             let Some(entry) = self.reserved.pop_front() else {
                 break;
             };
-            if entry.paused {
+            if entry.paused
+                || self.startup_held.contains_key(&entry.gid)
+                || self.metadata_only.contains(&entry.gid)
+            {
                 // keepRunning (RPC session) && pauseRequested ->
                 // pending.
                 pending.push(entry);
@@ -568,6 +576,42 @@ impl QueueMan {
             self.reserved.push_front(entry);
         }
         to_spawn
+    }
+
+    pub(crate) fn set_metadata_only(&mut self, ids: impl IntoIterator<Item = Gid>) {
+        self.metadata_only = ids.into_iter().collect();
+    }
+    pub(crate) fn active_payload_len(&self) -> usize {
+        self.active
+            .keys()
+            .filter(|gid| !self.metadata_only.contains(gid))
+            .count()
+    }
+    /// Metadata-only jobs cannot start payload, so their bounded queue is
+    /// independent of download slots. Pause and startup holds still dominate.
+    pub(crate) fn fillup_metadata(&mut self, limit: usize) -> Vec<Gid> {
+        let running = self
+            .active
+            .keys()
+            .filter(|gid| self.metadata_only.contains(gid))
+            .count();
+        let mut budget = limit.saturating_sub(running);
+        let mut spawn = Vec::new();
+        self.reserved.retain(|entry| {
+            if budget > 0
+                && self.metadata_only.contains(&entry.gid)
+                && !entry.paused
+                && !self.startup_held.contains_key(&entry.gid)
+            {
+                self.active.insert(entry.gid, ActiveRecord::default());
+                spawn.push(entry.gid);
+                budget -= 1;
+                false
+            } else {
+                true
+            }
+        });
+        spawn
     }
 
     // ---- active face ----
@@ -887,7 +931,11 @@ impl QueueMan {
         if self.checking_len() >= budget {
             return None;
         }
-        self.check_pending.pop_front()
+        let index = self
+            .check_pending
+            .iter()
+            .position(|entry| !self.startup_held.contains_key(&entry.gid))?;
+        self.check_pending.remove(index)
     }
 
     // ---- seed pool (seeding residence + seed_wait) ----
@@ -1038,7 +1086,11 @@ impl QueueMan {
         if budget > 0 && self.seeding_len() >= budget {
             return None;
         }
-        let gid = self.seed_wait.pop_front()?;
+        let index = self
+            .seed_wait
+            .iter()
+            .position(|gid| !self.startup_held.contains_key(gid))?;
+        let gid = self.seed_wait.remove(index)?;
         self.seeding.insert(gid, SeedingRecord::default());
         Some(gid)
     }
@@ -1096,7 +1148,10 @@ impl QueueMan {
     /// trailing pump_all).
     pub(crate) fn proc_wait_front(&self) -> Option<Gid> {
         let head = self.proc_wait.front()?;
-        if head.pause_requested || head.remove_requested {
+        if head.pause_requested
+            || head.remove_requested
+            || self.startup_held.contains_key(&head.gid)
+        {
             return None;
         }
         Some(head.gid)
@@ -2771,5 +2826,75 @@ mod bt_queue_caps {
         }
         assert_eq!(q.reserved_entries().len(), 3);
         assert_eq!(q.reserved_entries()[0].gid, Gid::from_u64(0));
+    }
+}
+
+#[cfg(test)]
+mod startup_hold_tests {
+    use super::*;
+    #[test]
+    fn restored_jobs_do_not_enter_any_pool_until_authorized() {
+        let mut queue = QueueMan::new();
+        let download = Gid::from_u64(1);
+        let check = Gid::from_u64(2);
+        let seed = Gid::from_u64(3);
+        queue.insert_reserved(
+            ReservedEntry {
+                gid: download,
+                paused: false,
+            },
+            None,
+        );
+        queue.insert_check_pending(check, false);
+        queue.push_seed_wait(seed);
+        for gid in [download, check, seed] {
+            queue.startup_held.insert(gid, true);
+        }
+        assert!(queue.fillup(5).is_empty());
+        assert!(queue.admit_next_check(5).is_none());
+        assert!(queue.admit_next_seed(0).is_none());
+        let fresh = Gid::from_u64(4);
+        queue.insert_reserved(
+            ReservedEntry {
+                gid: fresh,
+                paused: false,
+            },
+            None,
+        );
+        assert_eq!(queue.fillup(5), vec![fresh]);
+        queue.startup_held.remove(&check);
+        assert_eq!(queue.admit_next_check(5).map(|e| e.gid), Some(check));
+        assert!(queue.admit_next_seed(0).is_none());
+        assert_eq!(queue.startup_held.get(&download), Some(&true));
+    }
+}
+
+#[cfg(test)]
+mod metadata_queue_tests {
+    use super::*;
+    #[test]
+    fn metadata_has_separate_bounded_capacity_and_obeys_pause_and_startup_holds() {
+        let mut q = QueueMan::new();
+        let ids: Vec<_> = (1..=8).map(Gid::from_u64).collect();
+        for (i, gid) in ids.iter().enumerate() {
+            q.insert_reserved(
+                ReservedEntry {
+                    gid: *gid,
+                    paused: i == 6,
+                },
+                None,
+            );
+        }
+        q.set_metadata_only(ids[1..].iter().copied());
+        q.startup_held.insert(ids[7], true);
+        assert_eq!(q.fillup(1), vec![ids[0]]);
+        assert_eq!(q.fillup_metadata(4), ids[1..5]);
+        assert!(q.fillup_metadata(4).is_empty());
+        assert_eq!(q.active_payload_len(), 1);
+        assert!(q.fillup(1).is_empty());
+        q.active.remove(&ids[1]);
+        assert_eq!(q.fillup_metadata(4), vec![ids[5]]);
+        assert!(q.reserved.iter().any(|e| e.gid == ids[6] && e.paused));
+        assert!(q.startup_held.contains_key(&ids[7]));
     }
 }

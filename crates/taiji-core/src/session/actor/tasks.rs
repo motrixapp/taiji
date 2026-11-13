@@ -14,6 +14,26 @@ use super::*;
 use crate::session::queue::RetireOutcome;
 
 impl SessionActor {
+    fn allocate_task_gid(
+        &mut self,
+        options: &BTreeMap<String, String>,
+    ) -> Result<Gid, SessionError> {
+        let Some(value) = options.get("gid") else {
+            return Ok(self.gid.allocate());
+        };
+        if value.len() != 16 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(SessionError::failed(
+                "gid must contain 16 hexadecimal characters",
+            ));
+        }
+        let raw =
+            u64::from_str_radix(value, 16).map_err(|_| SessionError::failed("invalid gid"))?;
+        if raw == 0 || !self.gid.reserve_unique(raw) {
+            return Err(SessionError::failed("gid is already in use or zero"));
+        }
+        Ok(Gid::from_u64(raw))
+    }
+
     /// Activate a queue item: spawn the engine / magnet full chain /
     /// metadata fetch per payload.
     /// `reuse` is the existing task token carried over by the URL metadata
@@ -148,7 +168,15 @@ impl SessionActor {
                 // singleton supervisor; None = both switches off — the
                 // existing nat: None shape is unchanged). Field-disjoint
                 // borrow, same discipline as self.global.
-                let nat_engine = self.nat.as_ref().map(|s| s.engine());
+                let network = crate::nat::PeerNetworkBinding::new(rand::random());
+                let nat_engine = Some(
+                    network.observe(
+                        self.nat
+                            .as_ref()
+                            .map(|s| s.engine())
+                            .unwrap_or_else(|| network.engine()),
+                    ),
+                );
                 // Announce client option snapshot (`--bt-tracker-interval`
                 // / `--bt-tracker-timeout` / `--bt-tracker-connect-timeout`
                 // injected from global options; taken before the
@@ -170,6 +198,7 @@ impl SessionActor {
                 // default (zero change when unset).
                 let peer_exchange = self.global.enable_peer_exchange;
                 let dht_entry_point = self.global.dht_entry_point.clone();
+                let dht_entry_point6 = self.global.dht_entry_point6.clone();
                 let dht_message_timeout = self.global.dht_message_timeout;
                 let built = tokio::task::spawn_blocking(move || {
                     build_engine_config(
@@ -295,6 +324,9 @@ impl SessionActor {
                 if let Some(ep) = dht_entry_point {
                     config.dht.entry_points_v4 = vec![ep];
                 }
+                if let Some(ep) = dht_entry_point6 {
+                    config.dht.entry_points_v6 = vec![ep];
+                }
                 config.dht.engine.message_timeout =
                     std::time::Duration::from_secs(dht_message_timeout);
                 let (engine, join) = DownloadEngine::spawn_controlled(
@@ -393,6 +425,7 @@ impl SessionActor {
                 self.running.insert(
                     gid,
                     RunningTask {
+                        network: Some(network),
                         token,
                         backend: TaskBackend::Engine {
                             engine,
@@ -541,24 +574,25 @@ impl SessionActor {
                 // phase lease and the upgraded engine agree.
                 let task_dht_enabled =
                     self.global.enable_dht && !mj.bt_disable_dht.unwrap_or(false);
-                let dht_lease = if task_dht_enabled {
-                    // Restored state: the session dht_state row (aria2's
-                    // single DHTRegistry semantics — the metadata phase
-                    // reuses the persisted routing-table cache; decode
-                    // failure = bootstrap from zero, load_dht_restore_state
-                    // already degrades by the rule).
-                    let restore = match self.persist.as_ref() {
-                        Some(h) => {
-                            crate::engine::load_dht_restore_state(h, taiji_bt::dht::DhtFamily::V4)
-                                .await
-                        }
-                        None => None,
-                    };
-                    crate::magnet::spawn_phase_dht(token.clone(), restore).await
-                } else {
-                    None
-                };
+                let dht_lease = None;
+                let tiers = merge_global_trackers(&mj.tiers, &self.global.bt_tracker);
+                let (tracker_updates, tracker_receiver) =
+                    tokio::sync::watch::channel(tiers.clone());
+                let network = crate::nat::PeerNetworkBinding::new(rand::random());
+                let nat_engine = network.observe(
+                    self.nat
+                        .as_ref()
+                        .map(|s| s.engine())
+                        .unwrap_or_else(|| network.engine()),
+                );
                 let cfg = MagnetTaskConfig {
+                    services: Some(self.magnet_services.clone()),
+                    dht_entry_point_v6_override: self.global.dht_entry_point6.clone(),
+                    dht_message_timeout: Duration::from_secs(self.global.dht_message_timeout),
+                    dht_ipv6_enabled: self.global.enable_dht6,
+                    nat: Some(nat_engine),
+                    tracker_updates: Some(tracker_receiver),
+                    dht_entry_point_override: self.global.dht_entry_point.clone(),
                     gid,
                     magnet_uri: mj.magnet_uri.clone(),
                     dest: mj.dest.clone(),
@@ -593,6 +627,11 @@ impl SessionActor {
                     // engine's actual bound port).
                     phase: crate::magnet::MetadataPhaseConfig {
                         listen_port: self.global.listen_port,
+                        max_metadata_peers: if self.global.bt_max_peers == 0 {
+                            32
+                        } else {
+                            self.global.bt_max_peers.min(32)
+                        },
                         ..crate::magnet::MetadataPhaseConfig::default()
                     },
                     seed: mj.seed.clone(),
@@ -679,11 +718,14 @@ impl SessionActor {
                 self.running.insert(
                     gid,
                     RunningTask {
+                        network: Some(network),
                         token,
                         // The metadata phase has no live handle (the upgrade
                         // notification swaps in the Engine in place).
-                        backend: TaskBackend::Metadata,
-                        tiers: Vec::new(),
+                        backend: TaskBackend::Metadata {
+                            tracker_updates: Some(tracker_updates),
+                        },
+                        tiers,
                         total_len: 0,
                         abort: Some(abort),
                         limiter: Some(limiter),
@@ -725,10 +767,13 @@ impl SessionActor {
                 self.running.insert(
                     gid,
                     RunningTask {
+                        network: None,
                         token,
                         // The fetch phase has no live handle (the upgrade
                         // swaps in the Engine in place).
-                        backend: TaskBackend::Metadata,
+                        backend: TaskBackend::Metadata {
+                            tracker_updates: None,
+                        },
                         tiers: Vec::new(),
                         total_len: 0,
                         // A metadata fetch task has no engine to abort;
@@ -764,6 +809,8 @@ impl SessionActor {
                     && let Ok(Some(snap)) = p.load_http_task(&gid.to_string()).await
                 {
                     hj.cookies = snap.cookies;
+                    // The durable set replaces intake seeds, not supplements them.
+                    hj.cookie_seed.clear();
                 }
                 debug!(target: "taiji::core::session", gid = %gid,
                     load_us = load_t0.elapsed().as_micros() as u64,
@@ -817,6 +864,29 @@ impl SessionActor {
                 // capture keeps absorbing into the same store.
                 let task_cookies = taiji_http::cookies::CookieStore::new();
                 task_cookies.seed(hj.cookie_seed.iter().cloned());
+                let mut opts = hj.opts.clone();
+                if hj.restore.as_ref().is_some_and(|row| {
+                    let cfg = http_task::HttpPersistConfig::from_json(&row.config_json);
+                    cfg.retain_request_context || cfg.origin_fork_key.is_some()
+                }) {
+                    opts.runtime_defaults = self
+                        .global
+                        .motrix_http_defaults
+                        .iter()
+                        .filter(|(key, _)| {
+                            matches!(
+                                key.as_str(),
+                                "all-proxy"
+                                    | "http-proxy"
+                                    | "https-proxy"
+                                    | "ftp-proxy"
+                                    | "no-proxy"
+                                    | "user-agent"
+                            )
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                }
                 let run = http_task::HttpTaskRun {
                     gid,
                     uris: hj.uris.clone(),
@@ -826,7 +896,7 @@ impl SessionActor {
                     row_mirror: hj.mirror.clone(),
                     cookies: hj.cookies.clone(),
                     task_cookies,
-                    opts: hj.opts.clone(),
+                    opts,
                     per_host: self.http_per_host.clone(),
                     queue_pos: self.row_seq(),
                     persist: self.persist.clone(),
@@ -900,6 +970,7 @@ impl SessionActor {
                 self.running.insert(
                     gid,
                     RunningTask {
+                        network: None,
                         token,
                         // The driver trio assembled at once (live readings /
                         // row mirror / pause flag — spawn_http_task returns
@@ -982,6 +1053,7 @@ impl SessionActor {
             self.running.insert(
                 gid,
                 RunningTask {
+                    network: None,
                     token: token_clone,
                     backend: TaskBackend::Media { live, pause },
                     tiers: Vec::new(),
@@ -1156,6 +1228,27 @@ impl SessionActor {
             .running
             .get(&gid)
             .and_then(|t| t.backend.http_row().cloned());
+        // Error outcomes carry no counters. Project the durable checkpoint,
+        // not zero, after the driver has flushed its retained failure row.
+        let total_len = total_len.max(
+            http_live
+                .as_ref()
+                .map(|live| live.total_len.load(std::sync::atomic::Ordering::Relaxed))
+                .unwrap_or(0),
+        );
+        let completed = if is_http
+            && status == StatusKind::Error
+            && !engine_code
+                .as_ref()
+                .is_some_and(|failure| failure.code == "taiji.http.checksum_mismatch")
+        {
+            http_mirror
+                .as_ref()
+                .map(|mirror| crate::lock(mirror).total_done.max(0) as u64)
+                .unwrap_or(completed)
+        } else {
+            completed
+        };
         if is_http {
             let pending = http_live
                 .as_ref()
@@ -2162,7 +2255,7 @@ impl SessionActor {
         // est=0 (the magnet precedent; the staging quota governs the
         // disk face at admission).
         self.check_queue_admission(0)?;
-        let gid = self.gid.allocate();
+        let gid = self.allocate_task_gid(&options)?;
         cfg.gid = gid.to_string();
         // Structured cookies land in the unified table at creation
         // (persist-first): task_kind=media, the whole
@@ -2246,7 +2339,7 @@ impl SessionActor {
         &mut self,
         uris: Vec<String>,
         cookies: Vec<crate::session::command::TaskCookieSpec>,
-        options: BTreeMap<String, String>,
+        mut options: BTreeMap<String, String>,
         position: Option<usize>,
     ) -> Result<CommandReply, SessionError> {
         if uris.is_empty() {
@@ -2267,16 +2360,21 @@ impl SessionActor {
             ));
         }
         let seed = cookies_from_specs(&cookies);
+        options.insert("motrix-task-cookie-scope".into(), "true".into());
         self.add_uri_inner(uris, options, position, seed).await
     }
 
     async fn add_uri_inner(
         &mut self,
         uris: Vec<String>,
-        options: BTreeMap<String, String>,
+        mut options: BTreeMap<String, String>,
         position: Option<usize>,
         cookie_seed: Vec<taiji_http::cookies::NetscapeCookie>,
     ) -> Result<CommandReply, SessionError> {
+        let explicit_options: std::collections::BTreeSet<_> = options.keys().cloned().collect();
+        for (key, value) in &self.global.motrix_http_defaults {
+            options.entry(key.clone()).or_insert_with(|| value.clone());
+        }
         if uris.is_empty() {
             return Err(SessionError::failed("URI is not provided."));
         }
@@ -2321,13 +2419,15 @@ impl SessionActor {
                     "duplicate download: magnet identity already registered",
                 ));
             }
-            let gid = self.gid.allocate();
+            let gid = self.allocate_task_gid(&options)?;
             let tr_tiers: Vec<(usize, String)> = parsed
                 .tr
                 .iter()
                 .enumerate()
                 .map(|(i, t)| (i, String::from_utf8_lossy(t).into_owned()))
                 .collect();
+            let tr_tiers =
+                merge_global_trackers(&tr_tiers, patch.bt_tracker.as_deref().unwrap_or(&[]));
             // Task-final hook set (global + per-task overrides, fixed at
             // add time).
             let hooks = resolve_hook_set(&self.global, &patch);
@@ -2335,7 +2435,18 @@ impl SessionActor {
             // to the metadata state, SPEC §5.4; the identity column carries
             // the magnet's dual identities).
             let mut cfg = self.patch_config(&patch);
+            cfg.holepunch = options
+                .get("motrix-metadata-holepunch")
+                .is_none_or(|value| value != "false");
             cfg.magnet_uri = Some(uri.clone());
+            let metadata_options = MagnetOptions {
+                holepunch: cfg.holepunch,
+                ..magnet_options_from_patch(&patch, self.global.bt_peer_connection_type)
+            };
+            cfg.magnet_flags = Some(crate::session::persist::PersistedMagnetFlags::from(
+                &metadata_options,
+            ));
+            cfg.tiers = tr_tiers.clone();
             // BEP53: selection persisted with config_json (pushed to the
             // engine via SetFileSelection at activation/restore). The
             // select-file option value (0-based, mutually exclusive with
@@ -2371,7 +2482,7 @@ impl SessionActor {
                 Job::Magnet(Box::new(MagnetJob {
                     magnet_uri: uri.clone(),
                     dest: patch.dir.clone().unwrap_or_else(|| self.global.dir.clone()),
-                    options: magnet_options_from_patch(&patch, self.global.bt_peer_connection_type),
+                    options: metadata_options,
                     seed: self.seed_policy_from(&patch),
                     btih: parsed.btih,
                     btmh: parsed.btmh,
@@ -2409,7 +2520,10 @@ impl SessionActor {
             .collect();
         // `.torrent` URL metadata path (Phase A semantics): a single-URL
         // placeholder task, upgraded in place to a torrent after fetch.
-        if let Some(url) = http_like.iter().find(|u| is_torrent_url(u)) {
+        if let Some(url) = http_like.iter().find(|u| is_torrent_url(u))
+            && patch.follow_torrent != Some(false)
+            && patch.bt_metadata_only != Some(true)
+        {
             // select-file: 1-based syntax parse + 0-based conversion at a
             // single point (same as the magnet arm; metadata unknown →
             // range validation deferred to the upgrade chain — the same
@@ -2422,7 +2536,7 @@ impl SessionActor {
             // fetch cap (30MiB) as the worst case before fetching; the
             // upgrade arm re-checks with real values.
             self.check_queue_admission(taiji_bt::tracker::http::TORRENT_FETCH_MAX_BODY_BYTES)?;
-            let gid = self.gid.allocate();
+            let gid = self.allocate_task_gid(&options)?;
             // Task-final hook set (global + per-task overrides, fixed at
             // add time).
             let hooks = resolve_hook_set(&self.global, &patch);
@@ -2492,7 +2606,7 @@ impl SessionActor {
                  and http(s) .torrent URLs",
             ));
         };
-        let gid = self.gid.allocate();
+        let gid = self.allocate_task_gid(&options)?;
         let hooks = resolve_hook_set(&self.global, &patch);
         // Submission instant (the ChainTrace t0 anchor): the start of the
         // queued/activation segment.
@@ -2509,7 +2623,11 @@ impl SessionActor {
         // leaves zero mutations (the same discipline as out sanitization /
         // host_cap).
         let structured_seed = cookie_seed;
-        let cookie_seed = if !structured_seed.is_empty() {
+        let cookie_seed = if !structured_seed.is_empty()
+            || options
+                .get("motrix-task-cookie-scope")
+                .is_some_and(|value| value == "true")
+        {
             structured_seed
         } else if let Some(path) = options.get("load-cookies").filter(|v| !v.trim().is_empty()) {
             load_cookie_seed(path.trim()).await?
@@ -2532,7 +2650,25 @@ impl SessionActor {
         // (the driver's completion-time verdict / resume share the same
         // source). The add-path baseline is the defaults (a new task has no
         // prior payload to merge).
-        let http_cfg = http_task_options(&options, &http_task::HttpPersistConfig::default())?;
+        let mut http_cfg = http_task_options(&options, &http_task::HttpPersistConfig::default())?;
+        if options
+            .get("http-resume-context")
+            .is_some_and(|value| value == "true")
+        {
+            http_cfg.retain_request_context = true;
+            http_cfg.imported_options = Some(
+                options
+                    .iter()
+                    .filter(|(key, _)| {
+                        explicit_options.contains(*key)
+                            && super::HTTP_TASK_OPTION_TABLE
+                                .iter()
+                                .any(|decl| decl.face.import_fold && decl.name == key.as_str())
+                    })
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            );
+        }
         // Runtime option face: timeouts / credentials / proxy / UA / header
         // / certificate faces.
         let http_opts = http_task_runtime_options(&options, &http_task::HttpTaskOpts::default())?;
@@ -2637,6 +2773,40 @@ impl SessionActor {
             updated_at: now_epoch(),
         };
         self.persist_http_row(&row).await;
+        // Persist initial cookies before admission. A fast failure or a paused
+        // task may never reach the periodic cookie write-back tick.
+        if !cookie_seed.is_empty() {
+            if let Some(persist) = &self.persist {
+                let rows = cookie_seed
+                    .iter()
+                    .map(|c| taiji_store::persist::TaskCookieRow {
+                        gid: gid.to_string(),
+                        task_kind: taiji_store::persist::TASK_KIND_HTTP.into(),
+                        name: c.name.clone(),
+                        domain: c.domain.clone(),
+                        path: c.path.clone(),
+                        value: c.value.clone(),
+                        expires_utc: c.expires,
+                        secure: c.secure,
+                        host_only: c.host_only,
+                        creation_utc: now_epoch(),
+                    })
+                    .collect();
+                if let Err(error) = persist
+                    .upsert_task_cookies(
+                        &gid.to_string(),
+                        taiji_store::persist::TASK_KIND_HTTP,
+                        rows,
+                    )
+                    .await
+                {
+                    let _ = persist.delete_http_task(&gid.to_string()).await;
+                    return Err(SessionError::failed(format!(
+                        "HTTP cookie persist failed: {error}"
+                    )));
+                }
+            }
+        }
         // Cap effect face: the session registry mutates only after all
         // rejection faces pass and the row is persisted. The value domain
         // is pinned ≤ u32::MAX at parse time (a CLI-same-domain explicit
@@ -2714,7 +2884,7 @@ impl SessionActor {
             let raw = torrent.clone();
             tokio::task::spawn_blocking(move || Metainfo::parse(&raw)).await
         };
-        let meta = parsed
+        let mut meta = parsed
             .map_err(|e| SessionError::failed(format!("metainfo parse join failed: {e}")))?
             .map_err(|e| SessionError::failed(format!("BitTorrent metainfo parse failed: {e}")))?;
         // Intake gate (flipped): no tracker and DHT off = accept + WARN
@@ -2733,6 +2903,8 @@ impl SessionActor {
             ));
         }
         let patch = parse_task_options(&options);
+        let output_paths = super::output_paths::parse(&options, meta.meta.files.len())?;
+        super::output_paths::apply(&mut meta, &output_paths)?;
         // select-file (accepted on aria2's INITIAL face): 1-based syntax
         // parse + 0-based conversion at one point (options::
         // parse_select_file) → metadata known → range validation immediate
@@ -2765,7 +2937,7 @@ impl SessionActor {
         self.check_queue_admission(meta.resident_estimate_bytes())?;
         let total_len = meta.meta.total_len();
         let tiers = tiers_from_metainfo(&meta);
-        let gid = self.gid.allocate();
+        let gid = self.allocate_task_gid(&options)?;
         // Task-final hook set (global + per-task overrides, fixed at add
         // time).
         let hooks = resolve_hook_set(&self.global, &patch);
@@ -2775,6 +2947,7 @@ impl SessionActor {
         // BEP53 selection persisted with config_json (the restore chain
         // backfills TorrentJob.selected_files via lifecycle::bootstrap).
         cfg.selected_files = selected_files.clone();
+        cfg.output_paths = output_paths;
         let meta = Arc::new(meta);
         let mut row = super::super::persist::torrent_row(
             &gid.to_string(),
@@ -2825,28 +2998,16 @@ impl SessionActor {
                 enable_http_seeding: patch.enable_http_seeding,
             })),
         );
-        // An externally complete payload (every file in the dir matches the
-        // torrent's per-file lengths) → schedule an initial full recheck
-        // (the crash_recovery recheck shape — session::recheck writes the
-        // verified bitfield back to the progress row) and then requeue for
-        // activation. The previous path enqueued directly: during engine
-        // assembly the progress row had no bitfield → re-downloaded from
-        // zero, status stayed active and completedLength stayed 0 —
-        // external seeds could never seed (measured on a real swarm). During
-        // the recheck the task enters checking bookkeeping (fillup skips it
-        // + row state 'checking'), then requeues at the head per the paused
-        // intent. Edges: a paused acceptance does not recheck (the normal
-        // activation path); a partial payload (length mismatch / missing
-        // files) keeps the current from-zero download (spec scope = a
-        // complete payload); no persistence skips it (the recheck bitfield's
-        // only consumer is the progress row — pointless without a DB, no
-        // fake).
-        if !patch.pause
-            && self.persist.is_some()
+        // Explicit integrity checks apply to paused intake as well: Motrix
+        // registers ownership before unpausing, and existing bytes must be
+        // verified before the first payload download. Preserve the caller's
+        // pause intent throughout the check and subsequent seed admission.
+        let check_integrity = options.get("check-integrity").is_some_and(|v| v == "true");
+        if self.persist.is_some()
             && total_len > 0
-            && Self::payload_complete(&dir, &meta.meta)
+            && (check_integrity || (!patch.pause && Self::payload_complete(&dir, &meta.meta)))
         {
-            self.park_check(gid, false).await;
+            self.park_check(gid, patch.pause).await;
         } else {
             self.enqueue(gid, patch.pause, position);
         }
@@ -3328,6 +3489,9 @@ impl SessionActor {
     /// removing is rejected for both). Success persists the row state
     /// paused.
     pub(super) async fn pause(&mut self, gid: Gid) -> Result<CommandReply, SessionError> {
+        if let Some(resume) = self.queue.startup_held.get_mut(&gid) {
+            *resume = false;
+        }
         match self.queue.find(gid) {
             Some(Location::Active) => {
                 if self.queue.request_pause(gid) {
@@ -3446,6 +3610,26 @@ impl SessionActor {
     /// arm (a failed task may re-enter the probe queue; previously a failed
     /// task could only be deleted and re-added).
     pub(super) async fn unpause(&mut self, gid: Gid) -> Result<CommandReply, SessionError> {
+        if self.queue.startup_held.remove(&gid).is_some()
+            && !matches!(
+                self.queue.find(gid),
+                Some(Location::ReservedPaused | Location::CheckingPaused)
+            )
+        {
+            return Ok(CommandReply::Gid(gid));
+        }
+        if self.queue.find(gid).is_none() {
+            if let Some(persist) = &self.persist {
+                if let Ok(Some(snapshot)) = persist.load_http_task(&gid.to_string()).await {
+                    if snapshot.row.state == "error"
+                        && http_task::HttpPersistConfig::from_json(&snapshot.row.config_json)
+                            .retain_request_context
+                    {
+                        return self.unpause_http_result(gid).await;
+                    }
+                }
+            }
+        }
         match self.queue.find(gid) {
             // Complete-content provenance (§4.1.3 — the
             // park/unpark round trip): a paused task whose measured
@@ -3708,6 +3892,15 @@ impl SessionActor {
         let Some(p) = self.persist.clone() else {
             return;
         };
+        if error_form && task_kind == "http" {
+            if let Ok(Some(snapshot)) = p.load_http_task(&gid.to_string()).await {
+                if http_task::HttpPersistConfig::from_json(&snapshot.row.config_json)
+                    .retain_request_context
+                {
+                    return;
+                }
+            }
+        }
         let count = if error_form {
             match p.load_task_cookies(&gid.to_string()).await {
                 Ok(rows) => rows.len() as u64,
@@ -3850,31 +4043,34 @@ impl SessionActor {
         // set (an error-only history still puts its root on the radar
         // so genuine orphans next to it are swept).
         let mut swept = 0usize;
-        match persist.load_media_task_gc_refs().await {
-            Ok(gc_refs) => {
-                let mut roots: std::collections::BTreeSet<PathBuf> =
-                    std::collections::BTreeSet::new();
-                let live_gids: Vec<&str> = gc_refs.iter().map(|(gid, _)| gid.as_str()).collect();
-                for (_, staging_dir) in &gc_refs {
-                    if let Some(parent) = PathBuf::from(staging_dir).parent() {
-                        roots.insert(parent.to_path_buf());
+        if !self.global.motrix_startup_hold {
+            match persist.load_media_task_gc_refs().await {
+                Ok(gc_refs) => {
+                    let mut roots: std::collections::BTreeSet<PathBuf> =
+                        std::collections::BTreeSet::new();
+                    let live_gids: Vec<&str> =
+                        gc_refs.iter().map(|(gid, _)| gid.as_str()).collect();
+                    for (_, staging_dir) in &gc_refs {
+                        if let Some(parent) = PathBuf::from(staging_dir).parent() {
+                            roots.insert(parent.to_path_buf());
+                        }
+                    }
+                    for root in &roots {
+                        let orphans = taiji_media::gc_orphan_gids(root, &live_gids);
+                        swept += orphans.len();
+                    }
+                    if swept > 0 {
+                        info!(target: "taiji::core::session", swept,
+                        "media staging startup GC: orphan gid directories removed");
                     }
                 }
-                for root in &roots {
-                    let orphans = taiji_media::gc_orphan_gids(root, &live_gids);
-                    swept += orphans.len();
-                }
-                if swept > 0 {
-                    info!(target: "taiji::core::session", swept,
-                        "media staging startup GC: orphan gid directories removed");
-                }
-            }
-            Err(e) => {
-                // Fail-closed the safe way: sweep nothing (deleting a
-                // live task's staging on a read error is the §7 bug in
-                // another coat).
-                warn!(target: "taiji::core::session", %e,
+                Err(e) => {
+                    // Fail-closed the safe way: sweep nothing (deleting a
+                    // live task's staging on a read error is the §7 bug in
+                    // another coat).
+                    warn!(target: "taiji::core::session", %e,
                     "staging GC liveness read failed; startup GC skipped");
+                }
             }
         }
         let mut reserved: Vec<(i64, Gid, bool)> = Vec::new();
@@ -3902,6 +4098,9 @@ impl SessionActor {
                     false
                 }
             };
+            if self.global.motrix_startup_hold {
+                self.queue.startup_held.insert(gid, !paused);
+            }
             let mut cfg = crate::session::media::media_config_from_row(&row);
             cfg.gid = gid.to_string();
             cfg.persist = self.persist.clone();

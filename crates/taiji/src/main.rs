@@ -3117,6 +3117,7 @@ fn build_idle_options(
         enable_peer_exchange: cli.enable_peer_exchange,
         enable_dht6: cli.enable_dht6,
         dht_entry_point: cli.dht_entry_point.clone(),
+        dht_entry_point6: cli.dht_entry_point6.clone(),
         dht_message_timeout: cli.dht_message_timeout,
         // The --stop shutdown deadline (the Duration parsed in run;
         // the three-form shutdown select shares the arm — None here, the
@@ -3259,6 +3260,7 @@ struct IdleOptions {
     /// `--dht-entry-point` (None = the SPEC §6.7 router fallback
     /// constants).
     dht_entry_point: Option<String>,
+    dht_entry_point6: Option<String>,
     /// `--dht-message-timeout` (the DHT transaction timeout seconds;
     /// default 10).
     dht_message_timeout: u64,
@@ -3280,6 +3282,8 @@ impl IdleOptions {
     ) -> taiji_core::session::SessionOptions {
         taiji_core::session::SessionOptions {
             global: taiji_core::session::GlobalOptions {
+                motrix_startup_hold: std::env::var("MOTRIX_TAIJI_STARTUP_HOLD").as_deref()
+                    == Ok("1"),
                 dir: self.dir.clone(),
                 rpc_secret: cfg.secret.clone(),
                 rpc_user: cfg.rpc_user.clone(),
@@ -3384,6 +3388,7 @@ impl IdleOptions {
                 enable_peer_exchange: self.enable_peer_exchange,
                 enable_dht6: self.enable_dht6,
                 dht_entry_point: self.dht_entry_point.clone(),
+                dht_entry_point6: self.dht_entry_point6.clone(),
                 dht_message_timeout: self.dht_message_timeout,
                 ..Default::default()
             },
@@ -4316,7 +4321,7 @@ async fn open_persist_writer(
         Ok((h, j)) => (Some(h), Some(j)),
         Err(e) => {
             error!(target: "taiji::cli", %e, "cannot open session db; running WITHOUT persistence");
-            (None, None)
+            std::process::exit(1);
         }
     }
 }
@@ -5297,6 +5302,31 @@ async fn run_download_with_rpc(
 }
 
 pub(crate) async fn wait_shutdown_signal() {
+    tokio::select! {
+        _ = wait_os_shutdown_signal() => {},
+        _ = wait_parent_stdin() => {},
+    }
+}
+
+async fn wait_parent_stdin() {
+    if std::env::var("MOTRIX_TAIJI_PARENT_PIPE").as_deref() != Ok("1") {
+        std::future::pending::<()>().await;
+        return;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // A detached OS thread avoids Tokio's non-cancellable blocking-stdin
+    // runtime shutdown. Closing the parent-owned pipe is the crash fence.
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut input = std::io::stdin().lock();
+        let mut byte = [0u8; 1];
+        while matches!(input.read(&mut byte), Ok(n) if n > 0) {}
+        let _ = tx.send(());
+    });
+    let _ = rx.await;
+}
+
+async fn wait_os_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};

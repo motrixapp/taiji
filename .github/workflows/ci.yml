@@ -69,6 +69,7 @@ jobs:
             || { echo "rqbit download kept failing (not an ELF)"; exit 1; }
           chmod +x /usr/local/bin/rqbit
           rqbit --version
+      - run: python3 -m unittest discover -s packaging -p '*_test.py'
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The live two-process differential defaults red without the fork

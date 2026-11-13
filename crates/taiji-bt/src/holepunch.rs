@@ -363,6 +363,20 @@ impl HolepunchBook {
     /// cuid)` (and records the backoff); otherwise None (out-of-window asks
     /// are ignored, not re-queued — libtorrent fires and forgets at its
     /// trigger point, `peer_connection.cpp`).
+    pub fn failed_targets(&mut self, now: Instant) -> Vec<SocketAddr> {
+        self.prune(now);
+        self.failed.keys().copied().collect()
+    }
+    pub fn remove_introducer(&mut self, connection: u64) {
+        self.introduced.retain(|_, (from, _)| *from != connection);
+    }
+    pub fn introducer(&mut self, address: &SocketAddr, now: Instant) -> Option<u64> {
+        self.prune(now);
+        if !self.failed.contains_key(address) {
+            return None;
+        }
+        self.introduced.get(address).map(|(from, _)| *from)
+    }
     pub fn rendezvous_target(&mut self, addr: &SocketAddr, now: Instant) -> Option<u64> {
         self.prune(now);
         if !self.failed.contains_key(addr) {

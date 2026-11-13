@@ -225,3 +225,8 @@ Payload uniformly `{"jsonrpc":"2.0","method":"…","params":[{"gid":"<hex16>"}]}
 `--max-concurrent-seeds`, `--max-concurrent-checks`,
 `--media-synthesis-concurrency` (the four-pool budget trio — taiji
 extensions, see the differential declaration §3).
+
+## HTTP publication
+
+See [HTTP publication](http-publication.md) for `taiji.getHttpOutput`,
+`taiji.finalizeHttp`, `taiji.onHttpOutputReady`, and the fixed host contract.

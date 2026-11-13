@@ -193,3 +193,8 @@ tellStatus 轮询语义），会话数据库与任务行和 RPC 面完全同构 
 `--max-concurrent-seeds`、`--max-concurrent-checks`、
 `--media-synthesis-concurrency`（四池预算三件套 —— taiji 扩展，见差分
 声明 §3）。
+
+## HTTP 文件收尾
+
+`taiji.getHttpOutput`、`taiji.finalizeHttp`、`taiji.onHttpOutputReady`
+及固定宿主接口见[HTTP 文件收尾](http-publication.zh-CN.md)。

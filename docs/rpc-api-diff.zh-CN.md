@@ -395,7 +395,7 @@
 
 - **`http` 子字典**（taiji 扩展；fork 侧缺席）：`finalUrl`/`connections`/
   `extentsActive`/`blocksDone`/`blocksTotal`/`encoding`（未设置 = 键
-  缺席）/`renamePending`/`sources[{url,rate,state}]`。锚点：
+  缺席）/`renamePending`/`hostControlled`/`sources[{url,rate,state}]`。锚点：
   `taiji-rpc::dispatch::view`（`status_entry_json`）。
 - **`media` 子字典**（taiji 扩展；fork 侧缺席 —— 已声明字段）：`kind`
   （`hls`）/ `phase`（media §3.2 值域：queued|resolving|downloading|

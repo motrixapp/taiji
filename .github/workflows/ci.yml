@@ -115,8 +115,13 @@ jobs:
         shell: pwsh
         run: |
           $binary = "target/x86_64-pc-windows-msvc/debug/taiji.exe"
-          & $binary --version
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "cannot read workspace version" }
+          $version = ($metadata.packages | Where-Object { $_.name -eq 'taiji' }).version
+          $expectedVersion = "taiji/$version"
+          $reportedVersion = & $binary --version
           if ($LASTEXITCODE -ne 0) { throw "sidecar startup failed: $LASTEXITCODE" }
+          if ($reportedVersion.Trim() -ne "taiji $expectedVersion") { throw "unexpected CLI version: $reportedVersion" }
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $dumpbin = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
           if (!$dumpbin) { throw "dumpbin is unavailable" }
@@ -143,7 +148,7 @@ jobs:
               if ($process.HasExited) { throw "sidecar exited: $($process.ExitCode)" }
               try {
                 $reply = Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' -Body $request -TimeoutSec 2
-                if ($reply.result.version -eq 'taiji/0.2.0') { $ready = $true; break }
+                if ($reply.result.version -eq $expectedVersion) { $ready = $true; break }
               } catch { Start-Sleep -Milliseconds 200 }
             }
             if (!$ready) { throw "RPC readiness timed out" }

@@ -3,6 +3,8 @@ import argparse
 import hashlib
 import json
 import tempfile
+import tarfile
+import zipfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -65,6 +67,25 @@ class AssemblyTest(unittest.TestCase):
         self.assertEqual(set(records), {p.name for p in output.iterdir()} - {"SHA256SUMS"})
         for name, digest in records.items():
             self.assertEqual(digest, hashlib.sha256((output / name).read_bytes()).hexdigest())
+
+    def test_zip_and_tar_preserve_the_same_platform_directory(self):
+        directory = self.root / "taiji-sidecar-windows-x64"
+        directory.mkdir()
+        (directory / "taiji.exe").write_bytes(b"binary")
+        (directory / "SHA256SUMS").write_text("checksum")
+        expected = {f"{directory.name}/taiji.exe": b"binary",
+                    f"{directory.name}/SHA256SUMS": b"checksum"}
+        for extension in ("zip", "tar.gz"):
+            destination = self.root / f"sidecar.{extension}"
+            assemble.archive_sidecar(directory, destination)
+            if extension == "zip":
+                with zipfile.ZipFile(destination) as archive:
+                    actual = {name: archive.read(name) for name in archive.namelist()}
+            else:
+                with tarfile.open(destination) as archive:
+                    actual = {member.name: archive.extractfile(member).read()
+                              for member in archive.getmembers() if member.isfile()}
+            self.assertEqual(actual, expected)
 
     def test_license_paths_cannot_escape_package(self):
         package = self.root / "dependency"

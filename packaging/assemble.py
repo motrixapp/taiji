@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
+import zipfile
 
 
 def run(*args):
@@ -38,6 +40,19 @@ def license_files(package):
     return sorted(
         path for path in candidates if path.is_file() and root in path.parents
     )
+
+
+def archive_sidecar(directory, destination):
+    """Keep the platform directory in both ZIP and tar archives."""
+    if destination.name.endswith(".zip"):
+        with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for file in sorted(directory.iterdir()):
+                archive.write(file, f"{directory.name}/{file.name}")
+    elif destination.name.endswith(".tar.gz"):
+        with tarfile.open(destination, "w:gz") as archive:
+            archive.add(directory, arcname=directory.name)
+    else:
+        raise ValueError("Unsupported sidecar archive format")
 
 
 def assemble(args):
@@ -172,4 +187,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     for option in ("target", "platform", "binary", "output", "version"):
         parser.add_argument(f"--{option}", required=True)
-    assemble(parser.parse_args())
+    parser.add_argument("--archive")
+    arguments = parser.parse_args()
+    assemble(arguments)
+    if arguments.archive:
+        archive_sidecar(Path(arguments.output), Path(arguments.archive))

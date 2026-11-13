@@ -164,12 +164,8 @@ jobs:
             --target "${{ matrix.target }}" \
             --platform "${{ matrix.platform }}" \
             --binary "target/${{ matrix.target }}/release/${{ matrix.bin }}" \
-            --output "${dir}"
-          if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            7z a "${{ matrix.artifact }}" "./${dir}"/*
-          else
-            tar -czf "${{ matrix.artifact }}" "./${dir}"/*
-          fi
+            --output "${dir}" \
+            --archive "${{ matrix.artifact }}"
 
       # actions/upload-artifact v4.6.2 — handoff to the attach job is
       # digest-bound by upload-artifact's own zip manifest.

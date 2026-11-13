@@ -93,6 +93,29 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
             "numSynthesizing": g.num_synthesizing.to_string(),
         })),
         CommandReply::Options(map) => Ok(json!(map)),
+        CommandReply::HttpOutput(output) => {
+            use taiji_core::session::HttpOutputPhase;
+            let state = match output.phase {
+                HttpOutputPhase::Downloading => "downloading",
+                HttpOutputPhase::Ready => "ready",
+                HttpOutputPhase::Publishing => "publishing",
+                HttpOutputPhase::Published => "published",
+            };
+            let mut value = json!({ "state": state, "hostControlled": output.host_controlled.to_string(), "paused": output.paused.to_string() });
+            if let Some(path) = output.source_path {
+                value["sourcePath"] = json!(path);
+            }
+            if let Some(path) = output.final_path {
+                value["finalPath"] = json!(path);
+            }
+            if let Some(length) = output.length {
+                value["length"] = json!(length.to_string());
+            }
+            if let Some(error) = output.error {
+                value["error"] = json!(error);
+            }
+            Ok(value)
+        }
         // taiji.probeMedia reply: the opaque token + the TTL the
         // server honors + the snapshot tree (the client sees what the
         // token maps to; the formats array is the format-node domain).
@@ -483,6 +506,7 @@ fn http_json(h: &taiji_core::session::HttpView) -> Value {
         d.insert("encoding".into(), json!(enc));
     }
     d.insert("renamePending".into(), jbool(h.rename_pending));
+    d.insert("hostControlled".into(), jbool(h.host_controlled));
     d.insert(
         "sources".into(),
         Value::Array(

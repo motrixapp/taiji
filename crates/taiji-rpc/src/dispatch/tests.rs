@@ -197,7 +197,7 @@ async fn list_methods_is_frozen_surface_and_list_notifications_is_six_names() {
         .filter_map(|v| v.as_str())
         .collect();
     assert_eq!(names, RPC_NOTIFICATIONS.to_vec());
-    assert_eq!(names.len(), 6);
+    assert_eq!(names.len(), 7);
     assert!(names.contains(&"taiji.onBtDownloadComplete"));
 
     // Compat state: aria2 face — bare names project to `aria2.<bare>`;
@@ -324,6 +324,8 @@ const PROMISED_TAIJI_EXTENSION_METHODS: &[&str] = &[
     // Multi-level file priority write face (the write gate applies).
     "taiji.setFilePriority",
     "taiji.setStreamingPlayhead",
+    "taiji.getHttpOutput",
+    "taiji.finalizeHttp",
     "taiji.getDiskTier",
     "taiji.setDiskTier",
     "taiji.getCapabilities",
@@ -765,7 +767,7 @@ async fn multicall_success_wraps_result_in_list() {
     assert_eq!(as_arr(&slots[1], "wrapped notifications").len(), 1);
     assert_eq!(
         as_arr(&as_arr(&slots[1], "wrapped")[0], "notifications").len(),
-        6
+        7
     );
 }
 
@@ -3651,7 +3653,7 @@ fn api_surface_single_face_gating_matches_declaration() {
     assert!(
         RPC_NOTIFICATIONS_ARIA2
             .iter()
-            .all(|n| n.starts_with("aria2.on"))
+            .all(|n| n.starts_with("aria2.on") || *n == "taiji.onHttpOutputReady")
     );
     let canonical = super::method_face_names(false);
     let compat = super::method_face_names(true);
@@ -4127,6 +4129,7 @@ fn http_subdict_renders_promised_fields() {
         error_message: Some(String::new()),
         media: None,
         http: Some(HttpView {
+            host_controlled: false,
             final_url: "http://origin/f.bin".into(),
             connections: 3,
             extents_active: 2,
@@ -4720,10 +4723,13 @@ async fn list_notifications_stays_six_events_with_media_line() {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert_eq!(list.len(), 6, "the six-event face in both states");
+        assert_eq!(list.len(), 7, "completion events plus HTTP readiness");
         for name in list {
             let name: &str = name;
-            assert!(name.starts_with(face), "{name}");
+            assert!(
+                name.starts_with(face) || name == "taiji.onHttpOutputReady",
+                "{name}"
+            );
             assert!(!name.contains("media"), "no media event in the table");
         }
     }

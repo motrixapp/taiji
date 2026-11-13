@@ -1273,6 +1273,8 @@ mod tests {
             part_path: plan.part_path.clone(),
             final_path: final_path.clone(),
             expected_len: 8,
+            reservation_token: String::new(),
+            auto_rename: false,
         };
         let outcome = fin
             .finalize(&intent, closed)

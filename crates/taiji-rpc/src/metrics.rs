@@ -2548,6 +2548,8 @@ mod tests {
             // with the method face).
             "taiji_rpc_requests_total{method=\"taiji.setFilePriority\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.setStreamingPlayhead\"} 0",
+            "taiji_rpc_requests_total{method=\"taiji.getHttpOutput\"} 0",
+            "taiji_rpc_requests_total{method=\"taiji.finalizeHttp\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.getDiskTier\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.setDiskTier\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.getCapabilities\"} 0",

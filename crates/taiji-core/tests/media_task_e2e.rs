@@ -614,6 +614,7 @@ async fn phase_events_ride_the_bypass_only() {
                         EventKind::Complete => "complete",
                         EventKind::Error => "error",
                         EventKind::BtComplete => "bt",
+                        EventKind::HttpReady => "http-ready",
                     });
                 }
             }
@@ -635,6 +636,7 @@ async fn phase_events_ride_the_bypass_only() {
                 EventKind::Complete => "complete",
                 EventKind::Error => "error",
                 EventKind::BtComplete => "bt",
+                EventKind::HttpReady => "http-ready",
             });
         }
     }

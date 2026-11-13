@@ -40,6 +40,7 @@ pub mod partfile;
 pub mod perhost;
 pub mod pool;
 pub mod probe;
+mod publication_fs;
 pub mod rate;
 pub mod redirect_guard;
 pub mod remotetime;

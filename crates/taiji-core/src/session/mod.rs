@@ -128,10 +128,10 @@ pub use recheck::{RecheckOutcome, recheck_on_disk_recovering_with_progress};
 pub use taiji_http::perhost::DEFAULT_MAX_PER_HOST;
 pub use view::{
     BanEntryView, BanSource, BittorrentView, DownloadResultEntry, EngineFailure, EngineFailureKind,
-    FileEntryView, GidResolveError, GlobalStatView, HttpSourceView, HttpView, MediaTrackView,
-    MediaView, PeerCryptoKind, PeerEntryView, PeerTransportKind, ServerEntryView, StatusKind,
-    TorrentStatusView, UriEntryView, expand_unique, file_piece_bases, offset_completed_length,
-    per_file_completed, torrent_top_attrs,
+    FileEntryView, GidResolveError, GlobalStatView, HttpOutputPhase, HttpOutputView,
+    HttpSourceView, HttpView, MediaTrackView, MediaView, PeerCryptoKind, PeerEntryView,
+    PeerTransportKind, ServerEntryView, StatusKind, TorrentStatusView, UriEntryView, expand_unique,
+    file_piece_bases, offset_completed_length, per_file_completed, torrent_top_attrs,
 };
 
 /// magnet URI -> dual torrent identity extraction (v1 btih / v2 btmh).

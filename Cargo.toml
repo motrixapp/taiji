@@ -15,7 +15,7 @@ members = [
     "crates/taiji-media",]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-2.0-or-later"
@@ -58,6 +58,10 @@ manual_is_multiple_of = "allow"
 chunks_exact_to_as_chunks = "allow"
 
 [workspace.dependencies]
+# Safe Windows no-replace MoveFileEx wrapper (MIT); Unix uses rustix directly
+# so unsupported directory flushing does not turn a completed move into failure.
+# Maintenance: a small stable wrapper, locked and exercised by Windows CI.
+atomicwrites = "0.4.4"
 # spec §4.8: FTP/FTPS transport adapter (adopted after passing the B2
 # kickoff-gate triple check; injected on review's behalf). tokio-rustls-ring
 # is the same version as the workspace TLS stack, zero drift; deprecated is

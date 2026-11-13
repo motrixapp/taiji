@@ -71,6 +71,7 @@ use view::{pagination_range, render_status_list};
 /// test); `system.listNotifications` emits this table directly in the
 /// default (compat off) state.
 pub const RPC_NOTIFICATIONS: &[&str] = &[
+    "taiji.onHttpOutputReady",
     "taiji.onDownloadStart",
     "taiji.onDownloadPause",
     "taiji.onDownloadStop",
@@ -86,6 +87,7 @@ pub const RPC_NOTIFICATIONS: &[&str] = &[
 /// (`taiji.X` <-> `aria2.X`); the extension events (`taiji.recovery*`)
 /// are not in this table (the compat face covers only the six events).
 pub const RPC_NOTIFICATIONS_ARIA2: &[&str] = &[
+    "taiji.onHttpOutputReady",
     "aria2.onDownloadStart",
     "aria2.onDownloadPause",
     "aria2.onDownloadStop",

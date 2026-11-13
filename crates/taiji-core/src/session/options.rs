@@ -1213,6 +1213,10 @@ pub const DECLARED_OPTION_DIFFS: &[(&str, &str)] = &[
         "extension: magnet web-mirror template (no aria2 counterpart)",
     ),
     (
+        "http-host-finalize",
+        "extension: host accepts publication after optional file hooks",
+    ),
+    (
         "http-incomplete-suffix",
         "extension: configurable incomplete-name (aria2 always uses the `.aria2` control-file naming)",
     ),
@@ -2662,8 +2666,12 @@ pub(crate) const GLOBAL_PATCH_OPTION_NAMES: &[&str] = &[
 /// `session::actor::http_task_options`; valid values persist with the
 /// task row at creation).
 #[cfg(test)]
-pub(crate) const HTTP_PERSIST_OPTION_NAMES: &[&str] =
-    &["http-incomplete-suffix", "checksum", "remote-time"];
+pub(crate) const HTTP_PERSIST_OPTION_NAMES: &[&str] = &[
+    "http-host-finalize",
+    "http-incomplete-suffix",
+    "checksum",
+    "remote-time",
+];
 
 /// HTTP task runtime option face (parse point =
 /// `session::actor::http_task_runtime_options`; not stored, recovery

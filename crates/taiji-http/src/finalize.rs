@@ -4,41 +4,18 @@
 //! the intent; every crash point converges through idempotent close-out
 //! on retry.
 //!
-//! Frozen state seam: `http_task.state = "done"` ([`STATE_DONE`]) plus
-//! the http sub-dictionary flag [`RENAME_PENDING_KEY`]
-//! (`rename_pending = true`). Persistence lives on the store side
-//! (`UpsertHttpTask`); this crate does not depend on the store — the
-//! journal surface is injected through the [`RenameJournal`] trait. A
-//! `renamePending` task is terminally done and the file is reachable
-//! under its `.part` suffix; startup/periodic retry performs the
-//! idempotent close-out (target present with matching size) and then
-//! clears the flag. Changes require an ADR.
+//! Download completion is distinct from publication: persist `finalizing`
+//! and the exact source/target before any rename. The caller retains the
+//! intent and retries until publication succeeds, without downloading again.
+//! Checksums, file sync and handle closure precede this module.
 //!
-//! Execution order ([`Finalizer::finalize`]):
-//! 1. Intent before action: a `record_intent` failure is a task-level
-//!    error and no rename is attempted (renaming before journaling has
-//!    a crash window that loses completion state).
-//! 2. Handles closed before rename: the caller proves it with the
-//!    [`HandlesClosed`] credential (type-as-proof — only
-//!    [`partfile::PartFile::close`] can produce one), satisfying the
-//!    Windows/SMB handle-sharing and oplock constraints.
-//! 3. Rename, then directory fsync: network drives (SMB) may reject a
-//!    directory fsync; a platform-scoped "server acknowledged" answer
-//!    is accepted as degraded durability ([`dir_fsync_verdict`]:
-//!    Windows Win32 codes 1/50, POSIX only EINVAL/EROFS; other
-//!    flush/disk/transport errors fail as usual). File fsync is never
-//!    relaxed — it lives in [`partfile::PartFile::sync_all`]. After a
-//!    fatal directory fsync the rename has already landed: the intent
-//!    is kept and startup retry self-heals.
-//! 4. Rename failures retry 3 times with exponential backoff; still
-//!    failing = `Done` + `renamePending` (the intent is already in the
-//!    database; no extra write needed).
-//! 5. Idempotent close-out: target present with matching size =
-//!    success (covers "renamed, crashed before clearing"). A target
-//!    with a mismatched size is a foreign file and is never
-//!    overwritten; it stays pending for manual/periodic handling
-//!    (aria2 has no such state: its finalize resolves conflicts at
-//!    creation time).
+//! Publish with no replacement. A late collision chooses a numbered basename;
+//! target length alone never authorizes adoption while the source exists.
+//! Replay follows the recorded exclusive target when the source is gone;
+//! filesystem IDs and volume identities are not prerequisites. Unsupported filesystem operations degrade through a hard link or
+//! an exclusively created, journaled reservation in the owned namespace.
+//! File sync failures remain errors; unsupported directory sync is recorded
+//! as degraded durability. See `docs/http-publication.md` for the full contract.
 //!
 //! Blocking discipline: [`PathOps`] is a synchronous trait (direct
 //! syscall surface); [`Finalizer`] wraps every call in
@@ -52,7 +29,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::error::HttpError;
 use crate::partfile::HandlesClosed;
@@ -72,7 +49,7 @@ pub const RENAME_RETRIES: u32 = 3;
 
 /// Rename intent (journal payload; the persistent form of
 /// DB-as-journal).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RenameIntent {
     /// 16-hex GID.
     pub gid: String,
@@ -85,12 +62,29 @@ pub struct RenameIntent {
     /// Authoritative length (close-out criterion: target present with
     /// this size = success).
     pub expected_len: u64,
+    #[serde(default)]
+    pub reservation_token: String,
+    #[serde(default)]
+    pub auto_rename: bool,
+}
+
+impl RenameIntent {
+    pub fn new(gid: String, part_path: PathBuf, final_path: PathBuf, expected_len: u64) -> Self {
+        Self {
+            gid,
+            part_path,
+            final_path,
+            expected_len,
+            reservation_token: format!("{:032x}", rand::random::<u128>()),
+            auto_rename: true,
+        }
+    }
 }
 
 /// Rename-intent journal (the injection face of DB-as-journal; the
 /// production implementation is the store's single-writer message face —
 /// completion state and intent are written in the *same transaction* on
-/// the `http_task` row (`UpsertHttpTask`, state = done + http
+/// the `http_task` row (`UpsertHttpTask`, state = finalizing + http
 /// sub-dictionary `rename_pending`)). This crate does not depend on the
 /// store; it only defines the contract and an in-memory reference
 /// implementation.
@@ -140,7 +134,9 @@ impl RenameJournal for MemoryJournal {
     ) -> BoxFuture<'a, crate::error::Result<()>> {
         Box::pin(async move {
             let mut pending = self.pending.lock().await;
-            if !pending.iter().any(|i| i.gid == intent.gid) {
+            if let Some(previous) = pending.iter_mut().find(|i| i.gid == intent.gid) {
+                *previous = intent.clone();
+            } else {
                 pending.push(intent.clone());
             }
             self.push("record_intent", &intent.gid).await;
@@ -165,9 +161,11 @@ impl RenameJournal for MemoryJournal {
 /// directory fsync: production = [`FsOps`]; tests inject failures and
 /// ordering observations).
 pub trait PathOps: Send + Sync {
-    /// Atomic rename (`std::fs::rename` semantics within one directory;
-    /// POSIX atomic replacement).
+    /// Atomically publish without replacing another owner's target.
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+    fn rename_reserved(&self, from: &Path, to: &Path, _token: &str) -> std::io::Result<()> {
+        self.rename(from, to)
+    }
     /// Size of the target entry (NotFound surfaces as
     /// `io::ErrorKind::NotFound`).
     fn file_len(&self, path: &Path) -> std::io::Result<u64>;
@@ -199,14 +197,13 @@ pub struct FsOps;
 
 impl PathOps for FsOps {
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        std::fs::rename(
-            taiji_io::winpath::to_fs_path(from),
-            taiji_io::winpath::to_fs_path(to),
-        )
+        crate::publication_fs::rename(from, to, &format!("{:032x}", rand::random::<u128>()))
     }
-
+    fn rename_reserved(&self, from: &Path, to: &Path, token: &str) -> std::io::Result<()> {
+        crate::publication_fs::rename(from, to, token)
+    }
     fn file_len(&self, path: &Path) -> std::io::Result<u64> {
-        Ok(std::fs::metadata(taiji_io::winpath::to_fs_path(path))?.len())
+        crate::publication_fs::regular_len(path)
     }
 
     fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
@@ -272,29 +269,19 @@ pub enum DirFsyncVerdict {
 }
 
 pub fn dir_fsync_verdict(err: &std::io::Error) -> DirFsyncVerdict {
-    #[cfg(windows)]
-    {
-        match err.raw_os_error() {
-            // ERROR_INVALID_FUNCTION (1) / ERROR_NOT_SUPPORTED (50): the
-            // classic "no directory fsync on this filesystem" answers;
-            // ERROR_ACCESS_DENIED (5): the same platform decline on the
-            // runner %TEMP% filesystems (observed on windows-2025 CI
-            // hosts at the FlushFileBuffers/handle-open face) — a
-            // directory-flush refusal, not a media failure.
-            Some(1) | Some(5) | Some(50) => DirFsyncVerdict::ServerAckDegraded,
-            _ => DirFsyncVerdict::Fatal,
-        }
+    if err.kind() == std::io::ErrorKind::Unsupported {
+        return DirFsyncVerdict::ServerAckDegraded;
     }
-    #[cfg(not(windows))]
-    {
-        // errno values match across glibc/musl/Darwin (errno.h —
-        // EINVAL 22, EROFS 30); constants hardcoded, the same
-        // discipline as the store disk layer's platform constants (no
-        // libc dependency).
-        match err.raw_os_error() {
-            Some(22) | Some(30) => DirFsyncVerdict::ServerAckDegraded,
-            _ => DirFsyncVerdict::Fatal,
-        }
+    #[cfg(windows)]
+    let degraded = matches!(err.raw_os_error(), Some(1 | 5 | 50));
+    #[cfg(target_os = "macos")]
+    let degraded = matches!(err.raw_os_error(), Some(13 | 22 | 30 | 45 | 78 | 102));
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let degraded = matches!(err.raw_os_error(), Some(13 | 22 | 30 | 38 | 95));
+    if degraded {
+        DirFsyncVerdict::ServerAckDegraded
+    } else {
+        DirFsyncVerdict::Fatal
     }
 }
 
@@ -332,11 +319,8 @@ pub enum FinalizeOutcome {
     /// Rename landed (or idempotent close-out): pending cleared, file
     /// at the target path.
     Completed { final_path: PathBuf },
-    /// Still failing after 3 backoff retries: `Done` + `renamePending`
-    /// — the task is terminally done (the intent was journaled before
-    /// the action; no extra write needed) and the file is reachable
-    /// only under its suffix; startup/periodic retry performs the
-    /// idempotent close-out.
+    /// Still failing after bounded retries. The caller retains Finalizing,
+    /// exposes the reason, and retries publication without fetching data.
     RenamePending {
         final_path: PathBuf,
         last_error: String,
@@ -413,24 +397,9 @@ impl Finalizer {
         intent: &RenameIntent,
         closed: HandlesClosed,
     ) -> crate::error::Result<FinalizeOutcome> {
-        // 1. Intent before action: a journal write failure is a
-        // task-level error; no rename is attempted.
-        // Close-out fast path: the intent journal write and the target
-        // probe (read-only fs metadata — not a rename action) run
-        // concurrently (join! polls both futures; `let f =
-        // self.probe(..)` only builds a lazy future — it does not
-        // start until awaited). "Intent before action" constrains the
-        // rename itself (in closeout_with below); hoisting the probe
-        // does not break the order (the probe result is consumed only
-        // after the intent is confirmed journaled, and is discarded if
-        // the record fails). The per-task close-out chain thus
-        // overlaps the journal round-trip with probe IO.
-        let (recorded, probed) = tokio::join!(
-            self.journal.record_intent(intent),
-            self.probe(&intent.final_path)
-        );
-        recorded?;
-        let outcome = self.closeout_with(intent, probed).await?;
+        let intent = self.prepare_intent(intent);
+        self.journal.record_intent(&intent).await?;
+        let outcome = self.closeout(&intent).await?;
         if matches!(outcome, FinalizeOutcome::RenamePending { .. }) {
             // Claim handover: during renamePending both the part+final
             // claims stay registered (released by the polling
@@ -449,7 +418,7 @@ impl Finalizer {
         let pending = self.journal.load_pending().await?;
         let mut out = Vec::with_capacity(pending.len());
         for intent in &pending {
-            let outcome = self.closeout(intent).await?;
+            let outcome = self.resume(intent).await?;
             out.push((intent.clone(), outcome));
         }
         Ok(out)
@@ -457,109 +426,118 @@ impl Finalizer {
 
     /// Close-out body (shared by the second half of `finalize` and the
     /// startup retry; idempotent).
-    async fn closeout(&self, intent: &RenameIntent) -> crate::error::Result<FinalizeOutcome> {
-        self.closeout_with(intent, self.probe(&intent.final_path).await)
-            .await
+    pub fn prepare_intent(&self, original: &RenameIntent) -> RenameIntent {
+        let mut intent = original.clone();
+        if intent.reservation_token.is_empty() {
+            intent.reservation_token = format!("{:032x}", rand::random::<u128>());
+        }
+        intent
     }
 
-    /// Close-out body (probe-result injection seam — the shared second
-    /// half of [`Finalizer::finalize`]'s parallel probe path and
-    /// [`Finalizer::closeout`]'s serial path).
-    async fn closeout_with(
-        &self,
-        intent: &RenameIntent,
-        probed: crate::error::Result<Option<u64>>,
-    ) -> crate::error::Result<FinalizeOutcome> {
-        // Idempotent close-out: target present with matching size =
-        // success (covers the "renamed, crashed before clearing"
-        // window).
-        //
-        // Known TOCTOU window: a foreign file appearing at the target
-        // path between this probe and the rename below is atomically
-        // overwritten by posix rename / Windows MoveFileEx. Why no
-        // rollback: `RENAME_NOREPLACE` semantics would need platform
-        // syscall faces beyond std; the target path was already
-        // conflict-resolved at creation time by
-        // [`crate::naming::plan_output`], so occupation inside the
-        // window is a hostile cross-process writer (aria2 has no such
-        // state: its finalize resolves conflicts at creation time).
-        match probed {
-            Ok(Some(len)) if len == intent.expected_len => {
-                info!(target: "taiji::http::finalize", gid = %intent.gid,
-                    path = %intent.final_path.display(), "rename close-out: target already in place");
-                return self.complete(intent).await;
-            }
-            // Target present with mismatched size = foreign file: do
-            // not overwrite (usurped after creation-time conflict
-            // resolution); stays pending for manual/periodic handling.
-            Ok(Some(len)) => {
-                warn!(target: "taiji::http::finalize", gid = %intent.gid,
-                    path = %intent.final_path.display(), len, expected = intent.expected_len,
-                    "rename target exists with mismatched size; not clobbering");
+    pub async fn resume(&self, original: &RenameIntent) -> crate::error::Result<FinalizeOutcome> {
+        let intent = self.prepare_intent(original);
+        if intent != *original {
+            self.journal.record_intent(&intent).await?;
+        }
+        self.closeout(&intent).await
+    }
+
+    async fn closeout(&self, intent: &RenameIntent) -> crate::error::Result<FinalizeOutcome> {
+        let mut current = intent.clone();
+        // A source which still exists proves this is not replay of a completed
+        // rename. Equal lengths never authorize adoption of a foreign target.
+        match self.probe(&current.part_path).await {
+            Ok(Some(len)) if len == current.expected_len => {}
+            Ok(None) => {
+                if self.probe(&current.final_path).await.ok().flatten()
+                    == Some(current.expected_len)
+                {
+                    // The exclusive publication target belongs to this
+                    // persisted intent. Recover the acknowledged rename after
+                    // source disappearance without requiring filesystem IDs.
+                    if let Err(error) = self.sync_dir_of(&current.final_path, &current.gid).await {
+                        return Ok(FinalizeOutcome::RenamePending {
+                            final_path: current.final_path,
+                            last_error: error.to_string(),
+                        });
+                    }
+                    return self.complete(&current).await;
+                }
                 return Ok(FinalizeOutcome::RenamePending {
-                    final_path: intent.final_path.clone(),
-                    last_error: format!(
-                        "target exists with size {len}, expected {}",
-                        intent.expected_len
-                    ),
+                    final_path: current.final_path,
+                    last_error: "completed data is unavailable at its recorded paths".into(),
                 });
             }
-            Ok(None) => {}
-            Err(e) => {
-                // A probe glitch does not presume failure: let the
-                // rename attempt surface the real error.
-                warn!(target: "taiji::http::finalize", gid = %intent.gid,
-                    path = %intent.final_path.display(), code = e.code(), "target probe failed; falling through to rename");
+            Ok(Some(_)) => {
+                return Ok(FinalizeOutcome::RenamePending {
+                    final_path: current.final_path,
+                    last_error: "completed temporary file changed size".into(),
+                });
+            }
+            Err(error) => {
+                return Ok(FinalizeOutcome::RenamePending {
+                    final_path: current.final_path,
+                    last_error: error.to_string(),
+                });
             }
         }
-
-        let mut last_error = String::new();
-        for attempt in 0..=RENAME_RETRIES {
-            if attempt > 0 {
-                tokio::time::sleep(self.backoff.delay(attempt - 1)).await;
+        let requested = current.final_path.clone();
+        let mut conflicts = 0;
+        let mut retries = 0;
+        loop {
+            if crate::partfile::claim_final_path(&current.final_path, &current.gid).is_err() {
+                if !current.auto_rename || conflicts >= crate::naming::AUTO_RENAME_MAX_TRIES {
+                    return Ok(FinalizeOutcome::RenamePending {
+                        final_path: current.final_path,
+                        last_error: "output name is reserved by another task".into(),
+                    });
+                }
+                conflicts += 1;
+                current.final_path = crate::publication_fs::candidate(&requested, conflicts);
+                self.journal.record_intent(&current).await?;
+                continue;
             }
-            match self
-                .do_rename(&intent.part_path, &intent.final_path, &intent.gid)
-                .await
-            {
+            match self.do_rename(&current).await {
                 Ok(()) => {
-                    // Directory fsync (persists the rename; the
-                    // network-drive degradation verdict runs inside
-                    // [`Self::sync_dir_of`] — server-acknowledged
-                    // (error 1/50) degrades to Ok, fatal stays Err).
-                    match self.sync_dir_of(&intent.final_path, &intent.gid).await {
-                        Ok(()) => return self.complete(intent).await,
-                        Err(e) => {
-                            // The rename already landed: a fatal
-                            // directory fsync does not roll back —
-                            // keep the intent; the startup-retry
-                            // close-out self-heals.
-                            warn!(target: "taiji::http::finalize", gid = %intent.gid,
-                                path = %intent.final_path.display(),
-                                "dir fsync failed after rename; leaving pending for close-out: {e}");
-                            return Ok(FinalizeOutcome::RenamePending {
-                                final_path: intent.final_path.clone(),
-                                last_error: e.to_string(),
-                            });
-                        }
+                    if let Err(error) = self.sync_dir_of(&current.final_path, &current.gid).await {
+                        return Ok(FinalizeOutcome::RenamePending {
+                            final_path: current.final_path,
+                            last_error: error.to_string(),
+                        });
                     }
+                    crate::partfile::release_all_final_claims(&intent.gid);
+                    return self.complete(&current).await;
                 }
-                Err(msg) => {
-                    warn!(target: "taiji::http::finalize", gid = %intent.gid,
-                        from = %intent.part_path.display(), to = %intent.final_path.display(),
-                        attempt, "rename attempt failed: {msg}");
-                    last_error = msg;
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        && current.auto_rename
+                        && conflicts < crate::naming::AUTO_RENAME_MAX_TRIES =>
+                {
+                    conflicts += 1;
+                    current.final_path = crate::publication_fs::candidate(&requested, conflicts);
+                    // The selected final path is durable before any mutation.
+                    self.journal.record_intent(&current).await?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(FinalizeOutcome::RenamePending {
+                        final_path: current.final_path,
+                        last_error: "target exists; source data remains unpublished".into(),
+                    });
+                }
+                Err(error) if retries < RENAME_RETRIES => {
+                    let delay = self.backoff.delay(retries);
+                    retries += 1;
+                    warn!(target: "taiji::http::finalize", %error, retries, "publication will retry");
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => {
+                    return Ok(FinalizeOutcome::RenamePending {
+                        final_path: current.final_path,
+                        last_error: error.to_string(),
+                    });
                 }
             }
         }
-
-        // Still failing after 3 backoff retries = Done + renamePending
-        // (intent already journaled, task terminally done; file
-        // reachable only under its suffix).
-        Ok(FinalizeOutcome::RenamePending {
-            final_path: intent.final_path.clone(),
-            last_error,
-        })
     }
 
     async fn complete(&self, intent: &RenameIntent) -> crate::error::Result<FinalizeOutcome> {
@@ -572,34 +550,30 @@ impl Finalizer {
         // The final path is released under its holding key (gid) —
         // other keys' holdings are unaffected.
         crate::partfile::release_part_claim(&intent.part_path);
-        crate::partfile::release_final_path(&intent.final_path, &intent.gid);
+        crate::partfile::release_all_final_claims(&intent.gid);
         Ok(FinalizeOutcome::Completed {
             final_path: intent.final_path.clone(),
         })
     }
 
-    async fn do_rename(&self, from: &Path, to: &Path, gid: &str) -> Result<(), String> {
-        let (from, to) = (from.to_path_buf(), to.to_path_buf());
-        let gid = gid.to_string();
+    async fn do_rename(&self, intent: &RenameIntent) -> std::io::Result<()> {
+        let intent = intent.clone();
         let ops = Arc::clone(&self.ops);
         let metrics = Arc::clone(&self.metrics);
         tokio::task::spawn_blocking(move || {
-            // Observation point: the rename action moment (the
-            // "intent before action" assertion face). Metric feed
-            // point: `taiji_disk_finalize_seconds{op=rename}` — the
-            // rename phase of the SMB long-tail domain.
-            let t0 = std::time::Instant::now();
-            let r = ops.rename(&from, &to);
+            let start = std::time::Instant::now();
+            let result = ops.rename_reserved(
+                &intent.part_path,
+                &intent.final_path,
+                &intent.reservation_token,
+            );
             metrics
                 .disk()
-                .observe_finalize(taiji_io::metrics::FinalizeOp::Rename, t0.elapsed());
-            r.map_err(|e| format!("rename {} -> {}: {e}", from.display(), to.display()))
-                .inspect(|_| {
-                    debug!(target: "taiji::http::finalize", gid = %gid, "rename action executed");
-                })
+                .observe_finalize(taiji_io::metrics::FinalizeOp::Rename, start.elapsed());
+            result
         })
         .await
-        .map_err(|e| format!("join rename: {e}"))?
+        .map_err(std::io::Error::other)?
     }
 
     async fn probe(&self, path: &Path) -> crate::error::Result<Option<u64>> {
@@ -778,14 +752,21 @@ mod tests {
     }
 
     fn intent_of(dir: &Path, name: &str, body: &[u8]) -> RenameIntent {
+        static NEXT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0x8000_0000_0010_0000);
         let suffix = IncompleteSuffix::default();
         let final_path = dir.join(name);
         let part_path = part_path_for(&final_path, &suffix);
         RenameIntent {
-            gid: format!("80000000000000{:02x}", name.len()),
+            gid: format!(
+                "{:016x}",
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
             part_path,
             final_path,
             expected_len: body.len() as u64,
+            reservation_token: format!("{:032x}", rand::random::<u128>()),
+            auto_rename: false,
         }
     }
 
@@ -956,7 +937,7 @@ mod tests {
     }
 
     /// Rename failure injection → all 3 backoff retries fail →
-    /// `Done + renamePending` (intent kept in the journal, `.part`
+    /// `Finalizing + renamePending` (intent kept in the journal, `.part`
     /// still present, task terminally done), then the injection is
     /// lifted → the startup retry closes out idempotently as
     /// Completed.
@@ -1001,7 +982,7 @@ mod tests {
             }
             other => panic!("expected RenamePending, got {other:?}"),
         }
-        // The observable face of Done + renamePending: intent kept in
+        // The observable face of Finalizing + renamePending: intent kept in
         // the journal; `.part` still accessible (the file is usable
         // under its suffix).
         let pending = journal.load_pending().await.unwrap_or_default();
@@ -1104,10 +1085,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("finalize: {e}"));
         match outcome {
             FinalizeOutcome::RenamePending { last_error, .. } => {
-                assert!(
-                    last_error.contains("target exists with size"),
-                    "{last_error}"
-                );
+                assert!(last_error.contains("target exists"), "{last_error}");
             }
             other => panic!("expected RenamePending, got {other:?}"),
         }
@@ -1319,5 +1297,31 @@ mod tests {
             .clear_intent("80000000000000bb")
             .await
             .unwrap_or_else(|e| panic!("clear2: {e}"));
+    }
+    #[tokio::test]
+    async fn strict_name_replay_finishes_its_own_reservation() {
+        let dir = tempdir("reserved-strict");
+        let body = b"complete data";
+        let intent = intent_of(&dir, "strict.bin", body);
+        assert!(!intent.auto_rename);
+        std::fs::write(&intent.part_path, body).unwrap_or_else(|e| panic!("source: {e}"));
+        std::fs::write(
+            &intent.final_path,
+            crate::publication_fs::reservation_bytes(&intent.reservation_token),
+        )
+        .unwrap_or_else(|e| panic!("reservation: {e}"));
+        let journal = Arc::new(MemoryJournal::default());
+        journal
+            .record_intent(&intent)
+            .await
+            .unwrap_or_else(|e| panic!("journal: {e}"));
+        let outcome = Finalizer::new(journal)
+            .resume(&intent)
+            .await
+            .unwrap_or_else(|e| panic!("publish: {e}"));
+        assert!(matches!(outcome, FinalizeOutcome::Completed { .. }));
+        assert_eq!(std::fs::read(&intent.final_path).unwrap_or_default(), body);
+        assert!(!intent.part_path.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

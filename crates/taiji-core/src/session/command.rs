@@ -279,6 +279,16 @@ pub enum SessionCommand {
     GetOption {
         gid: String,
     },
+    /// Durable HTTP publication state and actual paths.
+    GetHttpOutput {
+        gid: String,
+    },
+    /// Prepare a host-controlled output or accept publication of closed data.
+    FinalizeHttp {
+        gid: String,
+        action: String,
+        path: Option<String>,
+    },
     /// changePosition: waiting-queue reordering (a direct translation
     /// of aria2 ChangePositionRpcMethod, RpcMethodImpl.cc +
     /// RequestGroupMan.cc). gid goes through expandUnique; **scope =
@@ -504,7 +514,9 @@ pub enum CommandReply {
     Gid(Gid),
     /// getVersion returns the frozen format version string
     /// `taiji/<semver>` (SPEC §8.2).
-    Version { version: String },
+    Version {
+        version: String,
+    },
     /// The tellActive/tellWaiting/tellStopped status views (full,
     /// ordered; filtering in the RPC layer).
     StatusList(Vec<TorrentStatusView>),
@@ -524,11 +536,17 @@ pub enum CommandReply {
     /// The getGlobalOption echo (a string value table; rpc-secret
     /// never appears — the RpcMethodImpl.cc rule).
     Options(BTreeMap<String, String>),
+    HttpOutput(Box<super::view::HttpOutputView>),
     /// getSessionInfo: a random session id hex (RpcMethodImpl.cc;
     /// util::toHex(sessionId), 16 random bytes → 32 hex chars).
-    SessionInfo { session_id: String },
+    SessionInfo {
+        session_id: String,
+    },
     /// The changeUri reply [deleted, added] counts (RpcMethodImpl.cc).
-    UriChange { deleted: u64, added: u64 },
+    UriChange {
+        deleted: u64,
+        added: u64,
+    },
     /// The taiji.addTracker/removeTracker reply: the actually applied
     /// add/remove counts. One variant carries both counts (each
     /// method always has one side 0) — a later merged editing face
@@ -540,11 +558,16 @@ pub enum CommandReply {
     /// same shape); the counts are bare integers (the same source as
     /// changeUri `[del, add]`'s Integer caliber — a count face, not a
     /// length field, never stringified).
-    TrackerChange { removed: u64, added: u64 },
+    TrackerChange {
+        removed: u64,
+        added: u64,
+    },
     /// The changePosition reply: the destination position after the
     /// move (RpcMethodImpl.cc `Integer::g(destPos)` — a bare integer,
     /// not a string).
-    Position { position: u64 },
+    Position {
+        position: u64,
+    },
     /// The taiji.listBans reply: a snapshot of active bans (automatic +
     /// manual + client identity); no ordering/filtering promised at
     /// the RPC layer (core gives the full set with BanSource
@@ -559,7 +582,9 @@ pub enum CommandReply {
     /// The taiji.getDiskTier reply: the task's current disk tier (a
     /// mirror read-back; default = throughput — core carries no
     /// Option empty state, the RPC shape always has a name).
-    DiskTier { tier: crate::engine::DiskTier },
+    DiskTier {
+        tier: crate::engine::DiskTier,
+    },
     /// The taiji.getCapabilities reply: the engine capability view
     /// (the declarative single truth source; the RPC layer maps to
     /// schema_version=1 JSON). Box to bound the variant size.
@@ -579,7 +604,9 @@ pub enum CommandReply {
     /// The taiji.clearMediaArchive reply: the removed row count (the
     /// taiji.* extension's self-describing dict face renders
     /// `{"removed": N}`).
-    ArchiveCleared { removed: u64 },
+    ArchiveCleared {
+        removed: u64,
+    },
 }
 
 /// Session-level errors. The mapping between numeric error codes and
@@ -713,6 +740,8 @@ mod tests {
         ("taiji.getSchedulerPolicy", true),
         ("taiji.setFilePriority", false),
         ("taiji.setStreamingPlayhead", false),
+        ("taiji.getHttpOutput", true),
+        ("taiji.finalizeHttp", false),
         ("taiji.getDiskTier", true),
         ("taiji.setDiskTier", false),
         ("taiji.getCapabilities", true),

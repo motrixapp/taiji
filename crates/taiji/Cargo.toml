@@ -62,6 +62,8 @@ metalink = ["taiji-rpc/metalink"]
 # torrents in tests; sha2 in the same table (the expected-content hash
 # surface of the http e2e).
 [dev-dependencies]
+# Test-only isolated daemon state (MIT/Apache-2.0); shares the locked 3.x API used by engine tests.
+tempfile = "3"
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 # Media CLI e2e: the mock HLS source (the taiji-http mock-lab

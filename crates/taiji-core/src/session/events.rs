@@ -16,6 +16,8 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 /// points and notification publish points share one source).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
+    /// HTTP bytes are durable; the embedding host can publish or postprocess them.
+    HttpReady,
     /// Group activation (aria2 `EVENT_ON_DOWNLOAD_START`).
     Start,
     /// Pause, finished back to the queue front
@@ -38,7 +40,8 @@ pub enum EventKind {
 impl EventKind {
     /// The full set (shared by iteration and cross-validation tests;
     /// guards against name-face drift).
-    pub const ALL: [EventKind; 6] = [
+    pub const ALL: [EventKind; 7] = [
+        EventKind::HttpReady,
         EventKind::Start,
         EventKind::Pause,
         EventKind::Stop,
@@ -56,6 +59,7 @@ impl EventKind {
     /// picks the presentation face uniformly behind the compat gate.
     pub fn notification_method(self) -> &'static str {
         match self {
+            EventKind::HttpReady => "taiji.onHttpOutputReady",
             EventKind::Start => "taiji.onDownloadStart",
             EventKind::Pause => "taiji.onDownloadPause",
             EventKind::Stop => "taiji.onDownloadStop",
@@ -73,6 +77,7 @@ impl EventKind {
     /// locks the two tables).
     pub fn aria2_notification_method(self) -> &'static str {
         match self {
+            EventKind::HttpReady => "taiji.onHttpOutputReady",
             EventKind::Start => "aria2.onDownloadStart",
             EventKind::Pause => "aria2.onDownloadPause",
             EventKind::Stop => "aria2.onDownloadStop",
@@ -222,8 +227,16 @@ mod tests {
             assert_eq!(k1.notification_method(), c);
             assert_eq!(k1.aria2_notification_method(), a);
         }
-        assert_eq!(EventKind::ALL.len(), 6, "six-event surface is frozen");
+        assert_eq!(
+            EventKind::ALL.len(),
+            7,
+            "HTTP output-ready extends the notification surface"
+        );
         for kind in EventKind::ALL {
+            if kind == EventKind::HttpReady {
+                assert_eq!(kind.aria2_notification_method(), "taiji.onHttpOutputReady");
+                continue;
+            }
             // One-to-one: the compat name = the canonical name with the
             // taiji. prefix replaced by aria2..
             assert_eq!(

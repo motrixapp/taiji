@@ -509,50 +509,6 @@ impl SessionActor {
         let Some(persist) = self.persist.clone() else {
             return Vec::new();
         };
-        // renamePending startup close-out: done+pending rows read back
-        // -> idempotent on-disk close-out (`.part` rename / final file
-        // already in place clears the account); rows still unclosed
-        // enter the in-process polling registry (periodic retry until
-        // closed or the task is removed).
-        match persist.load_http_done_rows().await {
-            Ok(rows) => {
-                let mut pending = 0usize;
-                let mut closed = 0usize;
-                for row in rows {
-                    let cfg = crate::session::actor::http_task::HttpPersistConfig::from_json(
-                        &row.config_json,
-                    );
-                    if !cfg.rename_pending {
-                        continue;
-                    }
-                    if self.global.motrix_startup_hold {
-                        if let Ok(raw) = u64::from_str_radix(&row.gid, 16) {
-                            let gid = Gid::from_u64(raw);
-                            self.queue.startup_held.insert(gid, true);
-                            self.http_rename_pending.insert(gid, row.clone());
-                        }
-                        continue;
-                    }
-                    if http_task::close_out_pending_row(&self.persist, &row).await {
-                        closed += 1;
-                    } else {
-                        pending += 1;
-                        if let Ok(raw) = u64::from_str_radix(&row.gid, 16) {
-                            self.http_rename_pending
-                                .insert(Gid::from_u64(raw), row.clone());
-                        }
-                    }
-                }
-                if closed > 0 || pending > 0 {
-                    info!(target: "taiji::core::session", closed, pending,
-                        "startup renamePending close-out sweep");
-                }
-            }
-            Err(e) => {
-                warn!(target: "taiji::core::session", %e,
-                    "startup http done-row load failed (renamePending close-out skipped)");
-            }
-        }
         let snaps = match persist.load_http_tasks_at_startup().await {
             Ok(s) => s,
             Err(e) => {
@@ -646,35 +602,6 @@ impl SessionActor {
                 "session bootstrap: active http tasks restored (GID reserved)");
         }
         reserved
-    }
-
-    /// In-process periodic polling for renamePending: retries the
-    /// on-disk close-out for registered tasks that are not active (the
-    /// journal list inside the driver is consumed by finalize
-    /// immediately; this face covers the "closable only after finalize"
-    /// window — the conflicting file was moved away, a network drive
-    /// came back, etc.). A successful close-out removes the entry.
-    pub(super) async fn poll_rename_pending(&mut self) {
-        if self.http_rename_pending.is_empty() {
-            return;
-        }
-        let gids: Vec<Gid> = self.http_rename_pending.keys().copied().collect();
-        for gid in gids {
-            if self.queue.startup_held.contains_key(&gid) {
-                continue;
-            }
-            // Active/queued tasks are not raced (the driver or the next
-            // activation face owns them).
-            if self.running.contains_key(&gid) || self.jobs.contains_key(&gid) {
-                continue;
-            }
-            let Some(row) = self.http_rename_pending.get(&gid) else {
-                continue;
-            };
-            if http_task::close_out_pending_row(&self.persist, row).await {
-                self.http_rename_pending.remove(&gid);
-            }
-        }
     }
 
     /// Single-row rebuild dispatch: a parseable metadata BLOB -> torrent

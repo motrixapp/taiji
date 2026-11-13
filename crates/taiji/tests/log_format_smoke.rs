@@ -25,9 +25,12 @@ fn free_port() -> u16 {
 /// Start an idle daemon: stdout piped (non-TTY -> text mode must be
 /// ANSI-free); RUST_LOG=info is set explicitly (shields against shell
 /// environment drift and guarantees assertable log lines).
-fn spawn_daemon(port: u16, log_format: Option<&str>) -> Child {
+fn spawn_daemon(port: u16, log_format: Option<&str>) -> (Child, tempfile::TempDir) {
+    let state = tempfile::tempdir().unwrap_or_else(|e| panic!("temp state: {e}"));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_taiji"));
-    cmd.arg("--rpc-listen-port")
+    cmd.arg("--sqlite3-db-path")
+        .arg(state.path().join("state.sqlite3"))
+        .arg("--rpc-listen-port")
         .arg(port.to_string())
         .arg("--rpc-secret")
         .arg("smoke-sekrit")
@@ -37,7 +40,8 @@ fn spawn_daemon(port: u16, log_format: Option<&str>) -> Child {
     if let Some(fmt) = log_format {
         cmd.arg("--log-format").arg(fmt);
     }
-    cmd.spawn().unwrap_or_else(|e| panic!("spawn taiji: {e}"))
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn taiji: {e}"));
+    (child, state)
 }
 
 fn wait_port_open(port: u16, budget: Duration) -> bool {
@@ -112,7 +116,7 @@ fn shutdown_and_collect_stdout(mut child: Child, port: u16) -> String {
 #[test]
 fn log_format_json_emits_line_delimited_valid_json() {
     let port = free_port();
-    let child = spawn_daemon(port, Some("json"));
+    let (child, _state) = spawn_daemon(port, Some("json"));
     assert!(
         wait_port_open(port, Duration::from_secs(10)),
         "cli must open rpc listener on --rpc-listen-port"
@@ -139,7 +143,7 @@ fn log_format_json_emits_line_delimited_valid_json() {
 #[test]
 fn text_format_non_tty_output_has_zero_ansi() {
     let port = free_port();
-    let child = spawn_daemon(port, None); // default text
+    let (child, _state) = spawn_daemon(port, None); // default text
     assert!(
         wait_port_open(port, Duration::from_secs(10)),
         "cli must open rpc listener on --rpc-listen-port"

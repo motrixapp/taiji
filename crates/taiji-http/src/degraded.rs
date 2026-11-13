@@ -101,6 +101,15 @@ impl DegradedJob {
         download_degraded(self, transport, ctx, finalizer).await
     }
 
+    /// Transfer and flush only. The caller verifies content before publishing.
+    pub async fn download(
+        &self,
+        transport: &dyn SegmentTransport,
+        ctx: &RequestCtx,
+    ) -> Result<HandlesClosed, HttpError> {
+        download_data(self, transport, ctx).await
+    }
+
     /// Run in the background (for task-line assembly; join to
     /// completion, no dangling tasks).
     pub fn spawn(
@@ -126,14 +135,13 @@ impl DegradedJob {
 ///
 /// Returns the rename finalization outcome; `Err` = a task-level
 /// failure in disk or journal writes.
-async fn download_degraded(
+async fn download_data(
     job: &DegradedJob,
     transport: &dyn SegmentTransport,
     ctx: &RequestCtx,
-    finalizer: &Finalizer,
-) -> Result<FinalizeOutcome, HttpError> {
+) -> Result<HandlesClosed, HttpError> {
     let DegradedJob {
-        gid,
+        gid: _,
         final_path,
         suffix,
         total_len,
@@ -192,15 +200,23 @@ async fn download_degraded(
     // oplock constraints).
     let closed: HandlesClosed = part.close();
 
-    let intent = RenameIntent {
-        gid: gid.clone(),
-        part_path: part_path_for(final_path, suffix),
-        final_path: final_path.clone(),
-        expected_len: *total_len,
-    };
-    info!(target: "taiji::http::degraded", gid = %gid,
-        path = %intent.final_path.display(), len = total_len,
-        "degraded download complete; finalizing rename");
+    Ok(closed)
+}
+
+async fn download_degraded(
+    job: &DegradedJob,
+    transport: &dyn SegmentTransport,
+    ctx: &RequestCtx,
+    finalizer: &Finalizer,
+) -> Result<FinalizeOutcome, HttpError> {
+    let closed = download_data(job, transport, ctx).await?;
+    let intent = RenameIntent::new(
+        job.gid.clone(),
+        part_path_for(&job.final_path, &job.suffix),
+        job.final_path.clone(),
+        job.total_len,
+    );
+    info!(target: "taiji::http::degraded", gid = %job.gid, "degraded data flushed; publishing");
     finalizer.finalize(&intent, closed).await
 }
 

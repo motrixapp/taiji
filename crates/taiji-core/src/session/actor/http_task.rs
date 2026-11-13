@@ -1,8 +1,7 @@
 //! HttpTask driver: the execution half of the SessionActor dispatch arm.
 //!
 //! Mechanism: `Queued -> Probing (multi-source probe) -> Planning (naming/
-//! conflict resolution/grid plan) -> Downloading <-> Paused -> Done (incl.
-//! empty file and renamePending) | Error`. Queued/Paused live on the
+//! conflict resolution/grid plan) -> Downloading <-> Paused -> Finalizing -> Done | Error`. Queued/Paused live on the
 //! SessionActor queue (sharing the `--max-concurrent-downloads` quota with
 //! BT); this module owns the activated Probing/Planning/Downloading phases
 //! and terminal close-out. Progress truth is the block bitmap (the
@@ -15,8 +14,8 @@
 //! the ExtentCoordinator decision; throttling via the taiji-http
 //! `ThrottledSink` global+task dual buckets). [`PersistJournal`] is the DB
 //! half of `RenameJournal` (`record_intent` = one `UpsertHttpTask` row with
-//! state=done and `rename_pending=true` in the same statement — the done
-//! state and the rename intent land on the row before the action). The
+//! state=finalizing and `rename_pending=true` in the same statement;
+//! the exact paths and completion intent land before the filesystem action). The
 //! transport half lives in taiji-http ([`taiji_http::transport`] for
 //! Range-extent fetch and degraded single-connection full GET); core
 //! assembles and injects the sink.
@@ -42,9 +41,8 @@
 //! post-hoc hash); degraded/EOF sequential streams feed a tee digest on
 //! the write path (taiji-http `checksum::TeeSink`); `drive_small`
 //! (<=2 blocks) and the empty file keep the post-hoc face.
-//! - renamePending close-out is three-layer: bootstrap replay of
-//! done+pending rows ([`close_out_pending_row`]), in-session periodic
-//! polling, and the in-process driver-side journal ledger.
+//! - Pending publication replays through the same driver after restart;
+//! there is no competing bootstrap or actor polling filesystem writer.
 //! `--remote-time` is not replayed on close-out retries (they carry no
 //! probe record).
 //! - Multi-source probing is serial in user order; ftp/ftps sources are
@@ -74,7 +72,7 @@ use taiji_http::cookies::{CookieStore, NetscapeCookie};
 use taiji_http::coordinator;
 use taiji_http::degraded::DegradedJob;
 use taiji_http::error::{HttpError, Result as HttpResult};
-use taiji_http::finalize::{FinalizeOutcome, Finalizer, RenameIntent, RenameJournal};
+use taiji_http::finalize::{RenameIntent, RenameJournal};
 use taiji_http::ftp::{FtpConfig, FtpProbe, FtpTlsMode, FtpTransport, PasvAddressPolicy};
 use taiji_http::grid::BlockGrid;
 use taiji_http::limiter::{HttpLimiter, RateSampleReporter, ThrottledSink};
@@ -345,6 +343,10 @@ impl Drop for BatchLeaveGuard {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(in crate::session) struct HttpPersistConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_finalize: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<super::http_publication::PublicationRecord>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retain_request_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_resume_context: Option<crate::session::persist::import_http::RetainedHttpContext>,
@@ -352,7 +354,7 @@ pub(in crate::session) struct HttpPersistConfig {
     /// in-flight download).
     #[serde(default = "default_suffix")]
     pub incomplete_suffix: String,
-    /// renamePending flag (frozen seam: STATE_DONE plus this key).
+    /// Publication has not yet made the final output durable.
     #[serde(default)]
     pub rename_pending: bool,
     /// Raw `--checksum=<scheme>=<hex>` (persisted at creation so the
@@ -474,6 +476,8 @@ impl Default for HttpPersistConfig {
     fn default() -> Self {
         HttpPersistConfig {
             http_resume_context: None,
+            host_finalize: false,
+            publication: None,
             retain_request_context: false,
             incomplete_suffix: default_suffix(),
             rename_pending: false,
@@ -893,7 +897,7 @@ pub(super) struct HttpLive {
     /// face (`completed_bytes`) — block bookkeeping remains the persistence
     /// authority (projection != bookkeeping); the rate-conversion swap
     /// never touches this counter (always monotonic).
-    done_bytes: AtomicU64,
+    pub(super) done_bytes: AtomicU64,
     /// Bytes written during this activation (the rate-conversion base).
     written: AtomicU64,
     /// Byte-level heartbeat (the stall-detection source): accumulated by
@@ -907,6 +911,7 @@ pub(super) struct HttpLive {
     pub connections: AtomicU64,
     pub extents_active: AtomicU64,
     pub rename_pending: AtomicBool,
+    pub host_controlled: AtomicBool,
     final_url: StdMutex<String>,
     encoding: StdMutex<Option<String>>,
     sources: StdMutex<Vec<super::super::view::HttpSourceView>>,
@@ -922,7 +927,8 @@ pub(super) struct HttpLive {
     /// Per-source rate readings (bytes/s; converted at the driver tick,
     /// smoothed like the total rate).
     source_rates: Vec<AtomicU64>,
-    out_path: StdMutex<String>,
+    pub(super) out_path: StdMutex<String>,
+    pub(super) output: super::http_publication::OutputControl,
     /// Block-completion event face: block bookkeeping progress wakes the
     /// driver loop immediately — completion detection no longer waits for
     /// the next 500ms driver tick (notify_one permits coalescing
@@ -944,6 +950,7 @@ impl HttpLive {
             connections: AtomicU64::new(0),
             extents_active: AtomicU64::new(0),
             rename_pending: AtomicBool::new(false),
+            host_controlled: AtomicBool::new(false),
             final_url: StdMutex::new(String::new()),
             encoding: StdMutex::new(None),
             sources: StdMutex::new(
@@ -959,6 +966,7 @@ impl HttpLive {
             source_written: (0..uris.len().max(1)).map(|_| AtomicU64::new(0)).collect(),
             source_rates: (0..uris.len().max(1)).map(|_| AtomicU64::new(0)).collect(),
             out_path: StdMutex::new(String::new()),
+            output: super::http_publication::OutputControl::default(),
             progress_notify: tokio::sync::Notify::new(),
         }
     }
@@ -1144,6 +1152,7 @@ impl HttpLive {
             slot.rate = r.load(Ordering::Relaxed);
         }
         super::super::view::HttpView {
+            host_controlled: self.host_controlled.load(Ordering::Relaxed),
             final_url: crate::lock(&self.final_url).clone(),
             connections: self.connections.load(Ordering::Relaxed),
             extents_active: self.extents_active.load(Ordering::Relaxed),
@@ -1217,7 +1226,7 @@ pub(super) struct HttpEnd {
 /// (the done state and the intent share one transaction); clear_intent
 /// clears the flag the same way. The pending list is session in-memory
 /// bookkeeping (cross-restart read-back is the bootstrap replay face).
-struct PersistJournal {
+pub(super) struct PersistJournal {
     persist: Option<PersistHandle>,
     /// Row mirror (shared with the driver; the critical section only
     /// clones — the lock is never held across an await).
@@ -1226,7 +1235,7 @@ struct PersistJournal {
 }
 
 impl PersistJournal {
-    fn new(persist: Option<PersistHandle>, row: Arc<StdMutex<HttpTaskRow>>) -> Self {
+    pub(super) fn new(persist: Option<PersistHandle>, row: Arc<StdMutex<HttpTaskRow>>) -> Self {
         PersistJournal {
             persist,
             row,
@@ -1265,26 +1274,57 @@ impl RenameJournal for PersistJournal {
         intent: &'a RenameIntent,
     ) -> BoxJournalFuture<'a, HttpResult<()>> {
         Box::pin(async move {
-            self.upsert_mirror(TaskPhase::Done, true).await?;
+            {
+                let mut row = crate::lock(&self.row);
+                let mut cfg = HttpPersistConfig::from_json(&row.config_json);
+                if let Some(record) = &mut cfg.publication {
+                    record.intent = intent.clone();
+                }
+                row.config_json = cfg.to_json();
+            }
+            self.upsert_mirror(TaskPhase::Finalizing, true).await?;
             {
                 let mut pending = crate::lock(&self.pending);
                 // gid dedup: repeated records for one task do not grow the
                 // list — retry close-out is idempotent per task, and
                 // multiple same-gid intents would only produce duplicate
                 // close-outs.
-                if !pending.iter().any(|i| i.gid == intent.gid) {
+                if let Some(previous) = pending.iter_mut().find(|i| i.gid == intent.gid) {
+                    *previous = intent.clone();
+                } else {
                     pending.push(intent.clone());
                 }
             }
             info!(target: "taiji::core::http", gid = %intent.gid,
-                "rename intent recorded before action (state=done + rename_pending)");
+                "rename intent recorded before action (state=finalizing + rename_pending)");
             Ok(())
         })
     }
 
     fn clear_intent<'a>(&'a self, gid: &'a str) -> BoxJournalFuture<'a, HttpResult<()>> {
         Box::pin(async move {
-            self.upsert_mirror(TaskPhase::Done, false).await?;
+            let intent = crate::lock(&self.pending)
+                .iter()
+                .find(|i| i.gid == gid)
+                .cloned();
+            if let Some(intent) = intent {
+                let mut row = crate::lock(&self.row);
+                if let Some(parent) = intent.final_path.parent() {
+                    row.dir = parent.display().to_string();
+                }
+                row.out = intent
+                    .final_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let mut cfg = HttpPersistConfig::from_json(&row.config_json);
+                if let Some(record) = &mut cfg.publication {
+                    record.intent = intent;
+                }
+                row.config_json = cfg.to_json();
+            }
+            self.upsert_mirror(TaskPhase::Finalizing, false).await?;
             crate::lock(&self.pending).retain(|i| i.gid != gid);
             Ok(())
         })
@@ -1404,6 +1444,7 @@ impl SegmentSink for HttpGridSink {
 /// Driver inputs (assembled by the actor activation arm; payload clones
 /// decouple it from actor state).
 pub(super) struct HttpTaskRun {
+    pub(super) notices: Option<tokio::sync::mpsc::Sender<super::TaskNotice>>,
     pub gid: Gid,
     pub uris: Vec<String>,
     pub dir: PathBuf,
@@ -1527,6 +1568,12 @@ pub(super) fn spawn_http_task(
             },
         })),
     };
+    let initial_cfg = HttpPersistConfig::from_json(&crate::lock(&mirror).config_json);
+    live.host_controlled
+        .store(initial_cfg.host_finalize, Ordering::Relaxed);
+    if let Some(record) = initial_cfg.publication {
+        live.output.set(record);
+    }
     let pause = Arc::new(AtomicBool::new(false));
     // Cookie write-back loop (the cookie persistence wiring): periodically
     // snapshot the CookieStore during activation -> a full-set replacement
@@ -1663,6 +1710,12 @@ async fn drive(
     mirror: Arc<StdMutex<HttpTaskRow>>,
     pause: Arc<AtomicBool>,
 ) -> DriveStop {
+    let publication =
+        { HttpPersistConfig::from_json(&crate::lock(&mirror).config_json).publication };
+    if let Some(record) = publication {
+        return super::http_publication::resume_download(&run, &live, &mirror, &pause, record)
+            .await;
+    }
     let gid_hex = run.gid.to_string();
     let mut restarts_left = CONTENT_RESTART_BUDGET;
     loop {
@@ -1711,46 +1764,12 @@ async fn drive(
     }
 }
 
-/// Final-path claim lease (the core-side ownership face of the claim
-/// domain): [`plan_output`] already claims the final path when it decides
-/// the output name (holder key = the task gid); this lease is the Drop
-/// backstop of that claim for the driver attempt's lifetime — every
-/// non-finalize exit (fail/cancel/pause/412 restart/empty-file direct
-/// write) releases the claim (including a forceRemove hard abort dropping
-/// the driver future: the lease is a future-local value and drops with
-/// it). The rename-settled exits bypass Drop: Completed is released by the
-/// finalize close-out (a repeated release is harmless); RenamePending
-/// hands the claim to the renamePending polling bookkeeping via
-/// [`FinalClaimLease::persist`] (the claim lasts until a later close-out
-/// or task removal — in the window, a new task's plan_output hits
-/// `taiji.http.path_conflict`).
-struct FinalClaimLease {
-    /// None = handed over (persist) — Drop no longer releases.
-    path: Option<PathBuf>,
-    holder: String,
-}
-
-impl FinalClaimLease {
-    fn new(path: PathBuf, holder: String) -> Self {
-        FinalClaimLease {
-            path: Some(path),
-            holder,
-        }
-    }
-
-    /// Hand over (the RenamePending exit): the final-path claim stays in
-    /// the registry to be released by the polling close-out; this lease's
-    /// Drop no longer touches it.
-    fn persist(&mut self) {
-        self.path = None;
-    }
-}
-
+/// A driver owns its output claims until it exits, including while awaiting
+/// host publication. Cancellation and abort release them through this guard.
+struct FinalClaimLease(String);
 impl Drop for FinalClaimLease {
     fn drop(&mut self) {
-        if let Some(p) = self.path.take() {
-            taiji_http::partfile::release_final_path(&p, &self.holder);
-        }
+        taiji_http::partfile::release_all_final_claims(&self.0);
     }
 }
 
@@ -2053,7 +2072,7 @@ async fn drive_attempt(
     trace.trace.mark("plan");
     // Final-path claim lease: plan_output has claimed the path; every exit
     // of this attempt is closed out through it (see [`FinalClaimLease`]).
-    let mut final_lease = FinalClaimLease::new(paths.final_path.clone(), gid_hex.clone());
+    let _final_lease = FinalClaimLease(gid_hex.clone());
 
     match plan {
         // ---- Empty file: create a 0-byte output and done ----
@@ -2123,7 +2142,6 @@ async fn drive_attempt(
                 &pause,
                 row,
                 paths,
-                &mut final_lease,
                 suffix,
                 source,
                 authoritative,
@@ -2145,7 +2163,6 @@ async fn drive_attempt(
                 &pause,
                 row,
                 paths,
-                &mut final_lease,
                 total_len,
                 sources,
                 authoritative,
@@ -2172,7 +2189,6 @@ async fn drive_degraded(
     pause: &Arc<AtomicBool>,
     mut row: HttpTaskRow,
     paths: OutputPaths,
-    final_lease: &mut FinalClaimLease,
     suffix: IncompleteSuffix,
     source: PlanSource,
     authoritative: ProbeResult,
@@ -2219,10 +2235,6 @@ async fn drive_degraded(
     if let Some(t) = total {
         live.total_len.store(t, Ordering::Relaxed);
     }
-    let finalizer = Finalizer::new(Arc::new(PersistJournal::new(
-        run.persist.clone(),
-        Arc::clone(mirror),
-    )));
     // Known total length: the DegradedJob chain (write -> sync -> close
     // handle -> finalize); no total length: EOF delimits and this function
     // closes out the rename. The cancel window is wrapped in select (biased
@@ -2244,7 +2256,7 @@ async fn drive_degraded(
     // scheme leaves the feed absent and completion falls back to the
     // existing full post-hoc verification (same error timing and shape).
     let (cs_opt, digest_holder, feed) = degraded_checksum_faces(&row.config_json);
-    let outcome: Result<(u64, FinalizeOutcome), HttpDriveError> = match total {
+    let outcome: Result<(u64, HandlesClosed), HttpDriveError> = match total {
         Some(total) => {
             let transport: Box<dyn SegmentTransport> = match source.kind {
                 TransportKind::Ftp => {
@@ -2280,7 +2292,7 @@ async fn drive_degraded(
                 limiter: HttpLimiter::new(run.limiter.clone()),
                 checksum_feed: feed,
             };
-            let fut = job.run(transport.as_ref(), &ctx, &finalizer);
+            let fut = job.download(transport.as_ref(), &ctx);
             tokio::select! {
                 biased;
                 r = fut => r.map(|o| (total, o))
@@ -2307,90 +2319,43 @@ async fn drive_degraded(
             .await
             {
                 Err(e) => Err(e),
-                Ok((written, closed)) => {
-                    let intent = RenameIntent {
-                        gid: gid_hex.clone(),
-                        part_path: paths.part_path.clone(),
-                        final_path: paths.final_path.clone(),
-                        expected_len: written,
-                    };
-                    match finalizer.finalize(&intent, closed).await {
-                        Ok(o) => Ok((written, o)),
-                        Err(e) => Err(HttpDriveError::Failed {
-                            failure: EngineFailure::bare("taiji.http.failed"),
-                            message: format!("finalize journal: {e}"),
-                        }),
-                    }
-                }
+                Ok((written, closed)) => Ok((written, closed)),
             }
         }
     };
     live.connections.store(0, Ordering::Relaxed);
     live.note_source_busy(0, -1);
-    let completed = match outcome {
-        Ok((written, rename_outcome)) => {
-            // `--checksum` completion-time verification. Divergence declared
-            // separately: on the degraded path the rename happens first
-            // inside DegradedJob, so verification can only run on the final
-            // file — a different position than the grid path's
-            // "verify before rename". A renamePending (rename not settled)
-            // is not verified; the close-out retry face applies as usual.
-            // A mismatch rolls back the rename (the final file returns to
-            // `.part` for manual inspection; if the rollback fails it is
-            // deleted) — in both shapes no final file that fails
-            // verification is left on disk, matching the grid path's disk
-            // semantics of "failure = no final file".
-            // The tee pre-hash face (the sequential-stream digest was
-            // already fixed during the download) takes priority; with no
-            // digest, the existing full post-hoc read-back runs (EOF-stream
-            // form / invalid scheme).
+    match outcome {
+        Ok((written, closed)) => {
             if let Some(cs) = cs_opt.clone().or_else(|| task_checksum(&row.config_json)) {
-                if matches!(rename_outcome, FinalizeOutcome::Completed { .. }) {
-                    let verdict = match prefetched_digest_hex(&digest_holder) {
-                        Some(hex) => compare_digest(&cs, hex),
-                        None => verify_checksum(&paths.final_path, &cs).await,
-                    };
-                    if let Err(e) = verdict {
-                        rollback_final_file(&paths.part_path, &paths.final_path).await;
-                        return fail(
-                            run.persist.as_ref(),
-                            mirror,
-                            EngineFailure::of_http_error(&e),
-                            e.to_string(),
-                        )
-                        .await;
-                    }
+                let verdict = match prefetched_digest_hex(&digest_holder) {
+                    Some(hex) => compare_digest(&cs, hex),
+                    None => verify_checksum(&paths.part_path, &cs).await,
+                };
+                if let Err(error) = verdict {
+                    return fail(
+                        run.persist.as_ref(),
+                        mirror,
+                        EngineFailure::of_http_error(&error),
+                        error.to_string(),
+                    )
+                    .await;
                 }
             }
-            // `--remote-time`: after the rename settles, set the final
-            // file's mtime from the remote Last-Modified; best effort
-            // (a parse or set-time failure only warns — not a task
-            // failure; aria2 is also best effort). Skipped in the
-            // renamePending form (close-out retries carry no probe record —
-            // an honest gap, declared separately).
-            if matches!(rename_outcome, FinalizeOutcome::Completed { .. }) {
-                if let (true, Some(lm)) = (
-                    task_remote_time(&row.config_json),
-                    authoritative.last_modified.as_deref(),
-                ) {
-                    if let Err(e) =
-                        taiji_http::remotetime::apply_remote_mtime(&paths.final_path, lm).await
-                    {
-                        warn!(target: "taiji::core::http", gid = %gid_hex,
-                            path = %paths.final_path.display(), error = %e,
-                            "remote-time apply failed (download completed)");
-                    }
-                }
-            }
-            let pending = matches!(rename_outcome, FinalizeOutcome::RenamePending { .. });
-            if pending {
-                // Final-path claim hand-over: the renamePending polling
-                // bookkeeping takes over (released on close-out success;
-                // the task-removal path backstops).
-                final_lease.persist();
-            }
-            live.rename_pending.store(pending, Ordering::Relaxed);
-            written
+            return super::http_publication::complete_download(
+                run,
+                live,
+                mirror,
+                pause,
+                super::http_publication::CompletedData {
+                    source: paths.part_path.clone(),
+                    target: paths.final_path.clone(),
+                    len: written,
+                    closed,
+                    last_modified: authoritative.last_modified.clone(),
+                },
+            )
+            .await;
         }
         Err(HttpDriveError::Cancelled) => {
             return cancelled_row(run, mirror, pause).await;
@@ -2399,17 +2364,6 @@ async fn drive_degraded(
             return fail(run.persist.as_ref(), mirror, failure, message).await;
         }
     };
-    // The byte-level projection is pinned to the bookkeeping final: after
-    // close-out the live readings match the terminal entry (the bookkeeping
-    // authority) and no longer drift with write points.
-    live.done_bytes.store(completed, Ordering::Relaxed);
-    live.total_len.store(completed, Ordering::Relaxed);
-    set_state(mirror, TaskPhase::Done);
-    let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
-    DriveStop::Done {
-        total_len: completed,
-        completed_len: completed,
-    }
 }
 
 /// The degraded path's flow-control-wait liveness feed (the h2 flow-wait
@@ -2572,7 +2526,6 @@ async fn drive_segmented(
     pause: &Arc<AtomicBool>,
     mut row: HttpTaskRow,
     paths: OutputPaths,
-    final_lease: &mut FinalClaimLease,
     total_len: u64,
     sources: Vec<PlanSource>,
     authoritative: ProbeResult,
@@ -2794,7 +2747,6 @@ async fn drive_segmented(
             pause,
             row,
             paths,
-            final_lease,
             total_len,
             sources,
             authoritative,
@@ -3640,72 +3592,22 @@ async fn drive_segmented(
                 }
             }
         }
-        set_state(mirror, TaskPhase::Done);
-        let intent = RenameIntent {
-            gid: gid_hex.clone(),
-            part_path: paths.part_path.clone(),
-            final_path: paths.final_path.clone(),
-            expected_len: total_len,
-        };
-        let journal = PersistJournal::new(run.persist.clone(), Arc::clone(mirror));
-        let finalizer = Finalizer::new(Arc::new(journal));
         let closed = part.close();
-        drop(throttled); // sink chain lets go of its handle clones (close handles before rename)
-        match finalizer.finalize(&intent, closed).await {
-            Ok(FinalizeOutcome::Completed { .. }) => {
-                live.rename_pending.store(false, Ordering::Relaxed);
-                let _ =
-                    upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
-                // `--remote-time`: after the rename settles, set the final
-                // file's mtime from the remote Last-Modified; best effort
-                // (never a task failure).
-                if let (true, Some(lm)) = (
-                    task_remote_time(&row.config_json),
-                    authoritative.last_modified.as_deref(),
-                ) {
-                    if let Err(e) =
-                        taiji_http::remotetime::apply_remote_mtime(&paths.final_path, lm).await
-                    {
-                        warn!(target: "taiji::core::http", gid = %gid_hex,
-                            path = %paths.final_path.display(), error = %e,
-                            "remote-time apply failed (download completed)");
-                    }
-                }
-                info!(target: "taiji::core::http", gid = %gid_hex,
-                    path = %paths.final_path.display(), "download finalized");
-                DriveStop::Done {
-                    total_len,
-                    completed_len: total_len,
-                }
-            }
-            Ok(FinalizeOutcome::RenamePending { .. }) => {
-                // Final-path claim hand-over: the renamePending polling
-                // bookkeeping takes over (released on close-out success;
-                // the task-removal path backstops).
-                final_lease.persist();
-                live.rename_pending.store(true, Ordering::Relaxed);
-                let _ =
-                    upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
-                info!(target: "taiji::core::http", gid = %gid_hex,
-                    path = %paths.final_path.display(),
-                    "download done with renamePending (retry closes out)");
-                DriveStop::Done {
-                    total_len,
-                    completed_len: total_len,
-                }
-            }
-            Err(e) => {
-                // Journal write-face failure (the done state cannot land) —
-                // never enter the terminal state.
-                fail(
-                    run.persist.as_ref(),
-                    mirror,
-                    EngineFailure::bare("taiji.http.failed"),
-                    format!("finalize journal: {e}"),
-                )
-                .await
-            }
-        }
+        drop(throttled);
+        super::http_publication::complete_download(
+            run,
+            live,
+            mirror,
+            pause,
+            super::http_publication::CompletedData {
+                source: paths.part_path.clone(),
+                target: paths.final_path.clone(),
+                len: total_len,
+                closed,
+                last_modified: authoritative.last_modified.clone(),
+            },
+        )
+        .await
     }
 }
 
@@ -3806,7 +3708,6 @@ async fn drive_small(
     pause: &Arc<AtomicBool>,
     mut row: HttpTaskRow,
     paths: OutputPaths,
-    final_lease: &mut FinalClaimLease,
     total_len: u64,
     sources: Vec<PlanSource>,
     authoritative: ProbeResult,
@@ -4341,72 +4242,22 @@ async fn drive_small(
             "checksum verified before finalize");
     }
     set_state(mirror, TaskPhase::Done);
-    let intent = RenameIntent {
-        gid: gid_hex.clone(),
-        part_path: paths.part_path.clone(),
-        final_path: paths.final_path.clone(),
-        expected_len: total_len,
-    };
-    let journal = PersistJournal::new(run.persist.clone(), Arc::clone(mirror));
-    let finalizer = Finalizer::new(Arc::new(journal));
     let closed = part.close();
-    drop(throttled); // sink chain lets go of its handle clones (close handles before rename)
-    trace.mark("closed");
-    match finalizer.finalize(&intent, closed).await {
-        Ok(FinalizeOutcome::Completed { .. }) => {
-            live.rename_pending.store(false, Ordering::Relaxed);
-            trace.mark("fin");
-            let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
-            trace.mark("row_done");
-            // `--remote-time`: after the rename settles, set the final
-            // file's mtime from the remote Last-Modified; best effort
-            // (never a task failure).
-            if let (true, Some(lm)) = (
-                task_remote_time(&row.config_json),
-                authoritative.last_modified.as_deref(),
-            ) {
-                if let Err(e) =
-                    taiji_http::remotetime::apply_remote_mtime(&paths.final_path, lm).await
-                {
-                    warn!(target: "taiji::core::http", gid = %gid_hex,
-                        path = %paths.final_path.display(), error = %e,
-                        "remote-time apply failed (download completed)");
-                }
-            }
-            info!(target: "taiji::core::http", gid = %gid_hex,
-                path = %paths.final_path.display(), "small download finalized");
-            DriveStop::Done {
-                total_len,
-                completed_len: total_len,
-            }
-        }
-        Ok(FinalizeOutcome::RenamePending { .. }) => {
-            // Final-path claim hand-over: the renamePending polling
-            // bookkeeping takes over (released on close-out success; the
-            // task-removal path backstops).
-            final_lease.persist();
-            live.rename_pending.store(true, Ordering::Relaxed);
-            let _ = upsert_row(run.persist.as_ref(), &mirror_row(mirror, TaskPhase::Done)).await;
-            info!(target: "taiji::core::http", gid = %gid_hex,
-                path = %paths.final_path.display(),
-                "small download done with renamePending (retry closes out)");
-            DriveStop::Done {
-                total_len,
-                completed_len: total_len,
-            }
-        }
-        Err(e) => {
-            // Journal write-face failure (the done state cannot land) —
-            // never enter the terminal state.
-            fail(
-                run.persist.as_ref(),
-                mirror,
-                EngineFailure::bare("taiji.http.failed"),
-                format!("finalize journal: {e}"),
-            )
-            .await
-        }
-    }
+    drop(throttled);
+    super::http_publication::complete_download(
+        run,
+        live,
+        mirror,
+        pause,
+        super::http_publication::CompletedData {
+            source: paths.part_path.clone(),
+            target: paths.final_path.clone(),
+            len: total_len,
+            closed,
+            last_modified: authoritative.last_modified.clone(),
+        },
+    )
+    .await
 }
 
 /// Gate acquisition (the worker loop's first step, shared by both arms):
@@ -4792,25 +4643,6 @@ async fn probe_ftp_source(
 /// the final file is deleted as the fallback — neither shape leaves a
 /// final file that fails verification. Best effort: a rollback failure of
 /// its own never masks the checksum mismatch, which is the primary error.
-async fn rollback_final_file(part_path: &Path, final_path: &Path) {
-    let restore = tokio::fs::rename(final_path, part_path).await;
-    match restore {
-        Ok(()) => {
-            warn!(target: "taiji::core::http", part = %part_path.display(),
-                "checksum mismatch: final file rolled back to .part for inspection");
-        }
-        Err(rename_err) => match tokio::fs::remove_file(final_path).await {
-            Ok(()) => warn!(target: "taiji::core::http",
-                    part = %part_path.display(), error = %rename_err,
-                    "checksum mismatch: rollback rename failed; corrupt final file removed"),
-            Err(remove_err) => warn!(target: "taiji::core::http",
-                    part = %part_path.display(), path = %final_path.display(),
-                    error = %remove_err, rename_error = %rename_err,
-                    "checksum mismatch: failed to remove corrupt final file (manual cleanup required)"),
-        },
-    }
-}
-
 /// Read the task's `--checksum` face (the row's config_json payload; None
 /// = unset).
 fn task_checksum(config_json: &str) -> Option<String> {
@@ -4821,10 +4653,6 @@ fn task_checksum(config_json: &str) -> Option<String> {
 
 /// Read the task's `--remote-time` face (the row's config_json payload;
 /// default false).
-fn task_remote_time(config_json: &str) -> bool {
-    HttpPersistConfig::from_json(config_json).remote_time
-}
-
 /// Read the task's per-host cap intent (the row's config_json payload;
 /// None = the cap was never adjusted via addUri — activation is a no-op).
 /// Consumed at the session activation point (the `session::actor::tasks`
@@ -5491,7 +5319,7 @@ fn sync_mirror_progress(mirror: &StdMutex<HttpTaskRow>, row: &HttpTaskRow) {
 /// returns it to the paused queue); anything else (shutdown/remove) keeps
 /// downloading as-is (the restart-resumes face). No fsync (the shutdown
 /// budget discipline).
-async fn cancelled_row(
+pub(super) async fn cancelled_row(
     run: &HttpTaskRun,
     mirror: &Arc<StdMutex<HttpTaskRow>>,
     pause: &Arc<AtomicBool>,
@@ -5509,7 +5337,7 @@ async fn cancelled_row(
 /// code + refinement dimension — the row's error_code and
 /// HttpEnd.error_engine share the source; numeric refinement flows through
 /// the taiji-rpc map per code and per dimension).
-async fn fail(
+pub(super) async fn fail(
     p: Option<&PersistHandle>,
     mirror: &Arc<StdMutex<HttpTaskRow>>,
     failure: super::super::view::EngineFailure,
@@ -5723,117 +5551,13 @@ fn split_request_target(uri: &str) -> Option<(&str, &str, &str)> {
     Some((scheme, host, path))
 }
 
-/// Idempotent disk close-out of a renamePending row (shared by the
-/// bootstrap read-back and the session's periodic polling). The intent is
-/// rebuilt from row facts: the `.part` path =
-/// the final name + the persisted suffix, and the idempotence length takes
-/// the disk facts (a `.part` present = the rename never settled; a final
-/// file present = the "rename settled but crashed before clearing the
-/// ledger" idempotent close-out form); neither present = the file facts are
-/// lost, stay pending for a human decision (never fabricate success).
-/// Returns whether close-out completed.
-///
-/// Claim-domain guard: if the final path is held by another task (an
-/// in-flight task's plan_output creation-time claim), this round skips and
-/// the next round retries — never jump ahead of the rename; self-held/free
-/// -> claim atomically, then close out (prevents a new task from entering the
-/// same path inside the close-out window). A successful close-out releases
-/// both claims via finalize; staying pending keeps the claims across
-/// rounds in the registry bookkeeping.
-pub(super) async fn close_out_pending_row(
-    persist: &Option<PersistHandle>,
-    row: &HttpTaskRow,
-) -> bool {
-    if row.out.is_empty() || row.dir.is_empty() {
-        return false;
-    }
-    let cfg = HttpPersistConfig::from_json(&row.config_json);
-    let final_path = PathBuf::from(&row.dir).join(&row.out);
-    let mut os = final_path.clone().into_os_string();
-    os.push(&cfg.incomplete_suffix);
-    let part_path = PathBuf::from(os);
-    let (part_len, final_len) = part_and_final_lengths(&part_path, &final_path).await;
-    let expected_len = match (part_len, final_len) {
-        (Some(len), _) => len,
-        (None, Some(len)) => len,
-        (None, None) => {
-            warn!(target: "taiji::core::http", gid = %row.gid,
-                "renamePending close-out: neither part nor final file present; staying pending");
-            return false;
-        }
-    };
-    // Enter the claim domain only when disk facts exist (something to close
-    // out): a final path held by another task -> skip this round; a failed
-    // claim (a racing entrant) is the same face. Same-key idempotent — a
-    // self-held claim from a previous stay-pending round does not block
-    // this one.
-    if taiji_http::partfile::claim_final_path(&final_path, &row.gid).is_err() {
-        info!(target: "taiji::core::http", gid = %row.gid,
-            path = %final_path.display(),
-            "renamePending close-out: final path held by another task; deferring to next poll");
-        return false;
-    }
-    let intent = RenameIntent {
-        gid: row.gid.clone(),
-        part_path,
-        final_path,
-        expected_len,
-    };
-    let journal = PersistJournal::new(persist.clone(), Arc::new(StdMutex::new(row.clone())));
-    crate::lock(&journal.pending).push(intent);
-    let finalizer = Finalizer::new(Arc::new(journal));
-    match finalizer.retry_pending().await {
-        Ok(outcomes) => {
-            let closed = outcomes
-                .iter()
-                .all(|(_, o)| matches!(o, FinalizeOutcome::Completed { .. }));
-            if closed {
-                info!(target: "taiji::core::http", gid = %row.gid,
-                    "renamePending close-out completed (bootstrap/poll retry)");
-            }
-            closed
-        }
-        Err(e) => {
-            warn!(target: "taiji::core::http", gid = %row.gid,
-                error = %e, "renamePending close-out journal failure; staying pending");
-            false
-        }
-    }
-}
-
-/// Clear a task's own stale claims before a rerun: when a done+renamePending
-/// row re-enters the run via unpause (reopen admits done rows), the
-/// part+final claims handed over by the previous finalize would block the
-/// rerun (plan_output / `PartFile::open` hit the
-/// `taiji.http.path_conflict` misjudgment). At most one driver exists per
-/// gid at a time (serial actor activation, a single driver), so only this
-/// task's own stale claims can be released — final claims are released
-/// wholesale by the holder key (auto-rename's historical candidate paths
-/// are not in the row facts); part claims release by path, and the same
-/// part path implies the same final path (the final domain already
-/// excludes other tasks), so no other task's claim can be wrongly removed.
-pub(super) fn release_own_pending_claims(gid_hex: &str, dir: &str, out: &str, config_json: &str) {
-    if dir.is_empty() || out.is_empty() {
-        return;
-    }
-    let suffix = HttpPersistConfig::from_json(config_json).incomplete_suffix;
-    let final_path = PathBuf::from(dir).join(out);
-    let mut os = final_path.into_os_string();
-    os.push(&suffix);
+/// Called after the driver is stopped, before removal or reactivation.
+/// Physical paths come only from the current durable publication record.
+pub(super) fn release_output_claims(gid_hex: &str, config_json: &str) {
     taiji_http::partfile::release_all_final_claims(gid_hex);
-    taiji_http::partfile::release_part_claim(Path::new(&os));
-}
-
-/// `.part` / final file lengths on disk (blocking face via spawn_blocking;
-/// NotFound = None).
-async fn part_and_final_lengths(part: &Path, done: &Path) -> (Option<u64>, Option<u64>) {
-    let (p, d) = (part.to_path_buf(), done.to_path_buf());
-    tokio::task::spawn_blocking(move || {
-        let len_of = |path: std::path::PathBuf| std::fs::metadata(&path).ok().map(|m| m.len());
-        (len_of(p), len_of(d))
-    })
-    .await
-    .unwrap_or((None, None))
+    if let Some(record) = HttpPersistConfig::from_json(config_json).publication {
+        taiji_http::partfile::release_part_claim(&record.intent.part_path);
+    }
 }
 
 /// URL path's last segment -> a candidate output name (percent-decode;
@@ -6459,6 +6183,8 @@ mod tests {
                 part_path: PathBuf::from("/dl/f.bin.part"),
                 final_path: PathBuf::from("/dl/f.bin"),
                 expected_len: 10,
+                reservation_token: String::new(),
+                auto_rename: false,
             };
             journal
                 .record_intent(&i)
@@ -6814,6 +6540,8 @@ mod tests {
     fn http_persist_config_round_trip() {
         let cfg = HttpPersistConfig {
             http_resume_context: None,
+            host_finalize: false,
+            publication: None,
             retain_request_context: false,
             incomplete_suffix: ".crdownload".into(),
             rename_pending: true,
@@ -7031,39 +6759,6 @@ mod tests {
                 "{scheme} mismatch error code: {e}"
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Disk rollback for a degraded-path verification mismatch (never leave
-    /// a corrupt final file): the final file returns to `.part` (the main
-    /// form); when returning is impossible (the final file no longer
-    /// exists — the deletion path) there is no panic. Idempotence: content
-    /// already at the part location does not block the rollback rename
-    /// (posix replacement semantics).
-    #[tokio::test]
-    async fn rollback_final_file_restores_part() {
-        let dir = std::env::temp_dir().join(format!("tj-rollback-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir: {e}"));
-        let part = dir.join("blob.bin.part");
-        let final_path = dir.join("blob.bin");
-        std::fs::write(&final_path, b"verified-against-wrong-digest")
-            .unwrap_or_else(|e| panic!("write: {e}"));
-
-        rollback_final_file(&part, &final_path).await;
-        assert!(!final_path.exists(), "the final file must roll back");
-        assert!(
-            part.exists(),
-            "data stays on disk as `.part` for inspection"
-        );
-        assert_eq!(
-            std::fs::read(&part).unwrap_or_else(|e| panic!("read: {e}")),
-            b"verified-against-wrong-digest"
-        );
-
-        // Rolling back again (the final file missing): the rename fails -> the
-        // remove fallback also does not panic (a defensive idempotence face).
-        rollback_final_file(&part, &final_path).await;
-        assert!(!final_path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

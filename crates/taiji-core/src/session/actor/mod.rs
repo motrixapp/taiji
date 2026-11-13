@@ -95,10 +95,6 @@ const NAT_SHUTDOWN_BUDGET: Duration = Duration::from_millis(250);
 /// tasks are bounded by the queue; 64 is ample and bounded.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
 
-/// renamePending closeout poll period (zero cost while the registry is
-/// empty).
-const CLOSEOUT_POLL_INTERVAL: Duration = Duration::from_secs(5);
-
 /// BT engine status snapshot cache TTL. The trade-off: polling read faces
 /// (getGlobalStat aggregation / tellStatus·tellActive live views / periodic
 /// summaries) hit the cache within the TTL and lag by at most one sampling
@@ -616,6 +612,14 @@ static HTTP_TASK_OPTION_TABLE: &[OptionDecl<HttpTaskApply>] = &[
     // ca-certificate do not fold: the TLS trust face does not silently
     // migrate with the fork config (a fail-closed stance, registered in
     // the fold_imported_options comment).
+    OptionDecl::table_row(
+        "http-host-finalize",
+        OptionFace::http_persist(),
+        HttpTaskApply::Persist(|c, v| {
+            c.host_finalize = parse_bool_strict(v, "--http-host-finalize")?;
+            Ok(())
+        }),
+    ),
     OptionDecl::table_row(
         "http-incomplete-suffix",
         OptionFace::http_persist().folding(),
@@ -1809,6 +1813,10 @@ enum TaskOutcome {
 /// different face from the outbound event bus `super::events::SessionEvent`
 /// — this is the actor's private control flow).
 enum TaskNotice {
+    HttpFinalizing {
+        gid: Gid,
+        host_ready: bool,
+    },
     Ended {
         gid: Gid,
         outcome: TaskOutcome,
@@ -1887,7 +1895,8 @@ impl TaskNotice {
     /// snapshot cache accordingly).
     fn gid(&self) -> Gid {
         match self {
-            TaskNotice::Ended { gid, .. }
+            TaskNotice::HttpFinalizing { gid, .. }
+            | TaskNotice::Ended { gid, .. }
             | TaskNotice::MagnetUpgraded { gid, .. }
             | TaskNotice::RecheckDone { gid, .. }
             | TaskNotice::StatusDirty { gid }
@@ -2010,12 +2019,6 @@ pub struct SessionActor {
     /// management face — manual bans + lists, the standard noted in
     /// refresh_meta_guard).
     meta_guard: IpGuardHandle,
-    /// renamePending closeout registry (the in-process half): a task
-    /// finishing Done+pending registers its row facts and periodic polling
-    /// idempotently closes them on disk; rows read back at bootstrap with
-    /// a pending closeout register too. Row deletion (remove) removes the
-    /// entry.
-    http_rename_pending: HashMap<Gid, taiji_store::persist::HttpTaskRow>,
     /// Per-host connection cap registry: one session-level instance, all
     /// HTTP tasks share the Arc — in-flight connections to the same host
     /// count across tasks. The cap is adjusted at runtime by the addUri
@@ -2289,7 +2292,6 @@ impl SessionActor {
             // snapshot (enumerated once at process start — getifaddrs
             // completes in sync context; the dialing hot path only reads).
             meta_guard: IpGuardHandle::new(Default::default()),
-            http_rename_pending: HashMap::new(),
             http_per_host,
             checking_progress: HashMap::new(),
             checking_deferred: HashSet::new(),
@@ -2484,12 +2486,6 @@ impl SessionActor {
                 self.global.listen_port,
             )
         });
-        // The renamePending closeout poll cadence (the in-process half —
-        // while the registry is non-empty, retry the on-disk closeout
-        // every 5s; the empty-table arm returns immediately at zero
-        // cost).
-        let mut closeout_tick = tokio::time::interval(CLOSEOUT_POLL_INTERVAL);
-        closeout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // The periodic task summary cadence (`--summary-interval`; a
         // startup-time option — takes effect on restart, this cadence is
         // assembled once at spawn). 0 = disabled → the arm suspends
@@ -2535,9 +2531,6 @@ impl SessionActor {
                                    }
                                }
                            },
-                           _ = closeout_tick.tick() => {
-                               self.poll_rename_pending().await;
-                           }
                            _ = async {
                                match summary_tick.as_mut() {
                                    Some(t) => {
@@ -2591,6 +2584,12 @@ impl SessionActor {
                                        t.backend.expire_status_cache();
                                    }
                                    match notice {
+                                       TaskNotice::HttpFinalizing { gid, host_ready } => {
+                                           if !self.running.contains_key(&gid) { continue; }
+                                           self.queue.finalizing.insert(gid);
+                                           if host_ready { self.publish(gid, EventKind::HttpReady); }
+                                           self.pump_all().await;
+                                       }
                                        TaskNotice::Ended { gid, outcome } => {
                                            self.handle_ended(gid, outcome).await;
                                        }
@@ -2832,7 +2831,23 @@ impl SessionActor {
         }
         // (4) download fillup + spawn backfill (the former pump body).
         let max = self.global.max_concurrent_downloads;
-        let mut batch = self.queue.fillup_metadata(4);
+        for (gid, job) in &self.jobs {
+            if let Job::Http(job) = job {
+                let row = job
+                    .mirror
+                    .as_ref()
+                    .map(|m| crate::lock(m).clone())
+                    .or_else(|| job.restore.clone());
+                if row.is_some_and(|r| {
+                    let cfg = http_task::HttpPersistConfig::from_json(&r.config_json);
+                    cfg.publication.is_some()
+                }) {
+                    self.queue.finalizing.insert(*gid);
+                }
+            }
+        }
+        let mut batch = self.queue.fillup_finalizing();
+        batch.extend(self.queue.fillup_metadata(4));
         batch.extend(self.queue.fillup(max));
         if !batch.is_empty() {
             debug!(
@@ -2920,6 +2935,8 @@ use views::{group_tiers, random_session_id};
 mod tests;
 
 mod commands;
+mod http_output_commands;
+mod http_publication;
 /// pub(super): the migration importer's HTTP side
 /// (session::persist::import_http) reuses [`http_task::mirrors_json_of`]
 /// and [`http_task::HttpPersistConfig`] — the single source of the

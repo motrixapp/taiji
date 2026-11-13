@@ -215,7 +215,7 @@ pub enum TaskPhase {
 pub enum TaskFamily {
     /// `torrent.state` (9 declared row words).
     Torrent,
-    /// `http_task.state` (6 declared row words).
+    /// `http_task.state` (7 declared row words).
     Http,
     /// `media_task.state` (the full ten-state domain).
     Media,
@@ -367,7 +367,7 @@ impl TaskPhase {
     }
 
     /// Does this phase word belong to the family's declared value
-    /// domain? (Torrent 9, http 6, media 10 row words; the shared words
+    /// domain? (Torrent 9, http 7, media 10 row words; the shared words
     /// — queued/downloading/paused/error/done — belong to all three.)
     pub fn applies_to(self, family: TaskFamily) -> bool {
         match family {
@@ -392,6 +392,7 @@ impl TaskPhase {
                 TaskPhase::Queued
                     | TaskPhase::Probing
                     | TaskPhase::Downloading
+                    | TaskPhase::Finalizing
                     | TaskPhase::Paused
                     | TaskPhase::Error
                     | TaskPhase::Done
@@ -510,6 +511,7 @@ mod tests {
     const FROZEN_HTTP: &[&str] = &[
         "done",
         "downloading",
+        "finalizing",
         "error",
         "paused",
         "probing",
@@ -695,7 +697,7 @@ mod tests {
             (TaskPhase::Recording, false, false, true),
             (TaskPhase::Processing, false, false, true),
             (TaskPhase::Verifying, false, false, true),
-            (TaskPhase::Finalizing, false, false, true),
+            (TaskPhase::Finalizing, false, true, true),
         ];
         for (variant, torrent, http, media) in FAMILIES {
             assert_eq!(
@@ -918,7 +920,7 @@ mod tests {
         assert_eq!(
             sorted_family_active_strings(TaskFamily::Http),
             sorted(&frozen_family_active(TaskFamily::Http)),
-            "http: 6 declared words - 2 terminals = the 4-member active set"
+            "http: 7 declared words - 2 terminals = the 5-member active set"
         );
         assert_eq!(
             sorted_family_active_strings(TaskFamily::Media),
@@ -1004,7 +1006,7 @@ mod tests {
         assert_eq!(
             sorted(&http),
             sorted(&frozen_family_active(TaskFamily::Http)),
-            "http: the 4-member body"
+            "http: the 5-member body"
         );
         assert_eq!(
             sorted(&media),
@@ -1014,7 +1016,7 @@ mod tests {
         // Member counts as independent pins (a frozen-body edit that
         // keeps set equality but changes the count cannot slip through).
         assert_eq!(torrent.len(), 7, "torrent: 9 declared - 2 terminals");
-        assert_eq!(http.len(), 4, "http: 6 declared - 2 terminals");
+        assert_eq!(http.len(), 5, "http: 7 declared - 2 terminals");
         assert_eq!(media.len(), 8, "media: 10 declared - 2 terminals");
         // Fold collapse: the checking/seeding groups contribute their one
         // row word exactly once each (no duplicates anywhere).
@@ -1040,7 +1042,10 @@ mod tests {
                 "paused",
             ]
         );
-        assert_eq!(http, ["queued", "downloading", "paused", "probing"]);
+        assert_eq!(
+            http,
+            ["queued", "downloading", "paused", "probing", "finalizing"]
+        );
         assert_eq!(
             media,
             [

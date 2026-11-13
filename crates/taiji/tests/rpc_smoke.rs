@@ -21,8 +21,11 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn spawn_cli(port: u16) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_taiji"))
+fn spawn_cli(port: u16) -> (Child, tempfile::TempDir) {
+    let state = tempfile::tempdir().unwrap_or_else(|e| panic!("temp state: {e}"));
+    let child = Command::new(env!("CARGO_BIN_EXE_taiji"))
+        .arg("--sqlite3-db-path")
+        .arg(state.path().join("state.sqlite3"))
         .arg("--rpc-listen-port")
         .arg(port.to_string())
         .arg("--rpc-secret")
@@ -30,17 +33,22 @@ fn spawn_cli(port: u16) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap_or_else(|e| panic!("spawn taiji: {e}"))
+        .unwrap_or_else(|e| panic!("spawn taiji: {e}"));
+    (child, state)
 }
 
-fn spawn_cli_without_secret(port: u16) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_taiji"))
+fn spawn_cli_without_secret(port: u16) -> (Child, tempfile::TempDir) {
+    let state = tempfile::tempdir().unwrap_or_else(|e| panic!("temp state: {e}"));
+    let child = Command::new(env!("CARGO_BIN_EXE_taiji"))
+        .arg("--sqlite3-db-path")
+        .arg(state.path().join("state.sqlite3"))
         .arg("--rpc-listen-port")
         .arg(port.to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap_or_else(|e| panic!("spawn taiji: {e}"))
+        .unwrap_or_else(|e| panic!("spawn taiji: {e}"));
+    (child, state)
 }
 
 fn wait_port_open(port: u16, budget: Duration) -> bool {
@@ -100,7 +108,7 @@ fn unauthenticated_write_is_refused_and_daemon_stays_up() {
     // gets 400 + the frozen message; the service must not exit and
     // the read-only face keeps working.
     let port = free_port();
-    let mut child = spawn_cli_without_secret(port);
+    let (mut child, _state) = spawn_cli_without_secret(port);
     assert!(
         wait_port_open(port, Duration::from_secs(10)),
         "cli must open rpc listener on --rpc-listen-port"
@@ -128,7 +136,7 @@ fn unauthenticated_write_is_refused_and_daemon_stays_up() {
 #[test]
 fn cli_rpc_listen_port_smoke_and_rpc_shutdown_exits_cleanly() {
     let port = free_port();
-    let mut child = spawn_cli(port);
+    let (mut child, _state) = spawn_cli(port);
     assert!(
         wait_port_open(port, Duration::from_secs(10)),
         "cli must open rpc listener on --rpc-listen-port"

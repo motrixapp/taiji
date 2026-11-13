@@ -337,6 +337,7 @@ pub(crate) struct QueueMan {
     reserved: VecDeque<ReservedEntry>,
     active: BTreeMap<Gid, ActiveRecord>,
     metadata_only: std::collections::HashSet<Gid>,
+    pub(crate) finalizing: std::collections::HashSet<Gid>,
     /// On-disk recheck-in-flight bookkeeping: gid -> paused intent.
     /// Tasks under verification **occupy no concurrency slot and cannot
     /// be activated by fillup** (engine assembly reads the bitmap from
@@ -407,6 +408,7 @@ impl QueueMan {
             reserved: VecDeque::new(),
             active: BTreeMap::new(),
             metadata_only: std::collections::HashSet::new(),
+            finalizing: std::collections::HashSet::new(),
             checking: BTreeMap::new(),
             check_pending: VecDeque::new(),
             seeding: BTreeMap::new(),
@@ -454,6 +456,7 @@ impl QueueMan {
     /// DownloadResult — same as aria2 removeReservedGroup,
     /// RequestGroupMan.cc).
     pub(crate) fn remove_reserved(&mut self, gid: Gid) -> bool {
+        self.finalizing.remove(&gid);
         let before = self.reserved.len();
         self.reserved.retain(|e| e.gid != gid);
         self.reserved.len() != before
@@ -578,13 +581,35 @@ impl QueueMan {
         to_spawn
     }
 
+    /// Closed HTTP outputs require no payload budget, including after restart.
+    pub(crate) fn fillup_finalizing(&mut self) -> Vec<Gid> {
+        let mut admitted = Vec::new();
+        self.reserved.retain(|entry| {
+            if !entry.paused
+                && !self.startup_held.contains_key(&entry.gid)
+                && self.finalizing.contains(&entry.gid)
+            {
+                self.active.insert(entry.gid, ActiveRecord::default());
+                admitted.push(entry.gid);
+                false
+            } else {
+                true
+            }
+        });
+        admitted
+    }
+
     pub(crate) fn set_metadata_only(&mut self, ids: impl IntoIterator<Item = Gid>) {
         self.metadata_only = ids.into_iter().collect();
+    }
+    fn take_active(&mut self, gid: Gid) -> Option<ActiveRecord> {
+        self.finalizing.remove(&gid);
+        self.active.remove(&gid)
     }
     pub(crate) fn active_payload_len(&self) -> usize {
         self.active
             .keys()
-            .filter(|gid| !self.metadata_only.contains(gid))
+            .filter(|gid| !self.metadata_only.contains(gid) && !self.finalizing.contains(gid))
             .count()
     }
     /// Metadata-only jobs cannot start payload, so their bounded queue is
@@ -685,7 +710,7 @@ impl QueueMan {
     /// same as `ActiveRecord::requeue_paused`; the Result path returns
     /// None.
     pub(crate) fn retire_active(&mut self, gid: Gid, result: DownloadResultEntry) -> RetireOutcome {
-        let Some(rec) = self.active.remove(&gid) else {
+        let Some(rec) = self.take_active(gid) else {
             return RetireOutcome::Result;
         };
         // unpauseAll supersede check: the pause request predates the
@@ -717,7 +742,7 @@ impl QueueMan {
     /// forceRemove's abort finalization — the aria2 forceRemove
     /// fast-release path).
     pub(crate) fn drop_active(&mut self, gid: Gid) -> bool {
-        self.active.remove(&gid).is_some()
+        self.take_active(gid).is_some()
     }
 
     // ---- DownloadResult table ----
@@ -954,7 +979,7 @@ impl QueueMan {
     /// not repeat the transfer) and against the Ended-first race (the
     /// task already finalized).
     pub(crate) fn begin_seeding(&mut self, gid: Gid) -> bool {
-        let Some(rec) = self.active.remove(&gid) else {
+        let Some(rec) = self.take_active(gid) else {
             return false;
         };
         self.seeding.insert(
@@ -1109,7 +1134,7 @@ impl QueueMan {
     /// remove/Ended-first race where the task already finalized), the
     /// [`Self::begin_seeding`] shape.
     pub(crate) fn begin_synthesis_park(&mut self, gid: Gid) -> bool {
-        let Some(rec) = self.active.remove(&gid) else {
+        let Some(rec) = self.take_active(gid) else {
             return false;
         };
         if !self.proc_wait.iter().any(|p| p.gid == gid) {

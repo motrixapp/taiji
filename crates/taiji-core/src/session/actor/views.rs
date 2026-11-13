@@ -139,6 +139,9 @@ impl SessionActor {
             return live.http_view();
         }
         super::super::view::HttpView {
+            host_controlled: hj.restore.as_ref().is_some_and(|row| {
+                http_task::HttpPersistConfig::from_json(&row.config_json).host_finalize
+            }),
             final_url: hj.uris.first().cloned().unwrap_or_default(),
             connections: 0,
             extents_active: 0,

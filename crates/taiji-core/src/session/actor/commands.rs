@@ -33,7 +33,6 @@ impl SessionActor {
         };
         self.queue.remove_result(gid);
         self.queue.startup_held.remove(&gid);
-        self.http_rename_pending.remove(&gid);
         self.rows.remove(&gid.to_string());
         if in_memory || written {
             Ok(CommandReply::Accepted)
@@ -521,7 +520,6 @@ impl SessionActor {
                     }
                 }
                 self.queue.purge_results();
-                self.http_rename_pending.clear();
                 let keep: std::collections::HashSet<_> =
                     self.queue.known_gids().into_iter().collect();
                 self.queue.startup_held.retain(|gid, _| keep.contains(gid));
@@ -587,6 +585,14 @@ impl SessionActor {
                     Err(e) => Err(e),
                 };
                 let _ = reply.send(r);
+                self.pump_all().await;
+            }
+            C::GetHttpOutput { gid } => {
+                let _ = reply.send(self.get_http_output(&gid).await);
+            }
+            C::FinalizeHttp { gid, action, path } => {
+                let result = self.finalize_http(&gid, &action, path).await;
+                let _ = reply.send(result);
                 self.pump_all().await;
             }
             C::GetOption { gid } => {
@@ -3463,6 +3469,7 @@ pub(super) fn http_overlay_persist_config(
     cfg: &http_task::HttpPersistConfig,
 ) {
     let mut current = http_task::HttpPersistConfig::from_json(&row.config_json);
+    current.host_finalize = cfg.host_finalize;
     current.incomplete_suffix = cfg.incomplete_suffix.clone();
     current.checksum = cfg.checksum.clone();
     current.remote_time = cfg.remote_time;

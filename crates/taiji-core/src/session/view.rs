@@ -373,12 +373,34 @@ pub struct HttpSourceView {
     pub state: String,
 }
 
+/// Closed-output lifecycle, independent of the compatibility task status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpOutputPhase {
+    Downloading,
+    Ready,
+    Publishing,
+    Published,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpOutputView {
+    pub phase: HttpOutputPhase,
+    pub host_controlled: bool,
+    pub paused: bool,
+    pub source_path: Option<String>,
+    pub final_path: Option<String>,
+    pub length: Option<u64>,
+    pub error: Option<String>,
+}
+
 /// The tellStatus `http` sub-dictionary payload (promised fields:
 /// finalUrl/connections/extentsActive/blocksDone/blocksTotal/encoding/
 /// renamePending/sources[]). Carried by HTTP tasks only (None = key
 /// omitted for non-HTTP tasks).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpView {
+    /// The embedding host commits logical completion after native publication.
+    pub host_controlled: bool,
     /// The final URL after probe-redirect convergence (unprobed = the
     /// user URI verbatim).
     pub final_url: String,

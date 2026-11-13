@@ -655,6 +655,13 @@ pub(crate) async fn execute_session_method(
                     pos,
                 })
             }
+            "taiji.getHttpOutput" => Ok(SessionCommand::GetHttpOutput { gid: gid_param(&params, 0)? }),
+            "taiji.finalizeHttp" => {
+                let gid = gid_param(&params, 0)?;
+                let options = opt_options(&params, 1)?;
+                let action = options.get("action").cloned().unwrap_or_else(|| "publish".into());
+                Ok(SessionCommand::FinalizeHttp { gid, action, path: options.get("path").cloned() })
+            }
             "changeOption" => {
                 let gid = gid_param(&params, 0)?;
                 if params.get(1).is_none() {

@@ -888,6 +888,7 @@ impl SessionActor {
                         .collect();
                 }
                 let run = http_task::HttpTaskRun {
+                    notices: Some(events.clone()),
                     gid,
                     uris: hj.uris.clone(),
                     dir: hj.dir.clone(),
@@ -1249,18 +1250,6 @@ impl SessionActor {
         } else {
             completed
         };
-        if is_http {
-            let pending = http_live
-                .as_ref()
-                .map(|l| l.rename_pending.load(std::sync::atomic::Ordering::Relaxed))
-                .unwrap_or(false);
-            if pending {
-                if let Some(mirror) = &http_mirror {
-                    let row = crate::lock(mirror).clone();
-                    self.http_rename_pending.insert(gid, row);
-                }
-            }
-        }
         // Finalize-window pause race shield: for outcome=Done the user's
         // pause has no object left — the pause flag no longer flips the
         // teardown dispatch (requeue-paused would restart a completed task).
@@ -1922,6 +1911,7 @@ impl SessionActor {
         note: Option<String>,
         error_engine: Option<super::super::view::EngineFailure>,
     ) -> RetireOutcome {
+        self.queue.finalizing.remove(&gid);
         let hook = self.running.get(&gid).and_then(|t| t.hook.clone());
         let was_active = self.queue.contains_active(gid);
         // Terminal display snapshot (files/bitfield/piece faces/bt dict)
@@ -3749,12 +3739,7 @@ impl SessionActor {
         // done+renamePending row re-occupies the runtime, so the part+final
         // claims transferred at the previous finalize yield (an error row
         // has no claims; an idempotent no-op).
-        http_task::release_own_pending_claims(
-            &gid.to_string(),
-            &row.dir,
-            &row.out,
-            &row.config_json,
-        );
+        http_task::release_output_claims(&gid.to_string(), &row.config_json);
         self.jobs.insert(
             gid,
             Job::Http(Box::new(HttpJob {
@@ -4169,6 +4154,18 @@ impl SessionActor {
                     )));
                 }
                 if force {
+                    // A filesystem call cannot be aborted. Drain publication
+                    // before acknowledging removal or releasing its claims.
+                    let publication_gate = self.running.get(&gid).and_then(|t| {
+                        t.backend.http_live().map(|live| {
+                            t.token.cancel();
+                            live.output.io_gate.clone()
+                        })
+                    });
+                    let _publication_drain = match publication_gate {
+                        Some(gate) => Some(gate.lock_owned().await),
+                        None => None,
+                    };
                     let total = self
                         .running
                         .get(&gid)
@@ -4197,20 +4194,8 @@ impl SessionActor {
                             .get(&gid)
                             .and_then(|t| t.backend.http_row().cloned())
                     {
-                        let (dir, out, cfg_json) = {
-                            let r = crate::lock(&mirror);
-                            (r.dir.clone(), r.out.clone(), r.config_json.clone())
-                        };
-                        if !dir.is_empty() && !out.is_empty() {
-                            let suffix = super::http_task::HttpPersistConfig::from_json(&cfg_json)
-                                .incomplete_suffix;
-                            let final_path = std::path::PathBuf::from(&dir).join(&out);
-                            let mut os = final_path.clone().into_os_string();
-                            os.push(&suffix);
-                            let gid_hex = gid.to_string();
-                            taiji_http::partfile::release_final_path(&final_path, &gid_hex);
-                            taiji_http::partfile::release_part_claim(std::path::Path::new(&os));
-                        }
+                        let cfg_json = crate::lock(&mirror).config_json.clone();
+                        http_task::release_output_claims(&gid.to_string(), &cfg_json);
                     }
                     if let Some(t) = self.running.get(&gid) {
                         // token.cancel before the hard abort — the batch-path
@@ -4248,7 +4233,6 @@ impl SessionActor {
                     // Row deletion (FK cascade clears file/progress/tracker
                     // rows) + HTTP row deletion (the paired delete clears
                     // the cookie rows) + closeout registry removal.
-                    self.http_rename_pending.remove(&gid);
                     self.persist_remove_row(gid).await;
                     self.http_remove_row(gid).await;
                 } else if let Some(t) = self.running.get(&gid) {
@@ -4271,7 +4255,6 @@ impl SessionActor {
                     self.media_remove_row(gid).await;
                 }
                 self.jobs.remove(&gid);
-                self.http_rename_pending.remove(&gid);
                 self.persist_remove_row(gid).await;
                 self.http_remove_row(gid).await;
                 Ok(CommandReply::Gid(gid))

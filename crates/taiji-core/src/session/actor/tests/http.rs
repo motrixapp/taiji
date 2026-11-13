@@ -2482,10 +2482,11 @@ async fn http_row_state_stays_in_active_domain_during_download() {
         .await,
     );
     let gid_hex = gid.to_string();
-    const DOMAIN: [&str; 6] = [
+    const DOMAIN: [&str; 7] = [
         "queued",
         "probing",
         "downloading",
+        "finalizing",
         "paused",
         "error",
         "done",
@@ -2545,9 +2546,24 @@ async fn rename_pending_rows_close_out_on_bootstrap() {
     let part = part_path_of(&dir, "f.bin");
     std::fs::write(&part, &body).unwrap_or_else(|e| panic!("seed part: {e}"));
     let mut row = seeded_http_row(&gid_hex, "http://127.0.0.1:1/f.bin", &dir, "f.bin");
-    row.state = "done".into();
+    row.state = "finalizing".into();
     row.total_done = body.len() as i64;
-    row.config_json = r#"{"incomplete_suffix":".part","rename_pending":true}"#.into();
+    row.config_json = http_task::HttpPersistConfig {
+        rename_pending: true,
+        publication: Some(super::http_publication::PublicationRecord {
+            intent: taiji_http::finalize::RenameIntent::new(
+                gid_hex.clone(),
+                part_path_of(&dir, "f.bin"),
+                dir.join("f.bin"),
+                row.total_done.max(0) as u64,
+            ),
+            phase: super::http_publication::PublicationPhase::Publishing,
+            external: false,
+            error: None,
+        }),
+        ..Default::default()
+    }
+    .to_json();
     {
         let (handle_w, writer) = ok(TestPersistWriter::spawn(db.clone()).await, "seed writer");
         handle_w
@@ -2599,8 +2615,23 @@ async fn rename_pending_stays_pending_when_disk_facts_missing() {
     // pending).
     std::fs::write(dir.join("f.bin"), b"foreign!").unwrap_or_else(|e| panic!("{e}"));
     let mut row = seeded_http_row(&gid_hex, "http://127.0.0.1:1/f.bin", &dir, "f.bin");
-    row.state = "done".into();
-    row.config_json = r#"{"incomplete_suffix":".part","rename_pending":true}"#.into();
+    row.state = "finalizing".into();
+    row.config_json = http_task::HttpPersistConfig {
+        rename_pending: true,
+        publication: Some(super::http_publication::PublicationRecord {
+            intent: taiji_http::finalize::RenameIntent::new(
+                gid_hex.clone(),
+                part_path_of(&dir, "f.bin"),
+                dir.join("f.bin"),
+                row.total_done.max(0) as u64,
+            ),
+            phase: super::http_publication::PublicationPhase::Publishing,
+            external: false,
+            error: None,
+        }),
+        ..Default::default()
+    }
+    .to_json();
     {
         let (handle_w, writer) = ok(TestPersistWriter::spawn(db.clone()).await, "seed writer");
         handle_w
@@ -2648,16 +2679,21 @@ async fn rename_pending_close_out_skips_while_final_held_by_other() {
     let part = dir.join("f.bin.part");
     let final_path = dir.join("f.bin");
     std::fs::write(&part, &body).unwrap_or_else(|e| panic!("seed part: {e}"));
-    let mut row = seeded_http_row(&gid_hex, "http://127.0.0.1:1/f.bin", &dir, "f.bin");
-    row.state = "done".into();
-    row.config_json = r#"{"incomplete_suffix":".part","rename_pending":true}"#.into();
+    use taiji_http::finalize::{FinalizeOutcome, Finalizer, MemoryJournal, RenameIntent};
+    let mut intent =
+        RenameIntent::new(gid_hex, part.clone(), final_path.clone(), body.len() as u64);
+    intent.auto_rename = false;
+    let finalizer = Finalizer::new(Arc::new(MemoryJournal::default()));
 
     // Another task holds the final path (an in-flight task's
     // creation-time placeholder).
     taiji_http::partfile::claim_final_path(&final_path, &other)
         .unwrap_or_else(|e| panic!("claim: {e}"));
 
-    let closed = super::http_task::close_out_pending_row(&None, &row).await;
+    let closed = matches!(
+        finalizer.resume(&intent).await,
+        Ok(FinalizeOutcome::Completed { .. })
+    );
     assert!(
         !closed,
         "the final path is held by another task -> skip this round (must not report closed)"
@@ -2674,7 +2710,10 @@ async fn rename_pending_close_out_skips_while_final_held_by_other() {
     // The holder releases -> the close-out lands normally (no
     // over-kill).
     taiji_http::partfile::release_final_path(&final_path, &other);
-    let closed = super::http_task::close_out_pending_row(&None, &row).await;
+    let closed = matches!(
+        finalizer.resume(&intent).await,
+        Ok(FinalizeOutcome::Completed { .. })
+    );
     assert!(closed, "after the holder releases, the close-out must land");
     assert_eq!(
         std::fs::read(&final_path).unwrap_or_else(|e| panic!("read final: {e}")),
@@ -3857,6 +3896,7 @@ fn http_task_option_tables_match_parsers() {
                     .is_some()
             }
             "remote-time" => persist_of(name, "true").remote_time,
+            "http-host-finalize" => persist_of(name, "true").host_finalize,
             other => panic!("HTTP_PERSIST_OPTION_NAMES contains an unknown arm {other:?}"),
         };
         assert!(

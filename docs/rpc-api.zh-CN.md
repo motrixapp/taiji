@@ -117,6 +117,31 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
   单一来源 —— 即使两者展开结果相同也一样；错误信息同时点名两个来源
   键）；只给其一 = 该面生效；changeOption `select-file` 替换既有选择。
 
+## 磁链选择文件时保留同一任务
+
+添加磁链时设置 `motrix-await-selection=true`。引擎获取并验证元数据后，在开始
+文件 IO 前将升级后的 torrent 停留在原 GID。等待选择的状态会跨重启保留；
+`unpauseAll` 跳过它，`unpause` 在确认前拒绝启动。没有该附加选项时，普通
+`pause-metadata` 仍保持原有的暂停语义。
+
+- `taiji.getTorrentMetadata(gid)` 返回 `{data, awaitingSelection}`。
+  `data` 是经过验证的原始 `.torrent` 内容的 base64 编码，客户端无需访问
+  引擎的元数据目录。
+- `taiji.confirmTorrentSelection(gid, options)` 仅接受 `dir`、
+  `select-file` 和 `motrix-output-paths`。`dir` 必须是绝对路径；
+  `select-file` 必填，使用上述不计填充文件、从 1 开始的序号。
+  输出映射是 JSON 对象，键为从 0 开始的**完整元数据文件位置，包含填充项**，
+  值为相对路径。映射只改变磁盘路径，不改变 info hash 或原始元数据。
+- 引擎先验证整个请求并持久化选择、路径和运行意图，再启动文件下载。
+  非法请求或落盘失败会保持等待状态。使用相同参数重放已接受的请求，会返回
+  同一 GID，不会创建新任务；确认后改用不同参数会被拒绝。
+
+部分选择时，任务的 `totalLength` 和 `completedLength` 按选中的文件字节计算；文件列表和分块位图仍使用完整种子的坐标。为校验边界分块而额外传输的字节不计入进度分母。
+
+宿主应先保存用户确认，再调用此操作，以便在请求中断后重放。未选文件不会
+被预分配；当选中和未选文件共享同一个分块时，为完成哈希验证，仍可能需要
+下载选中文件以外的部分字节。
+
 ## CLI 捷径面（`taiji http`）
 
 `taiji http <URL…> [-d dir] [-o name] [--checksum md5|sha-1|sha-224|sha-256|sha-384|sha-512=<hex>]`
@@ -126,7 +151,7 @@ tellStatus 轮询语义），会话数据库与任务行和 RPC 面完全同构 
 并可通过常驻守护进程的 RPC 方法面管理。见用户手册的 `taiji http` 一节
 （续传/并发守卫/attach 对比语义）。
 
-## taiji 扩展方法（16 个名字）
+## taiji 扩展方法
 
 | 方法 | 说明 |
 |---|---|

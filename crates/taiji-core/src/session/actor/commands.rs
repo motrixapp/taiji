@@ -3144,10 +3144,6 @@ impl SessionActor {
                                         )
                                     }),
                             ),
-                            (
-                                "motrix-retry-output".into(),
-                                PathBuf::from(&row.dir).join(&row.out).display().to_string(),
-                            ),
                             ("dir".into(), row.dir),
                             ("out".into(), row.out),
                         ])));

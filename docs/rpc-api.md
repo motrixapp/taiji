@@ -138,6 +138,36 @@ controlled living document; new entries go through PR + user approval).
   both source keys); only one given = that surface takes effect; changeOption
   `select-file` replaces an existing selection.
 
+## Magnet selection without replacing the task
+
+Add a magnet with `motrix-await-selection=true`. The engine fetches and verifies
+metadata, then parks the upgraded torrent under the same GID before payload IO.
+This selection barrier survives restart; `unpauseAll` skips it and `unpause`
+rejects it until confirmation. Ordinary `pause-metadata` keeps its existing
+pause semantics when this additional option is absent.
+
+- `taiji.getTorrentMetadata(gid)` returns `{data, awaitingSelection}`. `data`
+  is the original verified `.torrent` envelope encoded as base64. Clients do not
+  need access to the engine's metadata directory.
+- `taiji.confirmTorrentSelection(gid, options)` accepts only `dir`,
+  `select-file`, and `motrix-output-paths`. `dir` must be absolute;
+  `select-file` is required and uses the non-padding, 1-based convention above.
+  Output mappings are JSON objects from zero-based **complete metadata file
+  positions, including padding** to relative paths. They change disk paths,
+  never the info hash or original metadata.
+- The engine validates the whole request and persists its selection, paths,
+  and run intent before starting payload IO. Invalid requests or failed writes
+  leave the task parked. Repeating an accepted request with the same values
+  returns the same GID without creating another task; different values are
+  rejected after confirmation.
+
+For a partial selection, task `totalLength` and `completedLength` measure the selected payload files. File lists and piece bitmaps retain whole-torrent coordinates. Boundary-piece transfer overhead is not added to the progress denominator.
+
+Hosts should persist the user's confirmation before calling this operation so
+an interrupted request can be replayed after restart. Unselected files are not
+preallocated. A piece shared by selected and unselected files may still require
+bytes outside the selected file for hash verification.
+
 ## CLI Shortcut Surface (`taiji http`)
 
 `taiji http <URL…> [-d dir] [-o name] [--checksum md5|sha-1|sha-224|sha-256|sha-384|sha-512=<hex>]`
@@ -149,7 +179,7 @@ HTTP tasks created via the CLI likewise appear in `tellActive`/`tellStatus`
 surface. See the `taiji http` section of user-manual (resume / concurrency
 guard / attach comparison semantics).
 
-## taiji Extension Methods (16 names)
+## taiji Extension Methods
 
 | Method | Description |
 |---|---|

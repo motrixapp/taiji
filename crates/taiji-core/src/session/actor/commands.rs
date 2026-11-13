@@ -13,6 +13,35 @@
 use super::*;
 
 impl SessionActor {
+    async fn remove_durable_result(&mut self, gid: Gid) -> Result<CommandReply, SessionError> {
+        let in_memory = matches!(self.queue.find(gid), Some(Location::Result));
+        if self.queue.find(gid).is_some() && !in_memory {
+            return Err(SessionError::failed(format!(
+                "Could not remove download result of GID#{gid}"
+            )));
+        }
+        let written = if let Some(persist) = &self.persist {
+            matches!(
+                persist
+                    .remove_download_result(&gid.to_string())
+                    .await
+                    .map_err(|e| SessionError::failed(e.to_string()))?,
+                taiji_store::persist::PersistOutcome::Written
+            )
+        } else {
+            false
+        };
+        self.queue.remove_result(gid);
+        self.queue.startup_held.remove(&gid);
+        self.http_rename_pending.remove(&gid);
+        self.rows.remove(&gid.to_string());
+        if in_memory || written {
+            Ok(CommandReply::Accepted)
+        } else {
+            Err(SessionError::failed(format!("GID {gid} is not found")))
+        }
+    }
+
     /// Startup bootstrap: ready the globally imported tracker set. Order
     /// = in-store restore (`global_tracker` table rowid order) -> CLI
     /// seed increment (`--bt-tracker` comma list + `--bt-tracker-file`
@@ -125,6 +154,17 @@ impl SessionActor {
             {
                 warn!(target: "taiji::core::session", %e,
                     "global tracker persist failed (in-memory set still live)");
+            }
+        }
+        // Metadata discovery needs the same updates before an engine exists.
+        for task in self.running.values_mut() {
+            if let TaskBackend::Metadata {
+                tracker_updates: Some(updates),
+            } = &task.backend
+            {
+                let tiers = merge_global_trackers(&task.tiers, &added_urls);
+                task.tiers = tiers.clone();
+                updates.send_replace(tiers);
             }
         }
         // In-flight hot push: snapshot (gid, engine, current tiers)
@@ -272,7 +312,17 @@ impl SessionActor {
                 let _ = reply.send(r);
             }
             C::Unpause { gid } => {
-                let r = match self.resolve_gid(&gid) {
+                let resolved = self.resolve_gid(&gid).or_else(|error| {
+                    if gid.len() == 16 && gid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        if let Ok(raw) = u64::from_str_radix(&gid, 16) {
+                            if raw != 0 {
+                                return Ok(Gid::from_u64(raw));
+                            }
+                        }
+                    }
+                    Err(error)
+                });
+                let r = match resolved {
                     Ok(g) => self.unpause(g).await,
                     Err(e) => Err(e),
                 };
@@ -393,6 +443,7 @@ impl SessionActor {
                 let _ = reply.send(Ok(CommandReply::Accepted));
             }
             C::UnpauseAll => {
+                self.queue.startup_held.clear();
                 // Revoke every in-flight pause intent first: the epoch
                 // bump marks all still-undelivered pause requests
                 // (active/seeding teardowns in flight, recorded against
@@ -463,40 +514,36 @@ impl SessionActor {
                 self.pump_all().await;
             }
             C::PurgeDownloadResult => {
-                self.queue.purge_results();
-                // Clear persisted results too (terminal rows; the
-                // active set is untouched).
-                if let Some(p) = &self.persist {
-                    if let Err(e) = p.purge_download_results().await {
-                        warn!(target: "taiji::core::session", %e,
-                            "purge download results persist failed");
+                if let Some(persist) = &self.persist {
+                    if let Err(error) = persist.purge_download_results().await {
+                        let _ = reply.send(Err(SessionError::failed(error.to_string())));
+                        return false;
                     }
                 }
+                self.queue.purge_results();
+                self.http_rename_pending.clear();
+                let keep: std::collections::HashSet<_> =
+                    self.queue.known_gids().into_iter().collect();
+                self.queue.startup_held.retain(|gid, _| keep.contains(gid));
                 let _ = reply.send(Ok(CommandReply::Accepted));
             }
-            C::RemoveDownloadResult { gid } => match self.resolve_gid(&gid) {
-                Ok(gid) => {
-                    if self.queue.remove_result(gid) {
-                        // Only terminal rows are deletable (the
-                        // writer rejects active gids).
-                        if let Some(p) = &self.persist {
-                            match p.remove_download_result(&gid.to_string()).await {
-                                Ok(_) => {}
-                                Err(e) => warn!(target: "taiji::core::session",
-                                    gid = %gid, %e, "remove download result persist failed"),
+            C::RemoveDownloadResult { gid: raw } => {
+                let resolved = self.resolve_gid(&raw).or_else(|error| {
+                    if raw.len() == 16 && raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        if let Ok(value) = u64::from_str_radix(&raw, 16) {
+                            if value != 0 {
+                                return Ok(Gid::from_u64(value));
                             }
                         }
-                        let _ = reply.send(Ok(CommandReply::Accepted));
-                    } else {
-                        let _ = reply.send(Err(SessionError::failed(format!(
-                            "Could not remove download result of GID#{gid}"
-                        ))));
                     }
-                }
-                Err(e) => {
-                    let _ = reply.send(Err(e));
-                }
-            },
+                    Err(error)
+                });
+                let result = match resolved {
+                    Ok(gid) => self.remove_durable_result(gid).await,
+                    Err(error) => Err(error),
+                };
+                let _ = reply.send(result);
+            }
             C::ChangeUri {
                 gid,
                 file_index,
@@ -549,6 +596,82 @@ impl SessionActor {
                 let _ = reply.send(self.change_position(&gid, pos, how).await);
             }
             C::ChangeGlobalOption { options } => {
+                if let Some(raw) = options.get("motrix-peer-mappings") {
+                    #[derive(serde::Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Mapping {
+                        id: String,
+                        port: u16,
+                        tcp: Option<u16>,
+                        udp: Option<u16>,
+                    }
+                    let parsed = serde_json::from_str::<Vec<Mapping>>(raw)
+                        .ok()
+                        .filter(|items| {
+                            items.len() <= 256
+                                && items.iter().all(|item| {
+                                    item.id.len() == 33
+                                        && item.port > 0
+                                        && item.tcp != Some(0)
+                                        && item.udp != Some(0)
+                                })
+                        });
+                    let Some(items) = parsed else {
+                        let _ = reply.send(Err(SessionError::failed("invalid peer mappings")));
+                        return false;
+                    };
+                    if self.nat.is_none() {
+                        for item in items {
+                            if self.magnet_services.network().update(
+                                &item.id,
+                                item.port,
+                                crate::nat::ExternalPorts {
+                                    tcp: item.tcp,
+                                    udp: item.udp,
+                                },
+                            ) {
+                                continue;
+                            }
+                            for task in self.running.values() {
+                                if let Some(binding) = &task.network {
+                                    if binding.update(
+                                        &item.id,
+                                        item.port,
+                                        crate::nat::ExternalPorts {
+                                            tcp: item.tcp,
+                                            udp: item.udp,
+                                        },
+                                    ) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(raw) = options.get("motrix-release-startup") {
+                    let parsed = serde_json::from_str::<Vec<String>>(raw)
+                        .ok()
+                        .and_then(|values| {
+                            values
+                                .into_iter()
+                                .map(|value| {
+                                    if value.len() != 16 {
+                                        return None;
+                                    }
+                                    u64::from_str_radix(&value, 16).ok().map(Gid::from_u64)
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        });
+                    let Some(gids) = parsed else {
+                        let _ =
+                            reply.send(Err(SessionError::failed("invalid startup release list")));
+                        return false;
+                    };
+                    for gid in gids {
+                        self.queue.startup_held.remove(&gid);
+                    }
+                }
                 // bt-tracker / bt-tracker-file global hot-import face.
                 // bt-tracker has a setChangeGlobalOption bit in the
                 // reference (OptionHandlerFactory.cc); bt-tracker-file
@@ -602,6 +725,32 @@ impl SessionActor {
                 // is no separate v6 DHT gate (the v6 family follows the
                 // enable-dht master gate plus the connectivity gate; the
                 // value echoes as set).
+                for (key, value) in &options {
+                    if matches!(
+                        key.as_str(),
+                        "split"
+                            | "max-connection-per-server"
+                            | "min-split-size"
+                            | "user-agent"
+                            | "connect-timeout"
+                            | "timeout"
+                            | "max-tries"
+                            | "retry-wait"
+                            | "lowest-speed-limit"
+                            | "remote-time"
+                            | "all-proxy"
+                            | "all-proxy-user"
+                            | "all-proxy-passwd"
+                            | "no-proxy"
+                            | "http-proxy"
+                            | "https-proxy"
+                            | "ftp-proxy"
+                    ) {
+                        self.global
+                            .motrix_http_defaults
+                            .insert(key.clone(), value.clone());
+                    }
+                }
                 let dht_before = self.global.enable_dht;
                 apply_global_patch(&mut self.global, &options);
                 let dht_flipped = dht_before != self.global.enable_dht;
@@ -631,11 +780,46 @@ impl SessionActor {
                     max_concurrent = self.global.max_concurrent_downloads,
                     enable_dht = self.global.enable_dht,
                     "global options changed via changeGlobalOption");
+                if options.contains_key("enable-dht") || options.contains_key("enable-dht6") {
+                    self.magnet_services
+                        .set_dht_enabled(
+                            self.global.enable_dht,
+                            self.global.enable_dht && self.global.enable_dht6,
+                        )
+                        .await;
+                }
                 let _ = reply.send(Ok(CommandReply::Accepted));
                 self.pump_all().await;
             }
             C::GetGlobalOption => {
                 let mut echo = global_option_echo(&self.global);
+                let mut listeners = Vec::new();
+                for (gid, task) in &self.running {
+                    if let Some(binding) = &task.network {
+                        let (id, port) = binding.snapshot();
+                        if port != 0 {
+                            listeners.push(serde_json::json!({ "id": id, "gid": gid.to_string(), "port": port, "hostManaged": self.nat.is_none() }));
+                        }
+                    }
+                }
+                let (id, port) = self.magnet_services.network().snapshot();
+                if port != 0 {
+                    listeners.push(serde_json::json!({"id":id,"gid":"0000000000000000","port":port,"hostManaged":self.nat.is_none()}));
+                }
+                echo.insert(
+                    "motrix-peer-listeners".into(),
+                    serde_json::to_string(&listeners).unwrap_or_default(),
+                );
+                let held: Vec<(String, bool)> = self
+                    .queue
+                    .startup_held
+                    .iter()
+                    .map(|(gid, resume)| (gid.to_string(), *resume))
+                    .collect();
+                echo.insert(
+                    "motrix-startup-tasks".into(),
+                    serde_json::to_string(&held).unwrap_or_default(),
+                );
                 // http-max-per-host echoes the effective cap: a runtime
                 // addUri change (last-set-wins) only moves HostCap, not
                 // the option field — override the echo via cap() so
@@ -2351,6 +2535,9 @@ impl SessionActor {
             )));
         }
         let patch = parse_task_options(&options);
+        let metadata_tracker_only = options.len() == 1
+            && options.contains_key("bt-tracker")
+            && matches!(self.jobs.get(&gid), Some(Job::Magnet(_)));
         // load-cookies changeOption face: loading is fail-closed up
         // front (a rejected call mutates nothing — the
         // validate-all-first discipline); acceptance = whole-set seed
@@ -2600,6 +2787,21 @@ impl SessionActor {
                 }
             }
             Some(Job::Magnet(mj)) => {
+                if let Some(trackers) = &patch.bt_tracker {
+                    mj.tiers = trackers.iter().cloned().enumerate().collect();
+                    let tiers = merge_global_trackers(&mj.tiers, &self.global.bt_tracker);
+                    if let Some(task) = self.running.get_mut(&gid) {
+                        if let TaskBackend::Metadata {
+                            tracker_updates: Some(updates),
+                        } = &task.backend
+                        {
+                            if task.tiers != tiers {
+                                task.tiers = tiers.clone();
+                                updates.send_replace(tiers);
+                            }
+                        }
+                    }
+                }
                 if let Some(r) = patch.seed_ratio {
                     mj.seed.seed_ratio = r;
                 }
@@ -2775,7 +2977,10 @@ impl SessionActor {
         if dht_flag_changed {
             self.push_dht_task_change(gid).await;
         }
-        if self.queue.contains_active(gid) && self.queue.request_pause(gid) {
+        if !metadata_tracker_only
+            && self.queue.contains_active(gid)
+            && self.queue.request_pause(gid)
+        {
             if let Some(rec) = self.queue.active_record_mut(gid) {
                 rec.restart_requested = true;
             }
@@ -2909,6 +3114,41 @@ impl SessionActor {
     ///   snapshot — the store row is the only persistent truth ("no
     ///   store = no history", as in list_bans).
     pub(super) async fn get_option(&self, raw_gid: &str) -> Result<CommandReply, SessionError> {
+        if raw_gid.len() == 16 && raw_gid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            if let Some(persist) = &self.persist {
+                if let Some(snapshot) = persist
+                    .load_http_task(raw_gid)
+                    .await
+                    .map_err(|e| SessionError::failed(e.to_string()))?
+                {
+                    let row = snapshot.row;
+                    let cfg = http_task::HttpPersistConfig::from_json(&row.config_json);
+                    if row.state == "error" && cfg.retain_request_context {
+                        let available = row.total_done == 0 || cfg.http_resume_context.is_some();
+                        return Ok(CommandReply::Options(BTreeMap::from([
+                            ("motrix-retry-available".into(), available.to_string()),
+                            (
+                                "motrix-retry-uri-hash".into(),
+                                cfg.http_resume_context
+                                    .as_ref()
+                                    .map(|context| context.source_hash.clone())
+                                    .unwrap_or_else(|| {
+                                        crate::session::persist::import_http::request_uri_hash(
+                                            &row.url,
+                                        )
+                                    }),
+                            ),
+                            (
+                                "motrix-retry-output".into(),
+                                PathBuf::from(&row.dir).join(&row.out).display().to_string(),
+                            ),
+                            ("dir".into(), row.dir),
+                            ("out".into(), row.out),
+                        ])));
+                    }
+                }
+            }
+        }
         let gid = self.resolve_gid(raw_gid)?;
         let echo = match self.queue.find(gid) {
             Some(Location::Active) => {

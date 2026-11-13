@@ -525,7 +525,7 @@ and a connection-budget soft-cap gate.
 
 Three-layer cap stacking rules (the written core):
 
-1. Per-task cap (`--max-connection-per-server`, domain 1-16): one
+1. Per-task cap (`--max-connection-per-server`, domain 1-64): one
    file's connection intent = min(split, cap); driver planning is
    unchanged — the batch group never amplifies a single file's
    intent.

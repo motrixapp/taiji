@@ -439,7 +439,7 @@ Method face (not counted in the entry totals):
 | ca-certificate | PEM 路径 | 同名 | 替换平台信任库;解析期路径/PEM 校验拒 |
 | split | 1..=MAX_SPLIT | 同名(语义重定义) | 动态调度下仅种子化初始 extent |
 | min-split-size | size | 同名(语义重定义) | 同上 |
-| max-connection-per-server | 1..=16 | 同名(语义重定义) | AIMD 环增长帽 |
+| max-connection-per-server | 1..=64 | 同名(语义重定义) | AIMD 环增长帽 |
 | http-stall-window | 秒≥3 | taiji 扩展 | 停滞窃取检测窗 |
 | http-scheduler | dynamic\|static;默认 dynamic | taiji 扩展 | |
 | http-block-size | 2 的幂 256KiB..16MiB;默认 4MiB | taiji 扩展 | 任务内不可变(changeOption 显式拒) |

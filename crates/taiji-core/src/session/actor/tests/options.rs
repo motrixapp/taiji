@@ -835,6 +835,7 @@ fn get_option_echo_keys_are_fully_declared() {
         scheduler_policy: crate::engine::SchedulerPolicy::default(),
         dest: PathBuf::from("/m"),
         options: crate::magnet::MagnetOptions {
+            holepunch: true,
             bt_save_metadata: true,
             bt_metadata_only: false,
             follow_torrent: true,
@@ -908,6 +909,7 @@ fn get_option_echo_keys_are_fully_declared() {
     // default payload already covers all always-present keys; Option-slot
     // keys are audited by the shape cases above).
     let cfg = PersistedTaskConfig {
+        magnet_flags: None,
         dir: "/r".into(),
         seed_ratio: 1.5,
         seed_time_min: 2.0,
@@ -964,6 +966,9 @@ async fn get_option_echoes_accepted_subset_across_job_shapes() {
     let global = GlobalOptions {
         dir: dir.clone(),
         max_concurrent_downloads: 2,
+        enable_dht: false,
+        enable_dht6: false,
+        bt_lsd: false,
         ..Default::default()
     };
     let (handle, join) =
@@ -1291,7 +1296,14 @@ async fn get_option_echoes_accepted_subset_across_job_shapes() {
 /// the same str2Gid miss message.
 #[tokio::test]
 async fn get_option_error_faces_and_removed_result_domain() {
-    let (handle, join) = SessionActor::spawn();
+    let (handle, join) = SessionActor::spawn_with(SessionOptions {
+        global: GlobalOptions {
+            enable_dht: false,
+            enable_dht6: false,
+            bt_lsd: false,
+            ..Default::default()
+        },
+    });
     let dir = temp_dir("getopt-err");
     // Error paths: verbatim messages.
     let missing = GidAllocator::new().allocate();
@@ -1469,7 +1481,7 @@ async fn get_option_result_domain_reads_back_http_row() {
 
 /// changeOption's HTTP scheduling group (option-group wiring): out-of-range
 /// / illegal values are rejected explicitly before any payload merge
-/// (`taiji.option.invalid` — the max-connection-per-server domain 1..=16
+/// (`taiji.option.invalid` — the max-connection-per-server domain 1..=64
 /// rejects without clamping); legal values merge incrementally into the
 /// task payload (Accepted; effective under restart semantics).
 #[test]
@@ -1517,7 +1529,7 @@ fn http_sched_patch_validation_matrix() {
     // floor would let a single heartbeat jitter forge stall evidence).
     for (key, val) in [
         ("max-connection-per-server", "0"),
-        ("max-connection-per-server", "17"),
+        ("max-connection-per-server", "65"),
         ("max-connection-per-server", "x"),
         ("split", "0"),
         ("split", "-1"),
@@ -1621,7 +1633,7 @@ async fn http_change_option_sched_group_accepts_and_rejects() {
             gid: gid.to_string(),
             options: std::collections::BTreeMap::from([(
                 "max-connection-per-server".to_string(),
-                "17".to_string(),
+                "65".to_string(),
             )]),
         },
     )
@@ -2675,4 +2687,99 @@ async fn change_option_http_known_keys_reject_out_of_domain_values() {
     let _ = tokio::time::timeout(Duration::from_secs(1), join).await;
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&new_dir);
+}
+
+#[tokio::test]
+async fn metadata_intent_is_durable_at_admission_and_survives_restart() {
+    let db = tmp_db("metadata-intent");
+    let dir = temp_dir("metadata-intent");
+    let (writer, wjoin) = ok(PersistWriter::spawn(db.clone()).await, "writer");
+    let (handle, join) = SessionActor::spawn_with_persist(
+        SessionOptions {
+            global: GlobalOptions {
+                dir: dir.clone(),
+                ..Default::default()
+            },
+        },
+        Some(writer.clone()),
+    );
+    let flags = BTreeMap::from([
+        ("pause".to_string(), "true".to_string()),
+        ("bt-metadata-only".to_string(), "true".to_string()),
+        ("bt-save-metadata".to_string(), "true".to_string()),
+        ("follow-torrent".to_string(), "false".to_string()),
+        ("pause-metadata".to_string(), "true".to_string()),
+        ("bt-load-saved-metadata".to_string(), "true".to_string()),
+    ]);
+    let gid = gid_of(
+        &call(
+            &handle,
+            SessionCommand::AddUri {
+                uris: vec!["magnet:?xt=urn:btih:1111111111111111111111111111111111111111".into()],
+                options: flags.clone(),
+                position: None,
+            },
+        )
+        .await,
+    );
+    let rows = ok(
+        writer.load_torrents_at_startup().await,
+        "read admitted rows",
+    );
+    let row = rows
+        .iter()
+        .find(|snapshot| snapshot.row.gid == gid.to_string())
+        .unwrap_or_else(|| panic!("admitted row missing"));
+    let persisted = PersistedTaskConfig::from_json(&row.row.config_json);
+    assert!(
+        persisted
+            .magnet_flags
+            .as_ref()
+            .is_some_and(|flags| flags.only),
+        "must be durable before the first saveSession"
+    );
+    handle.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
+    drop(handle);
+    drop(writer);
+    let _ = tokio::time::timeout(Duration::from_secs(2), wjoin).await;
+    let (writer, wjoin) = ok(
+        PersistWriter::spawn(db.clone()).await,
+        "writer after restart",
+    );
+    let (handle, join) = SessionActor::spawn_with_persist(
+        SessionOptions {
+            global: GlobalOptions {
+                dir: dir.clone(),
+                ..Default::default()
+            },
+        },
+        Some(writer.clone()),
+    );
+    let mut restored = None;
+    for _ in 0..100 {
+        if let Ok(CommandReply::Options(options)) = call(
+            &handle,
+            SessionCommand::GetOption {
+                gid: gid.to_string(),
+            },
+        )
+        .await
+        {
+            restored = Some(options);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let restored = restored.unwrap_or_else(|| panic!("metadata task not restored"));
+    for (key, value) in flags.iter().filter(|(key, _)| key.as_str() != "pause") {
+        assert_eq!(restored.get(key), Some(value), "{key} changed on restart");
+    }
+    handle.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
+    drop(handle);
+    drop(writer);
+    let _ = tokio::time::timeout(Duration::from_secs(2), wjoin).await;
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_file(db);
 }

@@ -50,10 +50,14 @@ pub struct Magnet {
     pub xl: Option<u64>,
     /// `tr` tracker URLs, in order of appearance.
     pub tr: Vec<Vec<u8>>,
+    /// Explicit HTTP(S) metadata sources from xs/fl/as; no implicit service.
+    pub metadata_sources: Vec<String>,
     /// `x.pe` direct-connect peer endpoint; first valid value (same
     /// first-valid rule as the btih/btmh scan; invalid entries are skipped
     /// leniently — see the module docs).
     pub xpe: Option<std::net::SocketAddr>,
+    /// Bounded, deduplicated explicit peers; xpe remains the first-peer view.
+    pub xpe_peers: Vec<std::net::SocketAddr>,
     /// `so=` BEP53 file selection: ranges expanded into a **strictly
     /// ascending**, zero-based index sequence (BEP53: "Files are
     /// zero-indexed"). The first `so` parameter wins (first value among
@@ -109,12 +113,38 @@ pub fn parse(input: &str) -> Result<Magnet, MagnetError> {
         .and_then(|raw| std::str::from_utf8(raw).ok())
         .and_then(|s| s.parse::<u64>().ok());
     let tr = params.get(b"tr".as_slice()).cloned().unwrap_or_default();
+    let mut metadata_sources = Vec::new();
+    for key in [b"xs".as_slice(), b"fl".as_slice(), b"as".as_slice()] {
+        for raw in params.get(key).into_iter().flatten() {
+            let Ok(text) = std::str::from_utf8(raw) else {
+                continue;
+            };
+            if text.len() > 4096 {
+                continue;
+            }
+            let Ok(url) = reqwest::Url::parse(text) else {
+                continue;
+            };
+            if matches!(url.scheme(), "http" | "https")
+                && metadata_sources.len() < 3
+                && !metadata_sources.iter().any(|source| source == text)
+            {
+                metadata_sources.push(text.to_string());
+            }
+        }
+    }
     // `x.pe`: scan values for the first valid one; invalid entries are
     // skipped leniently; all invalid = None (no failure — same shape as
     // libtorrent magnet_uri.cpp).
-    let xpe = params
-        .get(b"x.pe".as_slice())
-        .and_then(|vals| vals.iter().find_map(|raw| parse_xpe(raw)));
+    let mut xpe_peers = Vec::new();
+    for raw in params.get(b"x.pe".as_slice()).into_iter().flatten() {
+        if let Some(address) = parse_xpe(raw) {
+            if xpe_peers.len() < 16 && !xpe_peers.contains(&address) {
+                xpe_peers.push(address);
+            }
+        }
+    }
+    let xpe = xpe_peers.first().copied();
     // BEP53 `so=`: parsed strictly when present (syntax errors are explicit
     // — BEP53 itself defines no error surface, so the design tightens this
     // to "reject invalid explicitly"; silent skipping is forbidden). Ranges
@@ -135,7 +165,9 @@ pub fn parse(input: &str) -> Result<Magnet, MagnetError> {
         dn,
         xl,
         tr,
+        metadata_sources,
         xpe,
+        xpe_peers,
         so,
     })
 }

@@ -5,8 +5,8 @@ English | [简体中文](./README.zh-CN.md)
 **taiji** is a multi-protocol download engine written in Rust and shipped as
 a single binary (`taiji`). BitTorrent (v1/v2/hybrid), HTTP(S), FTP(S),
 Metalink v4, and magnet links run under one session model, driven through an
-aria2-compatible JSON-RPC surface — aria2 frontends such as Motrix can switch
-over without protocol changes.
+taiji JSON-RPC surface with optional aria2 aliases. It is developed for
+Motrix as the sole engine for its desktop and server applications.
 
 ## Highlights
 
@@ -40,7 +40,7 @@ cargo build --release
 ```
 
 > taiji is not published to crates.io; prebuilt binaries ship with the
-> release matrix (macOS universal / linux-x64 / windows-x64).
+> [seven-platform release matrix](./packaging/README.md).
 
 ## Quick start
 

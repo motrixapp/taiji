@@ -124,6 +124,12 @@ pub enum TrackerCommand {
     },
     /// Rebuild the tracker table (tier, url) — the engine-level
     /// SetTrackers command surface.
+    SetListenPort {
+        port: u16,
+    },
+    SetIpv6 {
+        address: Option<std::net::Ipv6Addr>,
+    },
     SetTrackers {
         tiers: Vec<(usize, String)>,
         reply: oneshot::Sender<Result<(), TrackerError>>,
@@ -1553,6 +1559,29 @@ impl TrackerActor {
                 self.force_ready(now);
                 let _ = reply.send(Ok(()));
             }
+            TrackerCommand::SetIpv6 { address } => {
+                if self.cfg.options.local_ipv6 != address {
+                    let mut options = self.cfg.options;
+                    options.local_ipv6 = address;
+                    if let Ok(http) = HttpAnnounce::new(&options) {
+                        self.http = http;
+                        self.cfg.options = options;
+                        self.private_active = None;
+                        let (tiers, slots) = build_tables(&self.cfg.tiers, &mut self.token_seq);
+                        self.tiers = tiers;
+                        self.slots = slots;
+                    }
+                }
+            }
+            TrackerCommand::SetListenPort { port } => {
+                if port != 0 && self.cfg.listen_port != port {
+                    self.cfg.listen_port = port;
+                    self.private_active = None;
+                    let (tiers, slots) = build_tables(&self.cfg.tiers, &mut self.token_seq);
+                    self.tiers = tiers;
+                    self.slots = slots;
+                }
+            }
             TrackerCommand::SetTrackers { tiers, reply } => {
                 self.cfg.tiers = tiers;
                 // Rebuild the tier event table + per-tracker slot table
@@ -1757,6 +1786,58 @@ mod tests {
     async fn pump_at(actor: &mut TrackerActor, now: Instant) {
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         actor.tick(now).await;
+    }
+
+    #[tokio::test]
+    async fn mapped_port_change_reannounces_and_ignores_duplicate_updates() {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let capture = requests.clone();
+        let mock = MockTracker::start(move |path| {
+            if path.starts_with("/announce") {
+                capture
+                    .lock()
+                    .unwrap_or_else(|e| panic!("{e}"))
+                    .push(path.to_string());
+            }
+            ("200 OK".into(), b"d8:intervali1800e5:peers0:e".to_vec())
+        })
+        .await;
+        let (_cmd, rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (events, _rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (udp, _out, _in) = mk_transport();
+        let mut actor = TrackerActor::new(
+            config(vec![(0, mock.url())]),
+            Arc::new(FixedView),
+            rx,
+            events,
+            udp,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        actor.tick(Instant::now()).await;
+        pump(&mut actor).await;
+        actor
+            .handle_command(
+                TrackerCommand::SetListenPort { port: 40001 },
+                Instant::now(),
+            )
+            .await;
+        actor.tick(Instant::now()).await;
+        pump(&mut actor).await;
+        actor
+            .handle_command(
+                TrackerCommand::SetListenPort { port: 40001 },
+                Instant::now(),
+            )
+            .await;
+        actor.tick(Instant::now()).await;
+        pump(&mut actor).await;
+        let observed = requests.lock().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(observed.len(), 2);
+        assert!(observed[0].contains("port=6881"));
+        assert!(observed[1].contains("port=40001"));
+        for task in mock.tasks {
+            task.abort();
+        }
     }
 
     /// Integration: dual-tier announce — tier0 fails and advances to

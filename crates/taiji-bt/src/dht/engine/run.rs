@@ -1,5 +1,5 @@
 //! Main loop: due maintenance -> transaction timeout sweep -> queue
-//! refill (periodic then immediate) -> `tokio::select!` waiting for the
+//! refill (interactive immediate before periodic maintenance) -> `tokio::select!` waiting for the
 //! next event (command / inbound packet / wake deadline), plus every exit
 //! path (Shutdown / handles dropped / inbound channel closed — each
 //! halt-saves before exiting).
@@ -49,15 +49,18 @@ impl DhtEngine {
             // 1) Due maintenance (table-driven).
             let now = Instant::now();
             let fired = self.timers.fire_due(now);
-            for kind in fired {
-                self.run_maintenance(kind, now).await;
+            if self.enabled {
+                for kind in fired {
+                    self.run_maintenance(kind, now).await;
+                }
             }
             // 2) Transaction timeout sweep.
             self.sweep_timeouts(now).await;
-            // 3) Queue refill (periodic then immediate, the reference
-            // execution order).
-            self.refill(QueueKind::Periodic, now).await;
-            self.refill(QueueKind::Immediate, now).await;
+            // 3) Interactive peer lookups get admission before maintenance.
+            if self.enabled {
+                self.refill(QueueKind::Immediate, now).await;
+                self.refill(QueueKind::Periodic, now).await;
+            }
 
             // 4) Wait for the next event (command / inbound packet / next
             // maintenance instant). The wake deadline is the earlier of
@@ -67,10 +70,14 @@ impl DhtEngine {
             // maintenance point — bootstrap/lookups could not converge at
             // transaction-timeout pace (see
             // TransactionTable::next_deadline docs).
-            let wake = [self.timers.next_wake(), self.txns.next_deadline()]
-                .into_iter()
-                .flatten()
-                .min();
+            let wake = [
+                self.timers.next_wake(),
+                self.txns.next_deadline(),
+                self.txns.next_soft_deadline(),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             tokio::select! {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(cmd) => {
@@ -87,6 +94,7 @@ impl DhtEngine {
                 },
                 pkt = self.transport.inbound.recv() => match pkt {
                     Some(pkt) => {
+                        if !self.enabled {continue;}
                         // Batch drain: handle the woken packet plus any
                         // that queued behind it in this same iteration
                         // (same decision instant per batch — the per-source

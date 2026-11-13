@@ -278,7 +278,9 @@ mod tests {
             concat!("taiji/", env!("CARGO_PKG_VERSION")),
             "UA/ext-v string must derive from the workspace version"
         );
-        let v = PEER_AGENT.strip_prefix("taiji/").unwrap_or_default();
+        // Cargo validates the full SemVer, including prerelease/build suffixes.
+        let version = PEER_AGENT.strip_prefix("taiji/").unwrap_or_default();
+        let v = version.split(['-', '+']).next().unwrap_or_default();
         assert!(
             !v.is_empty()
                 && v.split('.').count() == 3

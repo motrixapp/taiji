@@ -34,5 +34,10 @@ UDP demux / NAT-PMP / IGD XML）。
 
 - crates.io：永不发布 —— 工作区声明为 `publish = false`；引擎只以二进制
   形式分发（下方打包矩阵 + GitHub Releases）。
-- 打包矩阵（`packaging/`）：macos-universal / linux-x64 / windows-x64;
-  linux 目标以 glibc 2.35 为兼容下限。
+- 打包矩阵（`packaging/`）：macos-arm64 / macos-x64 / linux-x64 /
+  linux-arm64 / windows-x64 / windows-arm64 / android-arm64。Linux 二进制
+  要求 glibc ≥ 2.35。
+- 版本采用普通 SemVer。在 `main` 上创建 `v<version>` 标签后，工作流构建七个
+  平台的未签名归档并创建草稿发布；独立的 `sign-macos` 工作流负责两个 macOS
+  二进制的签名与公证，通过后再公开发布。Windows 二进制未签名。
+  详见[打包约定](../packaging/README.md)。

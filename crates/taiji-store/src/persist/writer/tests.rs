@@ -1200,12 +1200,8 @@ async fn download_result_insert_purge_remove_load() {
     let loaded = ok(handle.load_download_result(done_gid).await, "load result");
     assert_eq!(loaded.map(|r| r.state), Some("error".into()));
     assert!(ok(handle.load_download_result(live_gid).await, "load live").is_none());
-    // remove reaches terminal rows only: active row -> Skipped; error
-    // row -> Written.
-    assert_eq!(
-        ok(handle.remove_download_result(live_gid).await, "remove live"),
-        PersistOutcome::SkippedUnchanged
-    );
+    // Result removal rejects active rows and durably deletes terminal rows.
+    assert!(handle.remove_download_result(live_gid).await.is_err());
     assert_eq!(
         ok(handle.remove_download_result(done_gid).await, "remove done"),
         PersistOutcome::Written

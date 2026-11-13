@@ -478,6 +478,13 @@ fn magnet_config(
     listen_port: u16,
 ) -> MagnetTaskConfig {
     MagnetTaskConfig {
+        services: None,
+        dht_entry_point_v6_override: None,
+        dht_message_timeout: Duration::from_secs(10),
+        dht_ipv6_enabled: false,
+        tracker_updates: None,
+        nat: None,
+        dht_entry_point_override: None,
         gid: GidAllocator::new().allocate(),
         magnet_uri,
         dest,
@@ -486,6 +493,7 @@ fn magnet_config(
         phase: MetadataPhaseConfig {
             listen_port,
             max_metadata_peers: 4,
+            peer_metadata_timeout: Duration::from_secs(10),
             discovery_round: Duration::from_millis(400),
             metadata_deadline: Some(Duration::from_secs(25)),
             dht_bootstrap_budget: Duration::from_millis(300),

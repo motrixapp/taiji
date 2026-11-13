@@ -15,6 +15,42 @@ use super::*;
 impl DhtEngine {
     pub(super) async fn handle_command(&mut self, cmd: DhtCommand, now: Instant) -> bool {
         match cmd {
+            DhtCommand::SetEnabled { enabled, reply } => {
+                if self.enabled != enabled {
+                    self.enabled = enabled;
+                    if !enabled {
+                        self.txns.cancel_all();
+                        self.route.clear();
+                        self.immediate = TaskQueue::new();
+                        self.periodic = TaskQueue::new();
+                        for round in &mut self.bootstrap_rounds {
+                            if let Some(reply) = round.reply.take() {
+                                let _ = reply.send(0);
+                            }
+                            round.settled = true;
+                        }
+                        for entry in self.our_announces.values_mut() {
+                            entry.inflight = false;
+                            entry.last_announced = None;
+                        }
+                    } else {
+                        let targets: Vec<_> = self
+                            .our_announces
+                            .iter()
+                            .filter_map(|(hash, entry)| {
+                                DhtTarget::new(hash.0, entry.face, false)
+                                    .ok()
+                                    .map(|target| (target, entry.port))
+                            })
+                            .collect();
+                        for (target, port) in targets {
+                            let _ =
+                                self.start_peer_lookup(target, Some(port), QueueKind::Immediate);
+                        }
+                    }
+                }
+                let _ = reply.send(());
+            }
             DhtCommand::Announce {
                 target,
                 port,
@@ -23,18 +59,39 @@ impl DhtEngine {
                 let outcome = self.register_announce(target, port, now);
                 let _ = reply.send(outcome);
             }
+            DhtCommand::Withdraw { target } => {
+                self.our_announces.remove(&target.target_id());
+                let mut cancelled = self.periodic.cancel_peer_lookups(target.target_id());
+                cancelled.extend(self.immediate.cancel_peer_lookups(target.target_id()));
+                let keys: Vec<_> = self
+                    .route
+                    .iter()
+                    .filter(|(_, route)| cancelled.contains(&route.task_id))
+                    .map(|(key, _)| *key)
+                    .collect();
+                for key in &keys {
+                    self.route.remove(key);
+                }
+                self.txns.cancel_keys(&keys);
+            }
             DhtCommand::GetPeers { target, reply } => {
-                let outcome = self.start_peer_lookup(target, None, QueueKind::Periodic);
+                let outcome = self.start_peer_lookup(target, None, QueueKind::Immediate);
                 let _ = reply.send(outcome);
             }
             DhtCommand::Bootstrap {
                 entry_points,
                 reply,
             } => {
-                self.start_bootstrap(entry_points, reply);
+                if self.enabled {
+                    self.start_bootstrap(entry_points, reply);
+                } else {
+                    let _ = reply.send(0);
+                }
             }
             DhtCommand::AddPortNode { ip, dht_port } => {
-                self.handle_port_node(ip, dht_port);
+                if self.enabled {
+                    self.handle_port_node(ip, dht_port);
+                }
             }
             DhtCommand::SetExternalIp { ip } => {
                 self.update_external_ip(ip);
@@ -68,6 +125,9 @@ impl DhtEngine {
         port: u16,
         now: Instant,
     ) -> Result<(), DhtEngineError> {
+        if !self.enabled {
+            return Err(DhtEngineError::Disabled);
+        }
         Self::validate_announce_port(port)?;
         self.our_announces.insert(
             target.target_id(),
@@ -79,7 +139,7 @@ impl DhtEngine {
                 inflight: false,
             },
         );
-        self.start_peer_lookup(target, Some(port), QueueKind::Periodic)
+        self.start_peer_lookup(target, Some(port), QueueKind::Immediate)
     }
 
     /// Dispatch a peer lookup (announce or not is decided by
@@ -91,6 +151,14 @@ impl DhtEngine {
         announce_port: Option<u16>,
         queue: QueueKind,
     ) -> Result<(), DhtEngineError> {
+        if !self.enabled {
+            return Err(DhtEngineError::Disabled);
+        }
+        if self.periodic.has_peer_lookup(target.target_id())
+            || self.immediate.has_peer_lookup(target.target_id())
+        {
+            return Ok(());
+        }
         if announce_port.is_some() {
             self.announce_lookups_started += 1;
             if let Some(entry) = self.our_announces.get_mut(&target.target_id()) {

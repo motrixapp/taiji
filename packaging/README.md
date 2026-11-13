@@ -1,147 +1,74 @@
-# taiji sidecar packaging layout spec
+# taiji sidecar packaging
 
-> This directory = release assets on this repo's side (layout spec + rollback
-> policy + staged-rollout checklist + CI build definitions).
-> Assembly and artifact-verification scripts are provided by the
-> release-engineering suite.
-> This module delivers only the layout and macOS local verification; the
-> release act itself belongs to the user / post-M5 matrix — "packaging scripts
-> ready" does not mean "staged rollout started".
+Motrix desktop and server use taiji as their only download engine. Both
+repositories maintain the same RPC contract; engine releases use ordinary
+SemVer without a Motrix-specific prerelease suffix.
 
-## 1. Three-platform layout (aligned with the Motrix release matrix, M5)
-
-One self-contained directory per platform, embedded verbatim per platform by
-the Motrix main process (sidecar bundled in nightly):
+## Layout
 
 ```text
 taiji-sidecar-<platform>/
-├── taiji[.exe]            # engine binary (the only runtime face)
-├── VERSION.json               # version fingerprint (§3; anchor for readiness
-                                # checks and staged-rollout statistics)
-├── THIRD-PARTY-NOTICES.md     # license notices (§4)
-└── SHA256SUMS                 # artifact sha256 manifest (sha256sum -c
-                                # compatible; excludes itself)
+├── taiji[.exe]
+├── VERSION.json
+├── COPYING
+├── THIRD-PARTY-NOTICES.md
+├── THIRD-PARTY-LICENSES.txt
+├── NOTARIZATION.json       # signed macOS assets only
+└── SHA256SUMS
 ```
 
-| platform value | target triple | artifact shape | verification status in this module |
-|---|---|---|---|
-| `macos-universal` | `aarch64-apple-darwin` + `x86_64-apple-darwin` → `lipo -create` | universal2 single binary | scripted; no local x86_64 toolchain → **unverified** (assembly auto-degrades to single-arch, labeled as such; never masquerades as universal) |
-| `macos-aarch64` | `aarch64-apple-darwin` | arm64 single-arch | ✅ local build + triple verification PASS (fingerprints in the release-engineering suite report) |
-| `windows-x64` | `x86_64-pc-windows-msvc` | x64 + `taiji.exe` | delivered as CI config (`ci/build-release.yml`), **unverified**; no Windows service mode promised in Phase A (contract §1; shutdown = console Ctrl-C cascade) |
-| `linux-x64` | `x86_64-unknown-linux-gnu` | x64 | delivered as CI config, **unverified** |
+`packaging/assemble.py` checks the tag against the workspace version, records
+the source commit and build parameters, gathers the runtime/build dependency
+license files, and hashes every shipped file except `SHA256SUMS` itself.
+Release assembly rejects a dirty tracked source tree. Missing upstream license
+files are handled only by explicit, version-bound supplements in `licenses/`.
 
-**glibc minimum-version note (linux-x64)**: the glibc floor is set by the
-**build environment's** glibc (glibc symbols are not backward compatible).
-Finalized position: the CI build environment is pinned to `ubuntu-22.04`
-(glibc 2.35) → the declared minimum runtime for artifacts = glibc ≥ 2.35; to
-cover older distributions, rebuild in CI on an older baseline container and
-**re-issue artifacts and fingerprints** — never re-state the floor on top of
-old-baseline artifacts.
-Verification command (after building):
+## Platforms
 
-```sh
-objdump -T taiji | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
-```
+| Platform | Rust target | Archive |
+| --- | --- | --- |
+| macos-arm64 | aarch64-apple-darwin | tar.gz |
+| macos-x64 | x86_64-apple-darwin | tar.gz |
+| linux-x64 | x86_64-unknown-linux-gnu | tar.gz |
+| linux-arm64 | aarch64-unknown-linux-gnu | tar.gz |
+| windows-x64 | x86_64-pc-windows-msvc | zip |
+| windows-arm64 | aarch64-pc-windows-msvc | zip |
+| android-arm64 | aarch64-linux-android | tar.gz |
 
-The highest version printed is the artifact's true floor and must be ≤ the
-declared value; otherwise correct the documentation to the declared value
-(accurate accounting).
+Linux artifacts are built on Ubuntu 22.04 (glibc 2.35). macOS x64 and Windows
+arm64 are cross-compiled; Android uses the workflow's pinned NDK. Motrix may
+build additional targets directly from the same locked source.
 
-The platform directory contains **only** the four items above: no dynamic
-libraries (rusqlite bundled and reqwest rustls are both statically linked),
-no `bt.sqlite3` (a runtime artifact, see §2), no config files (every option is
-injected via spawn arguments/RPC, contract §1).
+## Build and signing
 
-## 2. Runtime data layout and the `bt.sqlite3` path convention
+`.github/workflows/release.yml` builds all seven platforms with `--locked`,
+a pinned Rust toolchain and `--remap-path-prefix=<repo>=/taiji`, then creates a
+draft release. The source tag must match the workspace version and belong to
+`main`. These controls provide traceability, not a promise of bit-identical
+binaries across build hosts.
 
-- The packaging directory is a **read-only carrier**: the engine never writes
-  to it at runtime. All runtime data lands in the `--dir <D>` Motrix passes
-  explicitly:
-  - `<D>/bt.sqlite3` (session database, single-writer;
-    `--sqlite3-db-path` explicitly passes `<D>/bt.sqlite3`, contract §1 spawn
-    argument set);
-  - the downloaded artifacts themselves = each task's own files under `<D>`
-    (shared download root with aria2; neither engine is aware of the other,
-    SPEC §9).
-- **Precondition**: Motrix must create `<D>` first — the engine does not
-  create directories; if the database path cannot be created the engine raises
-  an ERROR and degrades to running without persistence (explicit degradation,
-  no masquerading, contract §1).
-- Port plan: taiji RPC = Motrix-explicit `--rpc-listen-port` (deployment
-  proposal 16900), fork RPC 16800, BT listen 6881-6999 — no overlap with
-  either engine's RPC ports (contract §3).
+`.github/workflows/sign-macos.yml` runs from `main` against that draft. Its
+credential-bearing job checks out no source and compiles nothing. It signs
+with hardened runtime and a secure timestamp, requires Apple's accepted
+notarization result, then replaces the two draft macOS archives with updated
+checksums and notarization receipts. A standalone command-line Mach-O cannot
+be stapled; the accepted receipt records its signed binary digest. Published
+release assets cannot be overwritten by these workflows. Windows binaries
+are unsigned; release notes must disclose that status. Windows builds statically
+link the Visual C++ runtime so Motrix does not require a separate redistributable
+installation; CI checks the actual imported DLL names. The Windows main thread
+reserves an 8 MiB stack, matching the headroom required by the CLI's debug async
+bootstrap. CI exercises version probing and RPC startup/shutdown as well.
 
-## 3. Version fingerprint (VERSION.json)
+## Runtime and migration
 
-Generated by the assembly script; fields:
+The bundle is read-only. Motrix supplies the download directory and a separate
+session database path. The host owns startup recovery holds, automatic restart,
+parent-process lifetime and NAT mapping; taiji owns task execution and durable
+session state. Mapping updates are tied to the current native listener binding.
 
-| Field | Semantics | Consumer |
-|---|---|---|
-| `version` | semver (workspace `CARGO_PKG_VERSION`, `0.1.0` at this module's cut) | Motrix version check |
-| `version_string` | `taiji/<semver>` (frozen prefix, SPEC §8.2) | verbatim-checked against the runtime `getVersion` reply (packaging triple-check ②) |
-| `git_sha` | source commit of the build (`git rev-parse HEAD`) | staged-rollout weekly reports / incident triage |
-| `git_dirty` | whether the worktree had uncommitted changes at build time | dirty-tree artifacts are barred from nightly (honest accounting) |
-| `build_time_utc` | UTC ISO-8601; takes the `SOURCE_DATE_EPOCH` value when set (reproducible-build convention) | observation-window alignment |
-| `target` / `platform_layout` | triple / layout name (with the universal-degradation `universal_fallback` field) | release matrix check |
-| `rustc` / `profile` / `rustflags` / `cargo_locked` | build-parameter fingerprint (determinism policy §5) | rebuild verification |
-
-## 4. License notices
-
-- Engine proper: **GPL-2.0-or-later** (workspace `license` field; the final
-  commercialization position defers to the conclusions of
-  `motrix-legal-and-commercial-strategy.md` at the workspace root).
-- `THIRD-PARTY-NOTICES.md` is generated by the assembly script: a
-  crate/license/purpose summary from the dependency registry () + Cargo.lock
-  pinned versions + upstream repo URLs. Per-crate full license text is
-  expanded in the M5 release process with tools like `cargo about`/`cargo
-  deny` (this module takes on no such toolchain dependency); this manifest is
-  the registry's machine-readable summary and is replaced once the M5
-  expansion lands.
-
-## 5. Build determinism policy
-
-The assembly script pins the following parameters (each output can be checked
-against SHA256SUMS):
-
-1. **Pinned RUSTFLAGS**: `--remap-path-prefix <repo>/=/taiji-rs/` — strips
-   local absolute paths; the script sets the `RUSTFLAGS` env var explicitly
-   and inherits nothing left over from the environment;
-2. **`--locked` build**: `cargo build --release --locked`; Cargo.lock pins the
-   dependency graph (lockfile drift = immediate failure, never silently
-   re-resolved);
-3. **Toolchain fingerprint**: full `rustc -vV` output recorded in
-   VERSION.json;
-4. **Artifact sha256 manifest**: SHA256SUMS covers every file in the layout
-   (the verification script reviews file by file);
-5. Honest boundary: this repo **does not promise bit-level reproducibility**
-   (thin LTO may still differ across machines); the determinism promise =
-   pinned build parameters + verifiable artifact fingerprints; a
-   same-machine, same-source rebuild should be bit-identical (sample rebuilds
-   can be checked against nightly).
-
-## 6. Upgrades and coexistence (fork-unaware)
-
-- **Dual-engine coexistence**: fork aria2 and taiji never read or write each
-  other's storage (SPEC §9). taiji owns only its own
-  `<D>/bt.sqlite3`; the fork's sqlite/`.aria2` control files are never touched
-  by taiji (the sole exception = the one-shot migration importer, read-only,
-  SPEC §10, not run during the staged-rollout window). Upgrading or rolling back
-  taiji has zero effect on the fork — GID namespace isolation (top bit = 1,
-  the top-bit namespace split) guarantees the two sides' task identities never intersect.
-- **Upgrading taiji**: Motrix shuts the sidecar down (contract §4 order: fork
-  shutdown → taiji shutdown → SIGTERM fallback) → swaps the packaging
-  directory (binary + VERSION.json + notices + SUMS replaced atomically as a
-  whole directory) → respawns. The session database's `user_version` migration
-  ledger is forward-compatible (schema changes go only through the ledger) —
-  a new version opening an old database migrates it automatically; on
-  **downgrade** to an older version whose database has already rolled forward,
-  the old version runs in "open fails → degrade to no persistence" mode
-  (explicit warning, no masquerading) and never corrupts data.
-- **Upgrades do not touch task data**: downloaded files under `<D>` and
-  `bt.sqlite3` are runtime data and are not swapped with the binary; the new
-  version resumes bitmaps/counters/tracker state through the crash-recovery
-  face (SPEC §5.4).
-- **Fork-unawareness criterion**: the fork side's task list, speeds, and
-  sqlite are identical before and after the upgrade (the staged-rollout weekly
-  report's aria2 baseline sampling covers this assertion by construction:
-  baseline tasks' counters are unperturbed by taiji upgrades).
+The one-shot importer reads the legacy aria2 database without modifying it,
+preserves task identifiers and supported resume state, and writes the taiji
+database. The old engine is not started. Download data and session databases
+are not part of a binary upgrade; do not replace them with the package or assume
+an older engine can read a newer database schema.

@@ -524,6 +524,8 @@ pub(super) async fn run(
                 }
             }
             Some(reg) = reg_rx.recv() => {
+                let port = taiji_domain::nat::peer_announce_port(nat.as_ref(), actual_port, reg.meta.ip, reg.meta.transport);
+                let _ = reg.handle.command(taiji_bt::peer::PeerCommand::SetListenPort(port));
                 if handle_peer_registered(reg, &mut state, session_metrics.as_deref(), pex_enabled)
                     .is_break()
                 {
@@ -712,6 +714,7 @@ pub(super) async fn run(
                     actual_port,
                     dht_announce_interval,
                     pex_enabled,
+                    &actor_cmds,
                 );
             }
             _ = seed_ticker.tick() => {

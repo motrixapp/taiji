@@ -55,6 +55,11 @@ pub struct DhtHandle {
 }
 
 impl DhtHandle {
+    pub async fn set_enabled(&self, enabled: bool) -> Result<(), DhtEngineError> {
+        self.call(|reply| DhtCommand::SetEnabled { enabled, reply })
+            .await
+    }
+
     /// Our DHT UDP port (the PORT message payload).
     pub fn dht_port(&self) -> u16 {
         self.dht_port
@@ -81,6 +86,13 @@ impl DhtHandle {
             reply,
         })
         .await?
+    }
+
+    pub async fn withdraw(&self, target: DhtTarget) -> Result<(), DhtEngineError> {
+        self.cmd_tx
+            .send(DhtCommand::Withdraw { target })
+            .await
+            .map_err(|_| DhtEngineError::Closed)
     }
 
     /// get_peers iteration only.

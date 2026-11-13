@@ -362,8 +362,8 @@ async fn trigger_points_table_driven() {
     }
 }
 
-/// error trigger point: a trackerless magnet that is activated and then
-/// explicitly fails fires on-download-error with the in-memory
+/// Error trigger point: a magnet with all discovery sources disabled
+/// explicitly fails and fires on-download-error with the in-memory
 /// projection payload (numFiles = 0, firstFilename = "" — the util.cc
 /// inMemoryDownload branch).
 #[tokio::test]
@@ -379,6 +379,7 @@ async fn error_hook_fires_on_failed_task() {
                 uris: vec!["magnet:?xt=urn:btih:1111111111111111111111111111111111111111".into()],
                 options: BTreeMap::from([
                     ("on-download-error".to_string(), script),
+                    ("bt-disable-dht".to_string(), "true".to_string()),
                     ("dir".to_string(), tmp.display().to_string()),
                 ]),
                 position: None,

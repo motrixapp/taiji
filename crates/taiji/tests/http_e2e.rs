@@ -609,12 +609,12 @@ fn invalid_option_values_are_rejected() {
         "the error surface must name the invalid option: {out}"
     );
     // Scheduler-group domains: max-connection-per-server must be in
-    // 1..=16 (aria2-native domain, no clamping); split >= 1;
+    // 1..=64 (Motrix domain, no clamping); split >= 1;
     // http-stall-window >= 3 (several heartbeat periods);
     // min-split-size must parse as a size.
     for (flag, val) in [
         ("--max-connection-per-server", "0"),
-        ("--max-connection-per-server", "17"),
+        ("--max-connection-per-server", "65"),
         ("--split", "0"),
         ("--http-stall-window", "0"),
         ("--min-split-size", "4X"),

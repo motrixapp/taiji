@@ -168,7 +168,7 @@ pub enum AimdDecision {
 
 /// AIMD config (fixed once at task creation; `max_connections` domain
 /// validation belongs to the option layer — `--max-connection-per-server`
-/// 1..=16; the constructor only defends with a clamp >= 1, and the SFTP
+/// 1..=64; the constructor only defends with a clamp >= 1, and the SFTP
 /// seam constructs 32 legitimately).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AimdConfig {

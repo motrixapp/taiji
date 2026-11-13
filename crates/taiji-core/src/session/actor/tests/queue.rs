@@ -1526,6 +1526,7 @@ async fn bootstrap_queue_order_preserved_across_families() {
             5,
             "v2.bin",
             &super::super::persist::PersistedTaskConfig {
+                magnet_flags: None,
                 dir: dir.display().to_string(),
                 ..Default::default()
             },

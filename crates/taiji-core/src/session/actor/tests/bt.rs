@@ -358,7 +358,14 @@ async fn per_task_bt_disable_dht_flag_is_scoped_to_single_task() {
 /// services).
 #[tokio::test]
 async fn magnet_without_trackers_fails_explicitly_after_activation() {
-    let (handle, join) = SessionActor::spawn();
+    let (handle, join) = SessionActor::spawn_with(SessionOptions {
+        global: GlobalOptions {
+            enable_dht: false,
+            enable_dht6: false,
+            bt_lsd: false,
+            ..Default::default()
+        },
+    });
     let magnet = SessionCommand::AddUri {
         uris: vec!["magnet:?xt=urn:btih:1111111111111111111111111111111111111111".into()],
         options: BTreeMap::new(),
@@ -621,7 +628,7 @@ async fn tell_status_snapshot_on_local_seeder_closed_loop() {
     assert_eq!(v.seeder, Some(true), "all faces complete → seeder");
     // Per-file completed lengths (folded from bitmap ranges).
     assert_eq!(v.files.len(), 1);
-    assert_eq!(v.files[0].path, "blob.bin");
+    assert_eq!(v.files[0].path, dir.join("blob.bin").display().to_string());
     assert_eq!(v.files[0].completed_length, content.len() as u64);
     assert_eq!(v.files[0].piece_size, SEED_PIECE_LEN as u32);
     // ---- bittorrent sub-dict (gatherBitTorrentMetadata + SPEC

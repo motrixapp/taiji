@@ -9,7 +9,7 @@
 #      SHA256SUMS, hand them to the sign job as artifacts.
 #   2. sign    (privileged, macos-release-signing environment) —
 #      isolated keychain, hardened-runtime codesign with a secure
-#      timestamp, notarytool notarization, stapler staple + validate,
+#      timestamp and accepted notarytool notarization,
 #      repack with a fresh SHA256SUMS. No checkout of the repo.
 #   3. replace (write) — clobber the release assets with the signed
 #      ones.
@@ -55,7 +55,12 @@ jobs:
           set -euo pipefail
           [[ "${GITHUB_REPOSITORY}" == "motrixapp/taiji" ]] || { echo "not the canonical repo"; exit 1; }
           [[ "${GITHUB_REF}" == "refs/heads/main" ]] || { echo "dispatch from main only"; exit 1; }
-          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          test "$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')" = true
+          source_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)"
+          ancestry="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${source_sha}...main" --jq .status)"
+          [[ "$ancestry" == ahead || "$ancestry" == identical ]]
+          echo "SOURCE_SHA=${source_sha}" >> "$GITHUB_ENV"
 
       - name: Download the two macos assets and verify against SHA256SUMS
         env:
@@ -65,15 +70,32 @@ jobs:
           mkdir -p unsigned && cd unsigned
           gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
             --pattern 'taiji-sidecar-macos-*.tar.gz'
-          for t in taiji-sidecar-macos-*.tar.gz; do
-            d="${t%.tar.gz}"
-            tar -xzf "$t"
+          for arch in arm64 x64; do
+            d="taiji-sidecar-macos-${arch}"
+            t="${d}.tar.gz"
+            python3 - "$t" "$d" <<'PY'
+          import json, os, pathlib, sys, tarfile
+          filename, root = sys.argv[1:]
+          with tarfile.open(filename) as archive:
+              for member in archive.getmembers():
+                  path = pathlib.PurePosixPath(member.name)
+                  assert not path.is_absolute() and '..' not in path.parts
+                  assert path.parts and path.parts[0] == root
+                  assert member.isdir() or member.isfile()
+              archive.extractall('.')
+          manifest = json.loads((pathlib.Path(root) / 'VERSION.json').read_text())
+          assert manifest['version'] == os.environ['TAG'].removeprefix('v')
+          assert manifest['git_sha'] == os.environ['SOURCE_SHA']
+          assert manifest['git_dirty'] is False
+          assert manifest['profile'] == 'release' and manifest['cargo_locked'] is True
+          PY
             # Integrity binding: the layout's own SHA256SUMS is the
             # contract the build job wrote — a mismatched download
             # never reaches the keychain.
-            (cd "${d}" && sha256sum --check --ignore-missing SHA256SUMS)
-            codesig_note=$(cd "${d}" && grep -E '^taiji$|^taiji\.exe$' SHA256SUMS || true)
+            (cd "${d}" && sha256sum --check SHA256SUMS)
+            codesig_note=$(cd "${d}" && awk '$2 == "taiji" { print }' SHA256SUMS)
             [[ -n "$codesig_note" ]] || { echo "SHA256SUMS does not cover the binary in ${d}"; exit 1; }
+            rm "$t"
           done
 
       # actions/upload-artifact v4.6.2
@@ -85,7 +107,7 @@ jobs:
           if-no-files-found: error
 
   sign:
-    name: codesign + notarize + staple
+    name: codesign + notarize
     needs: fetch
     runs-on: macos-latest
     timeout-minutes: 30
@@ -107,7 +129,8 @@ jobs:
           # 0600 temp material in a 0700 dir; cleaned in the always step.
           KC_DIR="$(mktemp -d)"
           echo "KC_DIR=${KC_DIR}" >> "$GITHUB_ENV"
-          echo "KEYCHAIN=${KC_DIR}/signing.keychain-db" >> "$GITHUB_ENV"
+          KEYCHAIN="${KC_DIR}/signing.keychain-db"
+          echo "KEYCHAIN=${KEYCHAIN}" >> "$GITHUB_ENV"
           printf '%s' "${MAC_CERTS}" | base64 --decode > "${KC_DIR}/certs.p12"
           chmod 600 "${KC_DIR}/certs.p12"
           KC_PASS="$(openssl rand -hex 32)"
@@ -121,8 +144,11 @@ jobs:
           # Temporarily put the isolated keychain in the search list
           # (original list restored in cleanup).
           security list-keychains -d user > "${KC_DIR}/original-keychains.txt"
-          security list-keychains -d user -s "${KEYCHAIN}" \
-            $(sed 's/"//g' "${KC_DIR}/original-keychains.txt" | tr '\n' ' ')
+          original_keychains=()
+          while IFS= read -r keychain; do
+            original_keychains+=("${keychain}")
+          done < <(sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//' "${KC_DIR}/original-keychains.txt")
+          security list-keychains -d user -s "${KEYCHAIN}" "${original_keychains[@]}"
           # Resolve and export the identity for the signing steps.
           IDENTITY="$(security find-identity -v -p codesigning "${KEYCHAIN}" \
             | grep 'Developer ID Application' | head -1 \
@@ -132,10 +158,10 @@ jobs:
 
       - name: Pin the certificate's Team ID (optional, when the variable is set)
         if: vars.EXPECTED_MACOS_TEAM_ID != ''
+        env:
+          EXPECTED_MACOS_TEAM_ID: ${{ vars.EXPECTED_MACOS_TEAM_ID }}
         run: |
           set -euo pipefail
-          team="$(security find-certificate -a -p "${KEYCHAIN}" \
-            | openssl x509 -noout -subject 2>/dev/null | true)"
           team_id="$(security find-identity -v -p codesigning "${KEYCHAIN}" \
             | grep -o '([A-Z0-9]\{10\})' | head -1 | tr -d '()')"
           echo "resolved TeamID: ${team_id:-<none>}; expected: ${EXPECTED_MACOS_TEAM_ID}"
@@ -146,13 +172,15 @@ jobs:
       - name: codesign (hardened runtime, secure timestamp)
         run: |
           set -euo pipefail
-          for d in taiji-sidecar-macos-*; do
+          for arch in arm64 x64; do
+            d="taiji-sidecar-macos-${arch}"
             codesign --force --options runtime --timestamp \
               --keychain "${KEYCHAIN}" -s "${IDENTITY}" "${d}/taiji"
             codesign --verify --strict --verbose=2 "${d}/taiji"
           done
 
-      - name: notarize (notarytool) and staple
+      # Standalone Mach-O command-line tools can be notarized but not stapled.
+      - name: notarize and verify accepted receipts
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_KEY_ID: ${{ secrets.API_KEY_ID }}
@@ -163,16 +191,25 @@ jobs:
           key_file="${KC_DIR}/AuthKey_${API_KEY_ID}.p8"
           printf '%s' "${API_KEY}" | base64 --decode > "${key_file}"
           chmod 600 "${key_file}"
-          for d in taiji-sidecar-macos-*; do
+          for arch in arm64 x64; do
+            d="taiji-sidecar-macos-${arch}"
             ditto -c -k --keepParent "${d}/taiji" "${d}/taiji.zip"
             xcrun notarytool submit "${d}/taiji.zip" \
               --key "${key_file}" --key-id "${API_KEY_ID}" \
-              --issuer "${API_KEY_ISSUER_ID}" --wait
-            xcrun stapler staple "${d}/taiji"
-            xcrun stapler validate "${d}/taiji"
+              --issuer "${API_KEY_ISSUER_ID}" --wait --output-format json \
+              > "${KC_DIR}/notary-${arch}.json"
+            python3 - "${KC_DIR}/notary-${arch}.json" "${d}" <<'PY'
+          import hashlib, json, pathlib, sys
+          result = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert result.get('status') == 'Accepted', result
+          directory = pathlib.Path(sys.argv[2])
+          receipt = {'status': result['status'], 'submissionId': result['id'],
+                     'binarySha256': hashlib.sha256((directory / 'taiji').read_bytes()).hexdigest()}
+          (directory / 'NOTARIZATION.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          PY
+            codesign --verify --strict --verbose=2 "${d}/taiji"
             rm "${d}/taiji.zip"
-            # Fresh manifest over the signed layout.
-            (cd "${d}" && shasum -a 256 taiji VERSION.json THIRD-PARTY-NOTICES.md > SHA256SUMS)
+            (cd "${d}" && shasum -a 256 taiji VERSION.json COPYING THIRD-PARTY-NOTICES.md THIRD-PARTY-LICENSES.txt NOTARIZATION.json > SHA256SUMS)
             tar -czf "${d}.tar.gz" "./${d}"
           done
 
@@ -181,15 +218,18 @@ jobs:
         run: |
           set -u
           if [ -f "${KC_DIR:-/nonexistent}/original-keychains.txt" ]; then
-            security list-keychains -d user -s \
-              $(sed 's/"//g' "${KC_DIR}/original-keychains.txt" | tr '\n' ' ') || true
+            original_keychains=()
+            while IFS= read -r keychain; do
+              original_keychains+=("${keychain}")
+            done < <(sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//' "${KC_DIR}/original-keychains.txt")
+            security list-keychains -d user -s "${original_keychains[@]}" || true
           fi
           security delete-keychain "${KEYCHAIN:-/nonexistent}" || true
           rm -rf "${KC_DIR:-/nonexistent}"
 
       # actions/upload-artifact v4.6.2
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always() == false
+        if: success()
         with:
           name: signed-macos
           path: taiji-sidecar-macos-*.tar.gz
@@ -216,7 +256,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null
+          test "$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')" = true
           gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
             taiji-sidecar-macos-arm64.tar.gz taiji-sidecar-macos-x64.tar.gz
           echo "signed assets replaced; the release can be published after inspection"

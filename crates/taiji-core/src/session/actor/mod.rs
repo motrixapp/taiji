@@ -128,6 +128,7 @@ type HotPushTarget = (Gid, EngineHandle, Vec<(usize, String)>);
 /// Session-side handle for a running task (pause/remove/shutdown via the
 /// token; changeUri via the engine handle; forceRemove via abort).
 struct RunningTask {
+    network: Option<crate::nat::PeerNetworkBinding>,
     token: CancellationToken,
     /// Execution backend (mutually exclusive shapes; the convergence source
     /// of the engine handle and the HTTP driver trio, see [`TaskBackend`]).
@@ -214,7 +215,9 @@ enum TaskBackend {
     /// only the task token (a fetch task has no engine to abort, same
     /// here); swaps in [`TaskBackend::Engine`] when the upgrade notice
     /// arrives.
-    Metadata,
+    Metadata {
+        tracker_updates: Option<tokio::sync::watch::Sender<Vec<(usize, String)>>>,
+    },
     /// Media driver task (the third task family): live
     /// readings = the pipeline's phase/track/progress rollup state
     /// (a small mutex — reads never span await); the row mirror and
@@ -241,7 +244,7 @@ impl TaskBackend {
     fn family(&self) -> super::backend_contract::TaskFamily {
         use super::backend_contract::TaskFamily;
         match self {
-            TaskBackend::Engine { .. } | TaskBackend::Metadata => TaskFamily::Bittorrent,
+            TaskBackend::Engine { .. } | TaskBackend::Metadata { .. } => TaskFamily::Bittorrent,
             TaskBackend::Http { .. } => TaskFamily::Http,
             TaskBackend::Media { .. } => TaskFamily::Media,
         }
@@ -278,7 +281,9 @@ impl TaskBackend {
     fn engine(&self) -> Option<&EngineHandle> {
         match self {
             TaskBackend::Engine { engine, .. } => Some(engine),
-            TaskBackend::Http { .. } | TaskBackend::Metadata | TaskBackend::Media { .. } => None,
+            TaskBackend::Http { .. } | TaskBackend::Metadata { .. } | TaskBackend::Media { .. } => {
+                None
+            }
         }
     }
 
@@ -288,7 +293,9 @@ impl TaskBackend {
     fn http_live(&self) -> Option<&Arc<http_task::HttpLive>> {
         match self {
             TaskBackend::Http { live, .. } => Some(live),
-            TaskBackend::Engine { .. } | TaskBackend::Metadata | TaskBackend::Media { .. } => None,
+            TaskBackend::Engine { .. }
+            | TaskBackend::Metadata { .. }
+            | TaskBackend::Media { .. } => None,
         }
     }
 
@@ -298,7 +305,9 @@ impl TaskBackend {
     fn http_row(&self) -> Option<&Arc<std::sync::Mutex<taiji_store::persist::HttpTaskRow>>> {
         match self {
             TaskBackend::Http { row, .. } => Some(row),
-            TaskBackend::Engine { .. } | TaskBackend::Metadata | TaskBackend::Media { .. } => None,
+            TaskBackend::Engine { .. }
+            | TaskBackend::Metadata { .. }
+            | TaskBackend::Media { .. } => None,
         }
     }
 
@@ -310,7 +319,7 @@ impl TaskBackend {
         match self {
             TaskBackend::Http { pause, .. } => Some(pause),
             TaskBackend::Media { pause, .. } => Some(pause),
-            TaskBackend::Engine { .. } | TaskBackend::Metadata => None,
+            TaskBackend::Engine { .. } | TaskBackend::Metadata { .. } => None,
         }
     }
 
@@ -321,7 +330,9 @@ impl TaskBackend {
     fn status_cache(&self) -> Option<&EngineStatusCache> {
         match self {
             TaskBackend::Engine { status_cache, .. } => status_cache.as_ref(),
-            TaskBackend::Http { .. } | TaskBackend::Metadata | TaskBackend::Media { .. } => None,
+            TaskBackend::Http { .. } | TaskBackend::Metadata { .. } | TaskBackend::Media { .. } => {
+                None
+            }
         }
     }
 
@@ -481,7 +492,12 @@ fn cookie_intake_active(
     options: &BTreeMap<String, String>,
     seed_len: usize,
 ) -> bool {
-    global_source.is_some() || options.contains_key("load-cookies") || seed_len > 0
+    global_source.is_some()
+        || options.contains_key("load-cookies")
+        || seed_len > 0
+        || options
+            .get("motrix-task-cookie-scope")
+            .is_some_and(|value| value == "true")
 }
 
 /// Strip manual `Cookie:` lines from `--header` values (case-insensitive
@@ -1137,7 +1153,7 @@ fn parse_header_lines(v: &str) -> Result<Vec<(String, String)>, SessionError> {
     Ok(parsed)
 }
 
-/// `--max-connection-per-server` value domain (aria2's native 1..=16; out
+/// `--max-connection-per-server` value domain (Motrix-supported 1..=64; out
 /// of domain rejected, not truncated; the cap shares its source with
 /// taiji-http's AimdConfig growth cap).
 fn parse_max_conn_per_server_value(v: &str) -> Result<u32, SessionError> {
@@ -1387,10 +1403,9 @@ fn non_blank(v: &str) -> Option<&str> {
     if v.trim().is_empty() { None } else { Some(v) }
 }
 
-/// The `--max-connection-per-server` domain cap (aria2's native value; the
-/// same source as taiji-http's [`taiji_http::aimd::AimdConfig`] growth
-/// cap).
-const MAX_CONN_PER_SERVER_MAX: u64 = 16;
+/// Motrix's reviewed connection ceiling, shared by parsing and persisted
+/// concurrency replay. The default remains unchanged.
+const MAX_CONN_PER_SERVER_MAX: u64 = 64;
 
 /// changeOption's HTTP scheduling-group increment ("split / connection
 /// count / scheduler-class can change at runtime (out-of-domain
@@ -1959,6 +1974,7 @@ pub struct SessionActor {
     /// `global`; health state continues per template string (a hot-swapped
     /// list keeps memory).
     web_health: Arc<crate::magnet::WebMirrorHealth>,
+    magnet_services: Arc<crate::magnet::MagnetServices>,
     /// NAT singleton supervisor (powered at spawn_with_persist when either
     /// `--bt-enable-upnp`/`--bt-enable-nat-pmp` is on — SPEC §3.2's one
     /// NatActor per process; SPEC §6.8). The engine clone injects into
@@ -2239,7 +2255,9 @@ impl SessionActor {
             None
         };
         let handle_nat = nat.as_ref().map(|s| s.engine());
+        let magnet_services = Arc::new(crate::magnet::MagnetServices::new(persist.clone()));
         let actor = SessionActor {
+            magnet_services,
             cmd_rx,
             events,
             event_rx,
@@ -2418,6 +2436,27 @@ impl SessionActor {
         // CLI-injected bt-tracker/bt-tracker-file initial import +
         // incremental persistence) — before task bootstrap, so rebuilt
         // tasks get the three-layer merge injected at first activation.
+        if let Some(persist) = &self.persist {
+            match persist.load_task_gids().await {
+                Ok(gids) => {
+                    for gid in gids {
+                        match u64::from_str_radix(&gid, 16) {
+                            Ok(raw) if gid.len() == 16 && raw != 0 => self.gid.reserve(raw),
+                            _ => {
+                                tracing::error!(
+                                    "invalid persisted task identity; refusing startup"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "cannot load persisted identities; refusing startup");
+                    return;
+                }
+            }
+        }
         self.bootstrap_global_trackers().await;
         // Ban face ready (the client_ban_prefixes kv restore + manual ban
         // peer_ban row read-back) — before task bootstrap, so rebuilt
@@ -2705,6 +2744,11 @@ impl SessionActor {
         if self.token.is_cancelled() {
             return;
         }
+        self.queue
+            .set_metadata_only(self.jobs.iter().filter_map(|(gid, job)| {
+                matches!(job, Job::Magnet(magnet) if magnet.options.bt_metadata_only)
+                    .then_some(*gid)
+            }));
         // (1) check promotion: admit until the budget is full or the
         // FIFO drains. Each admission pops the entry; the meta lookup
         // precedes the registry move (a parked entry whose payload
@@ -2721,7 +2765,7 @@ impl SessionActor {
         let budget = elastic_check_budget(
             self.global.check_budget(),
             self.global.max_concurrent_downloads,
-            self.queue.active_len(),
+            self.queue.active_payload_len(),
         );
         while let Some(entry) = self.queue.admit_next_check(budget) {
             let meta = match self.jobs.get(&entry.gid) {
@@ -2788,7 +2832,8 @@ impl SessionActor {
         }
         // (4) download fillup + spawn backfill (the former pump body).
         let max = self.global.max_concurrent_downloads;
-        let batch = self.queue.fillup(max);
+        let mut batch = self.queue.fillup_metadata(4);
+        batch.extend(self.queue.fillup(max));
         if !batch.is_empty() {
             debug!(
                 target: "taiji::core::session",
@@ -2887,6 +2932,7 @@ mod magnet;
 /// addMedia option-parse face, and the driver spawn; the pipeline is
 /// `crate::session::media`.
 mod media_task;
+pub(crate) mod output_paths;
 mod persist;
 /// Periodic task summary log (the `--summary-interval` feed; pub(crate)
 /// so the `taiji http` / bare-run doc face can reference the summary
@@ -3127,10 +3173,22 @@ mod backend_family_tests {
     /// upgrade swaps Engine in place — same family, same contract).
     #[test]
     fn metadata_variant_maps_to_bittorrent_family() {
-        assert_eq!(TaskBackend::Metadata.family(), TaskFamily::Bittorrent);
+        assert_eq!(
+            (TaskBackend::Metadata {
+                tracker_updates: None
+            })
+            .family(),
+            TaskFamily::Bittorrent
+        );
         // The family's stated verification position: verify-before-disk.
         assert_eq!(
-            BackendContract::for_family(TaskBackend::Metadata.family()).verification,
+            BackendContract::for_family(
+                (TaskBackend::Metadata {
+                    tracker_updates: None
+                })
+                .family()
+            )
+            .verification,
             super::super::backend_contract::VerificationPosition::VerifyBeforeDisk
         );
     }

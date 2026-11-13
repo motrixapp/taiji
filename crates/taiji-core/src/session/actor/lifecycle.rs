@@ -157,6 +157,9 @@ impl SessionActor {
                 }
             };
             let paused = phase == TaskPhase::Paused;
+            if self.global.motrix_startup_hold {
+                self.queue.startup_held.insert(gid, !paused);
+            }
             match self.rebuild_from_row(&gid, &row, &cfg).await {
                 Rebuilt::Torrent(boxed) => {
                     let (metainfo, tiers) = *boxed;
@@ -364,7 +367,18 @@ impl SessionActor {
                         Job::Magnet(Box::new(MagnetJob {
                             magnet_uri,
                             dest: PathBuf::from(&cfg.dir),
-                            options: MagnetOptions::default(),
+                            options: cfg
+                                .magnet_flags
+                                .as_ref()
+                                .map(|flags| {
+                                    flags
+                                        .options(self.global.bt_peer_connection_type, cfg.holepunch)
+                                })
+                                .unwrap_or_else(|| MagnetOptions {
+                                    holepunch: cfg.holepunch,
+                                    bt_peer_connection_type: self.global.bt_peer_connection_type,
+                                    ..MagnetOptions::default()
+                                }),
                             seed: SeedPolicy {
                                 // Out-of-domain seed_ratio drops the
                                 // condition (same as the Torrent arm
@@ -511,6 +525,14 @@ impl SessionActor {
                     if !cfg.rename_pending {
                         continue;
                     }
+                    if self.global.motrix_startup_hold {
+                        if let Ok(raw) = u64::from_str_radix(&row.gid, 16) {
+                            let gid = Gid::from_u64(raw);
+                            self.queue.startup_held.insert(gid, true);
+                            self.http_rename_pending.insert(gid, row.clone());
+                        }
+                        continue;
+                    }
                     if http_task::close_out_pending_row(&self.persist, &row).await {
                         closed += 1;
                     } else {
@@ -566,6 +588,9 @@ impl SessionActor {
                     false
                 }
             };
+            if self.global.motrix_startup_hold {
+                self.queue.startup_held.insert(gid, !paused);
+            }
             let queue_pos = row.queue_pos;
             // Concurrency-intent face replay: the split/cap effective
             // values frozen into the row at creation override the
@@ -635,6 +660,9 @@ impl SessionActor {
         }
         let gids: Vec<Gid> = self.http_rename_pending.keys().copied().collect();
         for gid in gids {
+            if self.queue.startup_held.contains_key(&gid) {
+                continue;
+            }
             // Active/queued tasks are not raced (the driver or the next
             // activation face owns them).
             if self.running.contains_key(&gid) || self.jobs.contains_key(&gid) {
@@ -664,7 +692,10 @@ impl SessionActor {
                 tokio::task::spawn_blocking(move || Metainfo::parse(&bytes)).await
             };
             match parsed {
-                Ok(Ok(meta)) => {
+                Ok(Ok(mut meta)) => {
+                    if let Err(error) = super::output_paths::apply(&mut meta, &cfg.output_paths) {
+                        return Rebuilt::Unrecoverable(error.to_string());
+                    }
                     let tiers = if cfg.tiers.is_empty() {
                         single_tier_from_announce(&meta.announce)
                     } else {
@@ -1008,6 +1039,7 @@ impl SessionActor {
         // (NAT_SHUTDOWN_BUDGET, see mod.rs) so a slow gateway does not
         // eat the 1s shutdown budget. No power / no active mappings = a
         // fast no-op.
+        self.magnet_services.shutdown().await;
         if let Some(sup) = self.nat.take() {
             let _ = tokio::time::timeout(NAT_SHUTDOWN_BUDGET, sup.shutdown()).await;
             info!(target: "taiji::core::session",

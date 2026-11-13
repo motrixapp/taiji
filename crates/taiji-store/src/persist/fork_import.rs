@@ -19,9 +19,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::error::StoreError;
 
-/// Current fork sqlite schema version (`Sqlite3Migrations.h`
-/// `kCurrentSchemaVersion = 1`).
-pub const FORK_SCHEMA_VERSION: i64 = 1;
+/// Highest reviewed Motrix fork schema; versions 1 through 6 share the task surface.
+pub const FORK_SCHEMA_VERSION: i64 = 6;
 
 /// Fork `task` row + `task_progress` join payload (the migration row
 /// model); fields map one-to-one to the `Sqlite3Migrations.cc` columns.
@@ -166,7 +165,7 @@ impl ForkTaskState {
 /// Open the fork sqlite database read-only and probe its schema.
 ///
 /// - `SQLITE_OPEN_READ_ONLY`: sqlite rejects every write;
-/// - `user_version != 1` or missing task/task_progress tables ->
+/// - Unknown versions or incompatible task/task_progress columns ->
 ///   [`StoreError::ForkSchema`] (unknown schemas are rejected
 ///   explicitly; this also catches this engine's own taiji.sqlite3
 ///   passed in by mistake — both are user_version 1 with different
@@ -194,13 +193,82 @@ pub fn open_fork_readonly(path: &Path) -> Result<Connection, StoreError> {
         .map(|x| x.is_some())
         .map_err(StoreError::from)
     };
-    let schema_ok =
-        version == FORK_SCHEMA_VERSION && has_table("task")? && has_table("task_progress")?;
+    let schema_ok = (1..=FORK_SCHEMA_VERSION).contains(&version)
+        && has_table("task")?
+        && has_table("task_progress")?;
     if !schema_ok {
         return Err(StoreError::ForkSchema {
             path: path.display().to_string(),
             version,
         });
+    }
+    for (minimum, tables) in [
+        (2, &["task_cookie_context", "task_cookie"][..]),
+        (
+            4,
+            &["legacy_checkpoint_import", "legacy_checkpoint_file"][..],
+        ),
+        (5, &["legacy_torrent_metadata"][..]),
+        (6, &["task_http_context"][..]),
+    ] {
+        if version >= minimum
+            && tables
+                .iter()
+                .any(|table| !has_table(table).unwrap_or(false))
+        {
+            return Err(StoreError::ForkSchema {
+                path: path.display().to_string(),
+                version,
+            });
+        }
+    }
+    for (table, columns) in [
+        (
+            "task",
+            &[
+                "gid",
+                "state",
+                "serialized",
+                "following",
+                "followed_by",
+                "metadata_uri",
+                "bt_local_path",
+                "queue_position",
+            ][..],
+        ),
+        (
+            "task_progress",
+            &[
+                "gid",
+                "is_torrent",
+                "info_hash",
+                "piece_length",
+                "total_length",
+                "upload_length",
+                "bitfield",
+            ][..],
+        ),
+    ] {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        if columns.iter().any(|column| !names.contains(*column)) {
+            return Err(StoreError::ForkSchema {
+                path: path.display().to_string(),
+                version,
+            });
+        }
+    }
+    let ambiguous: bool = conn.query_row(
+        "SELECT EXISTS(SELECT gid FROM task_progress WHERE gid IN (SELECT gid FROM task) GROUP BY gid HAVING count(*) > 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if ambiguous {
+        return Err(StoreError::Internal(
+            "ambiguous legacy checkpoint identity".into(),
+        ));
     }
     Ok(conn)
 }
@@ -528,6 +596,7 @@ pub fn load_fork_bt_tasks(conn: &Connection) -> Result<Vec<ForkTaskRow>, StoreEr
 /// core-side import_bitmap).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkHttpTaskRow {
+    pub checkpoint_path: Option<String>,
     /// Fork GID (16 hex, top bit = 0; anchor of the dedup key and new-GID mapping tables).
     pub gid: String,
     /// Fork task.state ("paused" | "waiting"; `Sqlite3SessionStore.cc`).
@@ -563,15 +632,21 @@ pub struct ForkHttpTaskRow {
 /// only for `is_torrent = 0` rows (nothing outside the BT face consumes
 /// them).
 pub fn load_fork_http_tasks(conn: &Connection) -> Result<Vec<ForkHttpTaskRow>, StoreError> {
+    let has_path: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_progress') WHERE name='out_path')",
+        [],
+        |r| r.get(0),
+    )?;
+    let path_column = if has_path { "p.out_path" } else { "NULL" };
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT t.gid, t.state, t.serialized, t.queue_position, p.is_torrent,
-                    p.piece_length, p.total_length, p.bitfield
+                    p.piece_length, p.total_length, p.bitfield, {path_column}
              FROM task t
              LEFT JOIN task_progress p ON p.gid = t.gid
              WHERE p.gid IS NULL OR p.is_torrent = 0 OR p.info_hash IS NULL
-             ORDER BY t.queue_position, t.gid",
-        )
+             ORDER BY t.queue_position, t.gid"
+        ))
         .map_err(StoreError::from)?;
     let rows = stmt
         .query_map([], |r| {
@@ -597,6 +672,7 @@ pub fn load_fork_http_tasks(conn: &Connection) -> Result<Vec<ForkHttpTaskRow>, S
                 None
             };
             Ok(ForkHttpTaskRow {
+                checkpoint_path: r.get(8)?,
                 gid: r.get(0)?,
                 state: r.get(1)?,
                 serialized: r.get(2)?,

@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "taiji"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-bt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "axum",
@@ -2311,7 +2311,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "if-addrs",
@@ -2351,7 +2351,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "bytes",
@@ -2373,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "axum",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-metalink"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "digest 0.11.3",
  "md-5",
@@ -2435,7 +2435,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-rpc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "hyper-util",
@@ -2457,7 +2457,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-segment"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "taiji-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "criterion",

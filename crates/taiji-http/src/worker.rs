@@ -538,6 +538,7 @@ pub fn launch_worker(
     // Failure-arm `Retry-After` clamp (RetryPolicy sourced from
     // `--retry-wait`; max_wait ceiling = 30s).
     let retry_policy = opts.retry.clone();
+    let single_source = sources.len() == 1;
     set.spawn(async move {
         let source_idx = src_idx as u32;
         let mut failures: u32 = 0;
@@ -1055,7 +1056,18 @@ pub fn launch_worker(
                                 let _ = coord.abandon(alloc).await;
                             }
                         }
-                        if failures >= WORKER_FAILURE_CAP {
+                        if single_source && retry_policy.max_tries != u32::MAX {
+                            if failures >= retry_policy.max_tries.max(1) {
+                                // A single-source worker must not be respawned
+                                // with a reset retry budget forever.
+                                let message = format!(
+                                    "HTTP request exhausted {} attempts: {e}",
+                                    retry_policy.max_tries
+                                );
+                                set_fatal(&fatal, Fatal::Protocol(e, message));
+                                break;
+                            }
+                        } else if failures >= WORKER_FAILURE_CAP {
                             break;
                         }
                         // (Backoff-period permit yield): for backoffs

@@ -27,6 +27,56 @@ use taiji_store::persist::{TaskPhase, TorrentFileRow, TorrentRow};
 
 use crate::metainfo::{MetaFile, Metainfo, TorrentMeta};
 
+/// Metadata intent survives a crash/restart independently of download policy.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(crate) struct PersistedMagnetFlags {
+    pub save: bool,
+    pub only: bool,
+    pub follow: bool,
+    pub pause_after: bool,
+    pub load_saved: bool,
+}
+impl Default for PersistedMagnetFlags {
+    fn default() -> Self {
+        Self {
+            save: false,
+            only: false,
+            follow: true,
+            pause_after: false,
+            load_saved: false,
+        }
+    }
+}
+impl From<&crate::magnet::MagnetOptions> for PersistedMagnetFlags {
+    fn from(options: &crate::magnet::MagnetOptions) -> Self {
+        Self {
+            save: options.bt_save_metadata,
+            only: options.bt_metadata_only,
+            follow: options.follow_torrent,
+            pause_after: options.pause_metadata,
+            load_saved: options.bt_load_saved_metadata,
+        }
+    }
+}
+impl PersistedMagnetFlags {
+    pub fn options(
+        &self,
+        connection: taiji_bt::utp::PeerConnectionType,
+        holepunch: bool,
+    ) -> crate::magnet::MagnetOptions {
+        crate::magnet::MagnetOptions {
+            bt_save_metadata: self.save,
+            bt_metadata_only: self.only,
+            follow_torrent: self.follow,
+            pause_metadata: self.pause_after,
+            bt_load_saved_metadata: self.load_saved,
+            bt_peer_connection_type: connection,
+            holepunch,
+        }
+    }
+}
+
 /// `config_json` payload of a `torrent` row (the task payload input for
 /// recovery; the store does not interpret JSON, so this struct is the
 /// sole core<->row contract). `tiers` = the tracker table after
@@ -34,6 +84,10 @@ use crate::metainfo::{MetaFile, Metainfo, TorrentMeta};
 /// aria2 announce-list persistence).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PersistedTaskConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magnet_flags: Option<PersistedMagnetFlags>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub output_paths: std::collections::BTreeMap<usize, std::path::PathBuf>,
     #[serde(default)]
     pub dir: String,
     /// seed_ratio domain = [0, inf) (write faces: the import parse arm
@@ -189,6 +243,8 @@ fn is_true(v: &bool) -> bool {
 impl Default for PersistedTaskConfig {
     fn default() -> PersistedTaskConfig {
         PersistedTaskConfig {
+            magnet_flags: None,
+            output_paths: Default::default(),
             dir: String::new(),
             seed_ratio: 0.0,
             seed_time_min: 0.0,
@@ -513,6 +569,7 @@ mod tests {
         // Pins the serialization projection fact (the poisoning source
         // that the upstream import/recovery domain checks filter).
         let poisoned = PersistedTaskConfig {
+            magnet_flags: None,
             dir: "/dl/x".into(),
             seed_ratio: f64::INFINITY,
             ..PersistedTaskConfig::default()
@@ -527,6 +584,8 @@ mod tests {
     #[test]
     fn config_json_roundtrip_is_lossless_and_tolerant() {
         let cfg = PersistedTaskConfig {
+            magnet_flags: None,
+            output_paths: Default::default(),
             dir: "/tmp/dl".into(),
             seed_ratio: 1.5,
             seed_time_min: 30.0,
@@ -571,6 +630,7 @@ mod tests {
             cfg.to_json()
         );
         let with_policy = PersistedTaskConfig {
+            magnet_flags: None,
             scheduler_policy: Some(crate::engine::SchedulerPolicy::sequential()),
             ..PersistedTaskConfig::default()
         };
@@ -601,6 +661,8 @@ mod tests {
         );
         // Non-zero value round-trip.
         let cfg = PersistedTaskConfig {
+            magnet_flags: None,
+            output_paths: Default::default(),
             bt_stop_timeout_secs: 45,
             ..PersistedTaskConfig::default()
         };
@@ -629,6 +691,8 @@ mod tests {
         );
         // Tier override round-trip.
         let cfg = PersistedTaskConfig {
+            magnet_flags: None,
+            output_paths: Default::default(),
             disk_tier: Some("ssd-protect".into()),
             ..PersistedTaskConfig::default()
         };
@@ -642,6 +706,7 @@ mod tests {
         // passed through verbatim (degradation warns on the resolve
         // side).
         let bad = PersistedTaskConfig {
+            magnet_flags: None,
             disk_tier: Some("turbo".into()),
             ..PersistedTaskConfig::default()
         };
@@ -665,6 +730,8 @@ mod tests {
         // Both explicit-override arms round-trip.
         for v in [true, false] {
             let cfg = PersistedTaskConfig {
+                magnet_flags: None,
+                output_paths: Default::default(),
                 bt_disable_dht: Some(v),
                 ..PersistedTaskConfig::default()
             };
@@ -701,6 +768,8 @@ mod tests {
         // and default stay distinguishable).
         for v in [true, false] {
             let cfg = PersistedTaskConfig {
+                magnet_flags: None,
+                output_paths: Default::default(),
                 enable_http_seeding: Some(v),
                 ..PersistedTaskConfig::default()
             };

@@ -536,8 +536,16 @@ pub fn assemble(input: AssembleInput) -> Result<PlannedImport, String> {
     // ---- torrent parent row + file rows (the persist/mod.rs assembly
     // face reused; the serialized seed/limit subset merges into
     // config_json — "serialized -> config_json") ----
+    let mut mapped_meta = meta.clone();
+    let (mapped_dir, output_paths) = crate::session::actor::output_paths::legacy(
+        &mut mapped_meta,
+        &input.options.index_out,
+        &input.dir,
+    )?;
     let cfg = PersistedTaskConfig {
-        dir: input.dir.clone(),
+        magnet_flags: None,
+        output_paths,
+        dir: mapped_dir,
         seed_ratio: input.options.seed_ratio.unwrap_or(0.0),
         seed_time_min: input.options.seed_time_min.unwrap_or(0.0),
         max_download_limit: input.options.max_download_limit.unwrap_or(0),
@@ -743,6 +751,7 @@ pub async fn apply_import(persist: &PersistHandle, planned: &[PlannedImport]) ->
 /// ignored.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct InputFileOptions {
+    pub index_out: Vec<String>,
     pub dir: Option<String>,
     pub paused: bool,
     pub seed_ratio: Option<f64>,
@@ -793,6 +802,7 @@ pub fn parse_input_file(text: &str) -> InputFileOptions {
             }
             "max-download-limit" => o.max_download_limit = parse_size_literal(value),
             "max-upload-limit" => o.max_upload_limit = parse_size_literal(value),
+            "index-out" => o.index_out.push(value.to_string()),
             _ => {}
         }
     }

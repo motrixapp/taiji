@@ -41,6 +41,7 @@ pub(super) fn magnet_options_from_patch(
     conn_type: taiji_bt::utp::PeerConnectionType,
 ) -> MagnetOptions {
     MagnetOptions {
+        holepunch: true,
         bt_save_metadata: patch.bt_save_metadata.unwrap_or(false),
         bt_metadata_only: patch.bt_metadata_only.unwrap_or(false),
         follow_torrent: patch.follow_torrent.unwrap_or(true),

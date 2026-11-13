@@ -23,6 +23,10 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 64;
 /// Actor commands (contract + PORT/persistence wiring).
 #[derive(Debug)]
 pub enum DhtCommand {
+    SetEnabled {
+        enabled: bool,
+        reply: oneshot::Sender<()>,
+    },
     /// Announce (get_peers iteration + announce_peer on completion; also
     /// registers in the auto-resend registry).
     Announce {
@@ -36,6 +40,8 @@ pub enum DhtCommand {
         target: DhtTarget,
         reply: oneshot::Sender<Result<(), DhtEngineError>>,
     },
+    /// Stop advertising a target; pending lookups may still supply peers.
+    Withdraw { target: DhtTarget },
     /// Bootstrap: ping each entry (retrying
     /// [`crate::dht::engine::DhtEngineConfig::bootstrap_ping_retry`]
     /// times); the reply is the number of successful entries; on >=1 a
@@ -128,6 +134,8 @@ impl DhtTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum DhtEngineError {
+    #[error("DHT discovery disabled")]
+    Disabled,
     #[error("dht actor command channel closed")]
     Closed,
     /// BEP27: private torrents disable DHT.

@@ -146,9 +146,23 @@ impl DhtEngine {
         entry_points: Vec<SocketAddr>,
         reply: oneshot::Sender<usize>,
     ) {
-        let round_idx = self.bootstrap_rounds.len();
+        let reusable = self
+            .bootstrap_rounds
+            .iter()
+            .enumerate()
+            .find(|(index, round)| {
+                round.reply.is_none()
+                    && !self.periodic.references_bootstrap_round(*index)
+                    && !self.immediate.references_bootstrap_round(*index)
+            })
+            .map(|(index, _)| index);
+        let round_idx = reusable.unwrap_or(self.bootstrap_rounds.len());
+        if round_idx >= 64 {
+            let _ = reply.send(0);
+            return;
+        }
         let mut remaining = 0usize;
-        for ep in entry_points {
+        for ep in entry_points.into_iter().take(32) {
             // Exempt the entry source from inbound query limiting so the
             // bootstrap path is not starved (BEP42 "should always be
             // serviced"); the exemption carries a TTL, and a re-bootstrap
@@ -160,12 +174,17 @@ impl DhtEngine {
             self.enqueue(QueueKind::Periodic, Task::Ping(ping));
             remaining += 1;
         }
-        self.bootstrap_rounds.push(BootstrapRound {
+        let round = BootstrapRound {
             remaining,
             successes: 0,
             reply: Some(reply),
             settled: false,
-        });
+        };
+        if reusable.is_some() {
+            self.bootstrap_rounds[round_idx] = round;
+        } else {
+            self.bootstrap_rounds.push(round);
+        }
         if remaining == 0 {
             // No entries = settle immediately (0 successes, no
             // lookup/refresh).

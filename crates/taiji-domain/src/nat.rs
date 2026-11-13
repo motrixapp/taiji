@@ -12,16 +12,10 @@
 //! - DHT: on external port change the engine re-sends announce registration
 //! with the new port (`spawn_dht_announces`; the DHT engine keeps sending
 //! from the registry with the new port) — wired inside the engine.
-//! - Tracker: at tracker actor spawn, [`resolve_announce_port`] reads the
-//! snapshot and injects `TrackerActorConfig::listen_port` (the mapped
-//! external port if present; otherwise the actual local port). The
-//! actor's listen_port is a spawn-time constant, so external port changes
-//! after spawn are not followed. libtorrent instead reads
-//! `tcp_external_port` fresh for every announce it constructs
-//! (`session_impl.cpp`); dynamic re-porting would need a bt-seam
-//! extension. Under common gateways the external port equals the
-//! requested port and is stable for the session, so the snapshot is the
-//! final value.
+//! - Tracker: initial assembly and each engine tick publish the current
+//! external port to the tracker actor. DHT uses the UDP mapping, while
+//! BEP10 peers use the mapping for their own transport. IPv6 uses the
+//! local listener port.
 //! - LSD: activation uses the same [`resolve_announce_port`] snapshot; on
 //! external port change the session main loop's watch arm refreshes the
 //! bt::lsd port slot (existing entries only change the port, timers are
@@ -33,6 +27,7 @@
 //! crate carries its own mock server); this module's tests lock the watch
 //! snapshot pure functions and the supervisor lifecycle.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use taiji_io::nat::{self, NatConfig, NatError, NatEvent, NatHandle, NatProtocol};
@@ -77,19 +72,126 @@ pub fn resolve_announce_port(external: Option<ExternalPorts>, local: u16) -> u16
     external.map_or(local, |p| p.effective(local))
 }
 
+/// BEP10 port for this transport and address family.
+pub fn peer_announce_port(
+    nat: Option<&NatEngine>,
+    local: u16,
+    address: std::net::IpAddr,
+    transport: taiji_bt::utp::Transport,
+) -> u16 {
+    if address.is_ipv6() {
+        return local;
+    }
+    nat.and_then(|nat| match transport {
+        taiji_bt::utp::Transport::Tcp => nat.external_ports().tcp,
+        taiji_bt::utp::Transport::Utp => nat.external_ports().udp,
+    })
+    .unwrap_or(local)
+}
+
+/// A bound peer listener and its externally managed port mappings. A new
+/// bind changes the revision so a late host reply cannot update a reused port.
+#[derive(Clone)]
+pub struct PeerNetworkBinding {
+    owner: u64,
+    state: Arc<Mutex<BindingState>>,
+    tx: watch::Sender<ExternalPorts>,
+    rx: watch::Receiver<ExternalPorts>,
+}
+
+#[derive(Default)]
+struct BindingState {
+    port: u16,
+    revision: u64,
+}
+
+impl PeerNetworkBinding {
+    pub fn new(owner: u64) -> Self {
+        let (tx, rx) = watch::channel(ExternalPorts::default());
+        Self {
+            owner,
+            state: Arc::new(Mutex::new(BindingState::default())),
+            tx,
+            rx,
+        }
+    }
+    pub fn snapshot(&self) -> (String, u16) {
+        let state = self.state.lock().unwrap_or_else(|e| panic!("{e}"));
+        (
+            format!("{:016x}-{:016x}", self.owner, state.revision),
+            state.port,
+        )
+    }
+    pub fn bind(&self, port: u16) {
+        let mut state = self.state.lock().unwrap_or_else(|e| panic!("{e}"));
+        state.port = port;
+        state.revision = state.revision.wrapping_add(1);
+        self.tx.send_replace(ExternalPorts::default());
+    }
+    pub fn update(&self, id: &str, port: u16, external: ExternalPorts) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| panic!("{e}"));
+        if state.port == 0
+            || state.port != port
+            || id != format!("{:016x}-{:016x}", self.owner, state.revision)
+        {
+            return false;
+        }
+        self.tx.send_if_modified(|value| {
+            if *value == external {
+                false
+            } else {
+                *value = external;
+                true
+            }
+        });
+        true
+    }
+    pub fn release(&self, id: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| panic!("{e}"));
+        if id == format!("{:016x}-{:016x}", self.owner, state.revision) {
+            state.port = 0;
+            state.revision = state.revision.wrapping_add(1);
+            self.tx.send_replace(ExternalPorts::default());
+        }
+    }
+    pub fn engine(&self) -> NatEngine {
+        NatEngine {
+            handle: None,
+            external_rx: self.rx.clone(),
+            lease: Duration::ZERO,
+            binding: Some(self.clone()),
+        }
+    }
+    pub fn observe(&self, mut engine: NatEngine) -> NatEngine {
+        engine.binding = Some(self.clone());
+        engine
+    }
+}
+
 /// Engine-side NAT consumption surface (Clone; injected via
 /// `EngineConfig::nat`).
 #[derive(Clone)]
 pub struct NatEngine {
-    handle: NatHandle,
+    handle: Option<NatHandle>,
+    binding: Option<PeerNetworkBinding>,
     external_rx: watch::Receiver<ExternalPorts>,
     lease: Duration,
 }
 
 impl NatEngine {
+    pub fn is_host_managed(&self) -> bool {
+        self.handle.is_none()
+    }
+
     /// Triggers Map for the listen port (TCP+UDP).
     pub async fn map_listen_port(&self, port: u16) -> Result<(), NatError> {
-        self.handle.map(port, self.lease).await
+        if let Some(binding) = &self.binding {
+            binding.bind(port);
+        }
+        match &self.handle {
+            Some(handle) => handle.map(port, self.lease).await,
+            None => Ok(()),
+        }
     }
 
     /// Current external port snapshot.
@@ -107,7 +209,10 @@ impl NatEngine {
     /// actor best-effort unmaps when the handle drops; lease expiry (3600s)
     /// reclamation on the gateway side is the backstop.
     pub async fn unmap(&self) -> Result<(), NatError> {
-        self.handle.unmap().await
+        match &self.handle {
+            Some(handle) => handle.unmap().await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -176,7 +281,8 @@ pub fn spawn_supervisor(config: NatConfig) -> NatSupervisor {
     });
     NatSupervisor {
         engine: NatEngine {
-            handle,
+            handle: Some(handle),
+            binding: None,
             external_rx: rx,
             lease,
         },
@@ -277,6 +383,65 @@ mod tests {
             p.udp = Some(40003);
         });
         assert_eq!(resolve(), 40003, "single-protocol mapping follows the same");
+    }
+
+    #[tokio::test]
+    async fn external_binding_rejects_late_port_replies_and_preserves_family() {
+        let binding = PeerNetworkBinding::new(42);
+        let engine = binding.engine();
+        engine
+            .map_listen_port(40000)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (old, port) = binding.snapshot();
+        let ports = ExternalPorts {
+            tcp: Some(40001),
+            udp: Some(40002),
+        };
+        assert!(binding.update(&old, port, ports));
+        assert_eq!(
+            peer_announce_port(
+                Some(&engine),
+                port,
+                "10.0.0.2".parse().unwrap_or_else(|e| panic!("{e}")),
+                taiji_bt::utp::Transport::Tcp
+            ),
+            40001
+        );
+        assert_eq!(
+            peer_announce_port(
+                Some(&engine),
+                port,
+                "10.0.0.2".parse().unwrap_or_else(|e| panic!("{e}")),
+                taiji_bt::utp::Transport::Utp
+            ),
+            40002
+        );
+        assert_eq!(
+            peer_announce_port(
+                Some(&engine),
+                port,
+                "::1".parse().unwrap_or_else(|e| panic!("{e}")),
+                taiji_bt::utp::Transport::Utp
+            ),
+            port
+        );
+        // Reusing the very same local port still creates a new identity.
+        engine
+            .map_listen_port(port)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let (current, _) = binding.snapshot();
+        assert_ne!(old, current);
+        assert!(!binding.update(&old, port, ports));
+        assert_eq!(engine.external_ports(), ExternalPorts::default());
+        binding.release(&old);
+        assert_eq!(binding.snapshot().1, port);
+        assert!(binding.update(&current, port, ports));
+        binding.release(&current);
+        assert_eq!(binding.snapshot().1, 0);
+        assert!(!binding.update(&current, port, ports));
+        assert_eq!(engine.external_ports(), ExternalPorts::default());
     }
 
     /// Supervisor lifecycle: an unreachable gateway degrades without

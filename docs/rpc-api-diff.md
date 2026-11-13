@@ -123,7 +123,7 @@ hereafter "the fork"). Governance rules:
   while processing the option '--X'."`); taiji narrows this to **ignoring** the key
   (the same path as an unknown key). Exception: for HTTP tasks, an out-of-domain
   scheduler value passed to `changeOption` (e.g. `max-connection-per-server` outside
-  1..16) is explicitly rejected by taiji (`taiji.option.invalid`, no truncation) —
+  1..64) is explicitly rejected by taiji (`taiji.option.invalid`, no truncation) —
   enhanced semantics.
 - **`select-file` (the BEP53 file-selection surface; acceptance-surface differences
   in three directions)**: fork = IntegerRangeOptionHandler (1-based, comma + closed
@@ -871,7 +871,7 @@ differences all fall under the following entries:
     starting point (connection intent honored immediately) + the initial extent
     reference; the connection cap belongs to `max-connection-per-server` (static
     mode keeps the original meaning);
-  - `max-connection-per-server`: the AIMD growth cap (domain 1..=16; lowering it at
+  - `max-connection-per-server`: the AIMD growth cap (domain 1..=64; lowering it at
     runtime shrinks proactively). **Default = 16** (phase 2; deviates from the
     aria2 upstream default of 1: with a cap of 1 the AIMD criterion has zero room
     to grow and dynamic mode would stay single-connection on real networks — the

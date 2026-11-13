@@ -23,7 +23,7 @@
 //!
 //! Hard invariant — three stacked caps (see docs/design/http.md for the
 //! full stacking rules): per-task `min(split,
-//! --max-connection-per-server)` (domain 1-16); the group budget
+//! --max-connection-per-server)` (domain 1-64); the group budget
 //! [`DEFAULT_BATCH_BUDGET`], in force only at ≥ [`BATCH_MIN_FILES`]
 //! active files, with ceiling `max(budget, host cap − outside
 //! occupancy)` (work-conserving, polite under contention); the per-host

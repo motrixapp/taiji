@@ -86,6 +86,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.1.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify the release tag belongs to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "motrixapp/taiji" ]]
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
 
       # Pinned toolchain, aligned with local (2026-10-13): stable rollover once
       # caused two-way fmt/dead-code drift; upgrades need an explicit commit and
@@ -135,7 +144,7 @@ jobs:
       - name: Build taiji release
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/taiji
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/taiji ${{ endsWith(matrix.target, '-windows-msvc') && '-C target-feature=+crt-static -C link-arg=/STACK:8388608' || '' }}
           # Android cross-compile face (only consulted for the
           # aarch64-linux-android target; empty elsewhere).
           CC_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
@@ -144,61 +153,19 @@ jobs:
           RANLIB_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
 
-      # Layout per packaging/README.md §1: exactly four items in
-      # taiji-sidecar-<platform>/ — the binary, VERSION.json (version
-      # derived from the tag, never hard-coded), THIRD-PARTY-NOTICES.md
-      # (crate@version summary from Cargo.lock, workspace members
-      # filtered out), SHA256SUMS over the layout (excluding itself).
-      - name: Assemble layout, VERSION.json, THIRD-PARTY-NOTICES.md, SHA256SUMS
+      # Source version and tag must agree before anything is attached.
+      - name: Assemble the sidecar, provenance and full license notices
         shell: bash
         run: |
           set -euo pipefail
-          ver="${GITHUB_REF_NAME#v}"
           dir="taiji-sidecar-${{ matrix.platform }}"
-          mkdir -p "${dir}"
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "${dir}/"
-          cat > "${dir}/VERSION.json" <<EOF
-          {
-            "version": "${ver}",
-            "version_string": "taiji/${ver}",
-            "git_sha": "${{ github.sha }}",
-            "git_dirty": false,
-            "build_time_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "target": "${{ matrix.target }}",
-            "platform_layout": "${dir}",
-            "rustc": "$(rustc --version | head -1)",
-            "profile": "release",
-            "rustflags": "--remap-path-prefix=<repo>=/taiji",
-            "cargo_locked": true,
-            "platform_matrix": ["macos-arm64","macos-x64","linux-x64","linux-arm64","windows-x64","windows-arm64","android-arm64"]
-          }
-          EOF
-          {
-            echo "## Third Party Notices"
-            echo ""
-            echo "taiji is licensed under GPL-2.0-or-later. This"
-            echo "distribution statically links the third-party crates"
-            echo "below (name@version, resolved from the pinned"
-            echo "Cargo.lock). Full per-crate license text is expanded"
-            echo "in the M5 release process (cargo about / cargo deny)."
-            echo ""
-            grep -E '^name = |^version = ' Cargo.lock \
-              | paste -d'@' - - \
-              | sed 's/name = //; s/version = //; s/"//g' \
-              | grep -v '^taiji' || true
-          } > "${dir}/THIRD-PARTY-NOTICES.md"
-          (
-            cd "${dir}"
-            # sha256sum exists on all three host images (macOS via
-            # coreutils); the sum manifest covers the layout minus
-            # itself.
-            sha256sum "${{ matrix.bin }}" VERSION.json THIRD-PARTY-NOTICES.md > SHA256SUMS
-          )
-          if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            7z a "${{ matrix.artifact }}" "./${dir}"/*
-          else
-            tar -czf "${{ matrix.artifact }}" "./${dir}"/*
-          fi
+          python3 packaging/assemble.py \
+            --version "${GITHUB_REF_NAME}" \
+            --target "${{ matrix.target }}" \
+            --platform "${{ matrix.platform }}" \
+            --binary "target/${{ matrix.target }}/release/${{ matrix.bin }}" \
+            --output "${dir}" \
+            --archive "${{ matrix.artifact }}"
 
       # actions/upload-artifact v4.6.2 — handoff to the attach job is
       # digest-bound by upload-artifact's own zip manifest.
@@ -233,7 +200,7 @@ jobs:
           set -euo pipefail
           files=(dist/*)
           echo "attaching ${#files[@]} artifacts: ${files[*]}"
-          test "${#files[@]}" -ge 7
+          test "${#files[@]}" -eq 7
           if ! gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --draft \
@@ -248,9 +215,10 @@ jobs:
           (MSVC cross), android-arm64 (pinned NDK cross).
 
           macOS assets are unsigned at this stage — run sign-macos.yml
-          to codesign + notarize + staple, then publish. Layout +
+          to codesign + notarize the CLI binaries, then publish. Layout +
           SHA256SUMS per packaging/README.md; build determinism per §5."
           fi
+          test "$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft')" = true
           # Unquoted glob: the shell expands every artifact path —
           # the previous printf form globbed the bare working dir into
           # 'dist/dist' and matched nothing.

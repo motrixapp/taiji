@@ -197,7 +197,7 @@ const DEFAULT_BLOCK_SIZE: u64 = 4 * 1024 * 1024;
 pub(super) const DEFAULT_INCOMPLETE_SUFFIX: &str = ".part";
 const DEFAULT_SPLIT: u32 = 5;
 const DEFAULT_MIN_SPLIT_SIZE: u64 = 20 * 1024 * 1024;
-/// `--max-connection-per-server` default = the domain ceiling 16. The
+/// `--max-connection-per-server` defaults to 16. The
 /// aria2-compatible default of 1 (upstream `-x1` means a single connection
 /// for a single-URL download) pins the AIMD growth cap:
 /// [`AimdConfig::with_start`] clamps the slow-start start into the cap
@@ -210,7 +210,7 @@ const DEFAULT_MIN_SPLIT_SIZE: u64 = 20 * 1024 * 1024;
 /// gain, with the threshold-convergence and multiplicative-decrease /
 /// recovery semantics unchanged. An explicit
 /// `--max-connection-per-server=1` still pins a single connection (domain
-/// 1..=16 unchanged). The default intentionally deviates from aria2
+/// 1..=64 unchanged). The default intentionally deviates from aria2
 /// upstream (declared in docs/rpc-api-diff.md).
 const DEFAULT_MAX_CONN_PER_SERVER: u32 = 16;
 const DEFAULT_MAX_CHUNK: u64 = 32 * 1024 * 1024;
@@ -344,6 +344,10 @@ impl Drop for BatchLeaveGuard {
 /// serialized option rows into the config_json inventory).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(in crate::session) struct HttpPersistConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retain_request_context: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_resume_context: Option<crate::session::persist::import_http::RetainedHttpContext>,
     /// Incomplete suffix (persisted at creation; a default change never cuts an
     /// in-flight download).
     #[serde(default = "default_suffix")]
@@ -425,7 +429,7 @@ pub(in crate::session) struct HttpPersistConfig {
 /// Concurrency-intent payload: the two [`HttpTaskOpts`] members that decide
 /// the starting concurrency (`--split` + `--max-connection-per-server`).
 /// The value domains match the parse face (split
-/// 1..=[`taiji_http::scheduler::MAX_SPLIT`], cap 1..=16); replay still
+/// 1..=[`taiji_http::scheduler::MAX_SPLIT`], cap 1..=64); replay still
 /// clamps defensively (row payloads come from disk: a poisoned
 /// out-of-domain row stored before the ceiling gate cannot rely on
 /// store-time validation — replay is the sanitization seam).
@@ -449,7 +453,7 @@ impl HttpConcurrencyPersist {
 
     /// Replay onto the runtime options (bootstrap restore): defensive clamping
     /// — the target domains match the parse face (split
-    /// 1..=[`taiji_http::scheduler::MAX_SPLIT`], cap 1..=16); an
+    /// 1..=[`taiji_http::scheduler::MAX_SPLIT`], cap 1..=64); an
     /// out-of-domain payload is narrowed to the domain, never amplified (the
     /// static scheduler's first wave `WorkerPool::fixed(sources, split)` spawns
     /// unconditionally from split, so passing a poisoned value through would
@@ -469,6 +473,8 @@ fn default_suffix() -> String {
 impl Default for HttpPersistConfig {
     fn default() -> Self {
         HttpPersistConfig {
+            http_resume_context: None,
+            retain_request_context: false,
             incomplete_suffix: default_suffix(),
             rename_pending: false,
             checksum: None,
@@ -502,6 +508,8 @@ impl HttpPersistConfig {
 /// proxy travel with the session, never stored).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct HttpTaskOpts {
+    /// Current host route, applied before explicit retained request modifiers.
+    pub runtime_defaults: BTreeMap<String, String>,
     /// `--timeout` (read-idle seconds; shared by the reqwest read_timeout and
     /// the task-level stall window — read idle resolves here).
     pub read_timeout: Duration,
@@ -587,7 +595,7 @@ pub(super) struct HttpTaskOpts {
     /// `--min-split-size` (default 20MiB): redefined like `split`; in static
     /// mode it is the minimum segment length.
     pub min_split_size: u64,
-    /// `--max-connection-per-server` (domain 1..=16, aria2-native; the
+    /// `--max-connection-per-server` (domain 1..=64, Motrix-compatible; the
     /// effective default is [`DEFAULT_MAX_CONN_PER_SERVER`]): the AIMD growth
     /// cap of the connection execution loop (a runtime lowering is closed out
     /// through the changeOption restart semantics).
@@ -671,6 +679,7 @@ pub(super) struct HttpTaskOpts {
 impl Default for HttpTaskOpts {
     fn default() -> Self {
         HttpTaskOpts {
+            runtime_defaults: BTreeMap::new(),
             read_timeout: Duration::from_secs(60),
             connect_timeout: Duration::from_secs(60),
             retry: RetryPolicy::default(),
@@ -1561,39 +1570,26 @@ pub(super) fn spawn_http_task(
             let mut tick = tokio::time::interval(COOKIE_SYNC_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                tokio::select! {
-                    _ = stop.cancelled() => break,
-                    // If the wrapper is hard-aborted (the forceRemove
-                    // token.cancel -> abort.abort() ordering), the wrapper
-                    // future is dropped at any point in `drive().await` and
-                    // the later `sync_stop.cancel()` is unreachable — this
-                    // loop uses the run token as a second cancel face
-                    // (cancel precedes abort; propagation does not depend
-                    // on the wrapper surviving) and exits gracefully
-                    // instead of living forever after row deletion,
-                    // spamming FK-dangling upserts. On graceful shutdown
-                    // the two arms coincide in time (token.cancel and the
-                    // ordered drive exit), so behavior is unchanged.
+                let closing = tokio::select! {
+                    _ = stop.cancelled() => true,
+                    // Force removal cancels before deleting the row: never
+                    // write cookies back after that cancellation boundary.
                     _ = token.cancelled() => break,
-                    _ = tick.tick() => {
-                        let snap = store.snapshot();
-                        if snap.is_empty() {
-                            continue; // empty snapshot skips the tick (never a full clear)
-                        }
-                        let rows =
-                            merged_cookie_rows(&gid_hex, &snap, &base, &mut creation);
-                        if let Err(e) = persist
-                            .upsert_task_cookies(
-                                &gid_hex,
-                                taiji_store::persist::TASK_KIND_HTTP,
-                                rows,
-                            )
-                            .await
-                        {
-                            warn!(target: "taiji::core::http", gid = %gid_hex, %e,
-                                "task cookie persist failed");
-                        }
+                    _ = tick.tick() => false,
+                };
+                let snap = store.snapshot();
+                if !snap.is_empty() && !token.is_cancelled() {
+                    let rows = merged_cookie_rows(&gid_hex, &snap, &base, &mut creation);
+                    if let Err(e) = persist
+                        .upsert_task_cookies(&gid_hex, taiji_store::persist::TASK_KIND_HTTP, rows)
+                        .await
+                    {
+                        warn!(target: "taiji::core::http", gid = %gid_hex, %e,
+                            "task cookie persist failed");
                     }
+                }
+                if closing {
+                    break;
                 }
             }
             cookie_loop_exit_obs_record(&gid_hex);
@@ -1793,6 +1789,20 @@ async fn drive_attempt(
     // Folding is idempotent: every activation re-folds from the verbatim
     // inventory and scalar keys overwrite with the same value, so repeated
     // activations produce zero drift.
+    if !run.opts.runtime_defaults.is_empty() {
+        match super::http_task_runtime_options(&run.opts.runtime_defaults, &run.opts) {
+            Ok(opts) => run.opts = opts,
+            Err(error) => {
+                return fail(
+                    run.persist.as_ref(),
+                    &mirror,
+                    EngineFailure::bare("taiji.option.invalid"),
+                    error.to_string(),
+                )
+                .await;
+            }
+        }
+    }
     let mut persisted_cfg = HttpPersistConfig::from_json(&row.config_json);
     if let Some(imported) = persisted_cfg.imported_options.as_deref() {
         match fold_imported_options(run.opts.clone(), persisted_cfg.clone(), imported) {
@@ -2624,6 +2634,63 @@ async fn drive_segmented(
         last_modified: fresh_validator.last_modified.clone(),
         encoding_ok: fresh_validator.encoding_ok,
     };
+    if let Some(context) = HttpPersistConfig::from_json(&row.config_json).http_resume_context {
+        use crate::session::persist::import_http::request_uri_hash;
+        let source_hash = request_uri_hash(&row.url);
+        let resource_hash = request_uri_hash(authoritative.final_url.as_str());
+        let value = if context.validator_kind == "etag" {
+            &fresh_facts.etag
+        } else {
+            &fresh_facts.last_modified
+        };
+        if context.source_hash != source_hash
+            || context.resource_hash != resource_hash
+            || PathBuf::from(&row.dir).join(&row.out).as_path()
+                != std::path::Path::new(&context.output_path)
+            || fresh_facts.total_len != Some(context.total_length as u64)
+            || !fresh_facts.encoding_ok
+            || value.as_deref() != Some(context.validator.as_str())
+        {
+            return fail(
+                run.persist.as_ref(),
+                mirror,
+                EngineFailure::bare("taiji.http.resource_changed"),
+                "HTTP resource changed; retained data was not modified".into(),
+            )
+            .await;
+        }
+    }
+    let mut request_cfg = HttpPersistConfig::from_json(&row.config_json);
+    if request_cfg.retain_request_context
+        && request_cfg.http_resume_context.is_none()
+        && row.total_done == 0
+    {
+        let validator = fresh_facts
+            .etag
+            .as_ref()
+            .map(|value| ("etag", value))
+            .or_else(|| {
+                fresh_facts
+                    .last_modified
+                    .as_ref()
+                    .map(|value| ("last-modified", value))
+            });
+        if let (Some((kind, value)), Some(total)) = (validator, fresh_facts.total_len) {
+            if total > 0 && total <= i64::MAX as u64 && fresh_facts.encoding_ok {
+                use crate::session::persist::import_http::{RetainedHttpContext, request_uri_hash};
+                request_cfg.http_resume_context = Some(RetainedHttpContext {
+                    source_hash: request_uri_hash(&row.url),
+                    resource_hash: request_uri_hash(authoritative.final_url.as_str()),
+                    output_path: PathBuf::from(&row.dir).join(&row.out).display().to_string(),
+                    validator_kind: kind.into(),
+                    validator: value.clone(),
+                    total_length: total as i64,
+                });
+                row.config_json = request_cfg.to_json();
+                crate::lock(mirror).config_json = row.config_json.clone();
+            }
+        }
+    }
     let fresh_digest = validator_digest(&fresh_facts).ok();
     let resume_ok = imported_resume
         || row
@@ -2631,6 +2698,15 @@ async fn drive_segmented(
             .as_deref()
             .zip(fresh_digest.as_deref())
             .is_some_and(|(a, b)| a == b);
+    if !resume_ok && request_cfg.retain_request_context && row.total_done > 0 {
+        return fail(
+            run.persist.as_ref(),
+            mirror,
+            EngineFailure::bare("taiji.http.resource_changed"),
+            "HTTP resource changed; retained data was not modified".into(),
+        )
+        .await;
+    }
     if !resume_ok {
         row.block_bitmap = None;
         row.total_done = 0;
@@ -3378,6 +3454,25 @@ async fn drive_segmented(
             // honored here (detached workers would otherwise keep claiming
             // extents and sending requests).
             teardown_segmented!();
+            let retain = HttpPersistConfig::from_json(&crate::lock(mirror).config_json)
+                .retain_request_context;
+            if retain {
+                // Land completed blocks before the terminal row. Otherwise a
+                // failure before the periodic snapshot loses the resume bitmap.
+                let persist = run.persist.clone();
+                let mirror_sync = Arc::clone(mirror);
+                let mut pipe = pipeline.lock().await;
+                if let Err(error) = pipe
+                    .flush_now(HttpLive::now_ms(), move |row| {
+                        sync_mirror_progress(&mirror_sync, &row);
+                        persist_snapshot(persist, row)
+                    })
+                    .await
+                {
+                    warn!(target: "taiji::core::http", gid = %gid_hex, %error,
+                        "retained failure snapshot could not be saved");
+                }
+            }
             return match fatal {
                 // Deterministic protocol-contradiction terminal failure.
                 Fatal::Protocol(failure, message) => {
@@ -5389,6 +5484,7 @@ fn sync_mirror_progress(mirror: &StdMutex<HttpTaskRow>, row: &HttpTaskRow) {
     m.total_done = row.total_done;
     m.probe_json = row.probe_json.clone();
     m.validator_digest = row.validator_digest.clone();
+    m.config_json = row.config_json.clone();
 }
 
 /// Cancel close-out: a pause origin -> the row state paused (a restart
@@ -6717,6 +6813,8 @@ mod tests {
     #[test]
     fn http_persist_config_round_trip() {
         let cfg = HttpPersistConfig {
+            http_resume_context: None,
+            retain_request_context: false,
             incomplete_suffix: ".crdownload".into(),
             rename_pending: true,
             checksum: Some("sha-256=abcd".into()),
@@ -6789,7 +6887,7 @@ mod tests {
     }
 
     /// Concurrency-intent replay domain clamps: split >= 1; the cap clamps
-    /// to the parse face's 1..=16 — out-of-domain disk payloads narrow to
+    /// to the parse face's 1..=64 — out-of-domain disk payloads narrow to
     /// the domain, never amplify (the resume assembly's AIMD start and loop
     /// cap must not exceed the option parse face's value domain).
     #[test]
@@ -6809,8 +6907,8 @@ mod tests {
         .apply_to(&mut opts);
         assert_eq!(opts.split, 5);
         assert_eq!(
-            opts.max_conn_per_server, 16,
-            "a cap past the ceiling clamps to 16 (same domain as the parse face)"
+            opts.max_conn_per_server, 64,
+            "a cap past the ceiling clamps to 64 (same domain as the parse face)"
         );
     }
 

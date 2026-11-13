@@ -447,6 +447,7 @@ where
         remote_ip,
         ext,
         upload_only: mut my_upload_only,
+        listen_port: mut my_listen_port,
         peer_upload_only,
         mut super_seed,
         holepunch: hp_ext,
@@ -555,6 +556,8 @@ where
     let mut last_piece_served = false;
     let mut have = HaveAdvertiser::new();
     let mut tick = tokio::time::interval(flooding_interval);
+    let mut metadata_tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    metadata_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // The requester's pending hash request: header tuple + reply
     // channel. BEP-52 requires hashes to correlate with hash request —
     // matched by full tuple equality; at most one in flight per
@@ -589,6 +592,7 @@ where
             .map(|_| crate::holepunch::OUTBOUND_UT_HOLEPUNCH_ID),
         metadata_size: metadata_serve.as_ref().map(|m| m.metadata().len() as u32),
         upload_only: my_upload_only && super_seed.is_none(),
+        p: (my_listen_port != 0).then_some(my_listen_port),
         v: Some(crate::tracker::PEER_AGENT.to_string()),
         ..ExtHandshake::default()
     };
@@ -875,6 +879,33 @@ where
                                 PeerCommand::AttachHashSource(h) => {
                                     hash_source = Some(h);
                                 }
+                                PeerCommand::SetListenPort(port) => {
+                                    // BEP10 advertises the current mapped listener,
+                                    // preserving all negotiated extensions.
+                                    if my_listen_port != port {
+                                        my_listen_port = port;
+                                        let handshake = ExtHandshake {
+                                            m_ut_metadata: Some(OUTBOUND_UT_METADATA_ID),
+                                            m_ut_pex: pex_ext.as_ref().map(|_| OUTBOUND_UT_PEX_ID),
+                                            m_ut_holepunch: hp_ext
+                                                .as_ref()
+                                                .map(|_| crate::holepunch::OUTBOUND_UT_HOLEPUNCH_ID),
+                                            metadata_size: metadata_serve
+                                                .as_ref()
+                                                .map(|m| m.metadata().len() as u32),
+                                            upload_only: my_upload_only && super_seed.is_none(),
+                                            p: (my_listen_port != 0).then_some(my_listen_port),
+                                            // Same identity as the initial
+                                            // send (v = PEER_AGENT, see
+                                            // my_ext).
+                                            v: Some(crate::tracker::PEER_AGENT.to_string()),
+                                            ..ExtHandshake::default()
+                                        };
+                                        if let Ok(payload) = handshake.encode() {
+                                            let _ = writer.send(Message::Extended { ext_id: 0, payload }).await;
+                                        }
+                                    }
+                                }
                                 PeerCommand::SetUploadOnly(flag) => {
                                     // BEP-21 state transition: update the
                                     // flag and resend the ext handshake
@@ -893,6 +924,7 @@ where
                                                 .as_ref()
                                                 .map(|m| m.metadata().len() as u32),
                                             upload_only: my_upload_only && super_seed.is_none(),
+                                            p: (my_listen_port != 0).then_some(my_listen_port),
                                             // Same identity as the initial
                                             // send (v = PEER_AGENT, see
                                             // my_ext).
@@ -1169,6 +1201,11 @@ where
                     book.end_receive_round();
                 }
             },
+            _ = metadata_tick.tick(), if fetch_session.as_ref().is_some_and(MetadataFetchSession::is_shared) => {
+                if let Some(session) = fetch_session.as_mut() {
+                    if let Err(e) = session.issue(&mut writer, Instant::now()).await { break wire_io_end(&e); }
+                }
+            }
             _ = tick.tick() => {
                 let now = Instant::now();
                 let expired = book.expire_timed_out(now);
@@ -1197,7 +1234,7 @@ where
                 // UTMetadataRequestTracker; swept indices leave
                 // in-flight and are re-requested on the next issue).
                 if let Some(session) = fetch_session.as_mut() {
-                    let _ = session.fetcher.sweep_timeouts(now);
+                    session.sweep(now);
                     if let Err(e) = session.issue(&mut writer, now).await {
                         debug!(target: "taiji::bt::peer", %e, "ut_metadata reissue write failed");
                         break wire_io_end(&e);

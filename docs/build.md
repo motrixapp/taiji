@@ -34,5 +34,10 @@ NAT-PMP / IGD XML).
 
 - crates.io: never published — the workspace is `publish = false`; the engine
   ships as binaries only (the packaging matrix below + GitHub Releases).
-- Packaging matrix (`packaging/`): macos-universal / linux-x64 / windows-x64;
-  linux targets glibc 2.35 as the compatibility floor.
+- Packaging matrix (`packaging/`): macos-arm64 / macos-x64 / linux-x64 /
+  linux-arm64 / windows-x64 / windows-arm64 / android-arm64. Linux binaries
+  require glibc ≥ 2.35.
+- Versions use ordinary SemVer. A `v<version>` tag on `main` builds all seven
+  unsigned archives into a draft release. The separate `sign-macos` workflow
+  signs and notarizes both macOS binaries before publication. Windows binaries
+  are unsigned. See [the packaging contract](../packaging/README.md).

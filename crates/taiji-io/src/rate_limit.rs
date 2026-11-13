@@ -311,7 +311,16 @@ impl Future for Acquire {
                 if let Some(w) = next {
                     w.wake();
                 }
-                return Poll::Ready(());
+                // A demand can exceed the current one-second bucket capacity.
+                // Charge every byte across successive grants, including when
+                // a hot rate reduction shrinks an already queued demand.
+                this.n -= want;
+                this.ticket = None;
+                this.timer = None;
+                if this.n == 0 {
+                    return Poll::Ready(());
+                }
+                continue;
             }
             let wait = Self::estimate_wait(&st, this.ticket, want, rate);
             drop(st);
@@ -791,6 +800,15 @@ mod tests {
             "unlimited path must be near-zero cost"
         );
         assert!(b.is_unlimited());
+    }
+
+    #[tokio::test]
+    async fn oversized_async_permit_charges_the_entire_demand() {
+        let bucket = Arc::new(TokenBucket::new(10_000));
+        let start = Instant::now();
+        bucket.acquire(20_000).await;
+        assert!(start.elapsed() >= Duration::from_millis(1900));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

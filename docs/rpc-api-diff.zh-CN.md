@@ -108,7 +108,7 @@
   时，the fork 报错（`"We encountered a problem while processing the
   option '--X'."`）；taiji 收窄为**忽略**该键（与未知键同路径）。例外：
   HTTP 任务的越域调度值传入 `changeOption`（如
-  `max-connection-per-server` 超出 1..16）被 taiji 显式拒绝
+  `max-connection-per-server` 超出 1..64）被 taiji 显式拒绝
   （`taiji.option.invalid`，不截断）—— 增强语义。
 - **`select-file`（BEP53 文件选择面；接受面差异有三个方向）**：fork =
   IntegerRangeOptionHandler（1 起、逗号 + 闭区间 `1-3,5`、域 1..1M；
@@ -687,7 +687,7 @@
   - `split`/`min-split-size`：动态调度下，split = AIMD 慢启动起点
     （连接意图即时兑现）+ 初始区间（extent）参照；连接上限归
     `max-connection-per-server`（静态模式保持原义）；
-  - `max-connection-per-server`：AIMD 增长上限（域 1..=16；运行时下调
+  - `max-connection-per-server`：AIMD 增长上限（域 1..=64；运行时下调
     主动收缩）。**默认 = 16**（相位 2；偏离 aria2 上游默认 1：上限为
     1 时 AIMD 判据零增长空间，动态模式在真实网络上会停留单连接 ——
     上限是天花板不是连接数，仍经 AIMD 自适应爬升；显式 1 = 钉死单

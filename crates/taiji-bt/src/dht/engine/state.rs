@@ -137,6 +137,7 @@ impl PeerRecordSet {
 
 /// The DhtEngine actor (a single task owning all state).
 pub struct DhtEngine {
+    pub(super) enabled: bool,
     pub(super) family: super::persist::DhtFamily,
     pub(super) cfg: DhtEngineConfig,
     pub(super) local_id: NodeId,
@@ -236,6 +237,7 @@ impl DhtEngine {
             Duration::from_secs(cfg.suppress_secs),
         );
         let mut engine = DhtEngine {
+            enabled: true,
             family,
             cfg,
             local_id,

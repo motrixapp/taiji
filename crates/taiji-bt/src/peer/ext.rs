@@ -105,6 +105,7 @@ pub enum MetadataFetched {
 pub struct MetadataFetchSpec {
     pub expected: ExpectedInfoHash,
     pub tx: mpsc::Sender<MetadataFetched>,
+    pub shared: Option<crate::ut_metadata::SharedMetadataSpec>,
 }
 
 /// Metadata serving source: holds the complete raw info dict bytes
@@ -192,9 +193,11 @@ pub(super) struct MetadataFetchSession {
     /// Result reporting end (split from [`MetadataFetchSpec`]; the spec
     /// is consumed).
     tx: mpsc::Sender<MetadataFetched>,
-    pub(super) fetcher: MetadataFetcher,
+    fetcher: Option<MetadataFetcher>,
+    shared: Option<crate::ut_metadata::SharedMetadataPeer>,
     /// The peer's inbound ut_metadata msg id (from its m dict).
     peer_id: u8,
+    terminal_reported: bool,
 }
 
 impl MetadataFetchSession {
@@ -202,38 +205,91 @@ impl MetadataFetchSession {
         expected: ExpectedInfoHash,
         tx: mpsc::Sender<MetadataFetched>,
         peer_id: u8,
-        metadata_size: usize,
+        metadata_size: Option<usize>,
+        shared: Option<crate::ut_metadata::SharedMetadataSpec>,
+        cuid: u64,
     ) -> Result<MetadataFetchSession, MetadataError> {
-        let fetcher = match expected {
-            ExpectedInfoHash::V1(h) => MetadataFetcher::new(metadata_size, h)?,
-            ExpectedInfoHash::V2(h) => MetadataFetcher::new_v2(metadata_size, h)?,
+        let (fetcher, shared) = if let Some(spec) = shared {
+            (
+                None,
+                Some(spec.coordinator.attach(cuid, spec.source, metadata_size)?),
+            )
+        } else {
+            let size = metadata_size.unwrap_or(0);
+            let fetcher = match expected {
+                ExpectedInfoHash::V1(h) => MetadataFetcher::new(size, h)?,
+                ExpectedInfoHash::V2(h) => MetadataFetcher::new_v2(size, h)?,
+            };
+            (Some(fetcher), None)
         };
         Ok(MetadataFetchSession {
             tx,
             fetcher,
+            shared,
             peer_id,
+            terminal_reported: false,
         })
     }
 
-    /// Re-issue requests for missing pieces (in-flight budget <= 1,
-    /// aria2 `UTMetadataRequestTracker.cc`; the missing piece is the
-    /// smallest ascending, `UTMetadataRequestFactory.cc`). `Err` = a
-    /// frame write failure (connection-level; the caller tears down;
-    /// the wire error passes through and kind feeds the end-state
-    /// classification).
+    pub(super) fn is_shared(&self) -> bool {
+        self.shared.is_some()
+    }
+    pub(super) fn sweep(&mut self, now: Instant) {
+        if let Some(fetcher) = &mut self.fetcher {
+            fetcher.sweep_timeouts(now);
+        }
+    }
+    fn on_data(
+        &mut self,
+        index: usize,
+        total: usize,
+        data: &[u8],
+        now: Instant,
+    ) -> Result<crate::ut_metadata::DataOutcome, crate::ut_metadata::FetchError> {
+        if let Some(shared) = &mut self.shared {
+            return shared.data(index, total, data, now);
+        }
+        let fetcher = self
+            .fetcher
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("requester driver"));
+        if total != fetcher.metadata_size() {
+            return Ok(crate::ut_metadata::DataOutcome::Untracked);
+        }
+        fetcher.on_data(index, data, now)
+    }
+
+    /// Send a bounded batch from either the shared coordinator or the legacy
+    /// single-peer driver. One flush avoids per-request Nagle/ACK stalls.
     pub(super) async fn issue(
         &mut self,
         writer: &mut OutboundWriter<impl tokio::io::AsyncWrite + Unpin>,
         now: Instant,
     ) -> Result<(), crate::peer_wire::PeerWireError> {
-        for index in self.fetcher.next_requests(now, 1) {
-            let payload = UtMetadata::Request { index }.encode().unwrap_or_default();
-            writer
-                .send(Message::Extended {
-                    ext_id: self.peer_id,
-                    payload: Bytes::from(payload),
-                })
-                .await?;
+        if self.terminal_reported {
+            return Ok(());
+        }
+        let requests = if let Some(shared) = &mut self.shared {
+            match shared.requests(now) {
+                Ok(requests) => requests,
+                Err(error) => {
+                    self.terminal_reported = true;
+                    let _ = self.tx.try_send(MetadataFetched::Failed(error.to_string()));
+                    Vec::new()
+                }
+            }
+        } else {
+            self.fetcher
+                .as_mut()
+                .unwrap_or_else(|| unreachable!())
+                .next_requests(now, 1)
+        };
+        if !requests.is_empty() {
+            let messages = requests.into_iter().map(|index| Message::Extended {
+                ext_id: self.peer_id,
+                payload: Bytes::from(UtMetadata::Request { index }.encode().unwrap_or_default()),
+            });
+            writer.send_batch(messages).await?;
         }
         Ok(())
     }
@@ -405,11 +461,36 @@ where
         // announced metadata_size (a value of 0 = disabled was filtered
         // to None → falls into the "unsupported" branch below and
         // reports Failed, no session).
+        if let Some(session) = ctx.fetch_session.as_mut() {
+            if let (Some(shared), Some(id), Some(size)) =
+                (&mut session.shared, hs.m_ut_metadata, hs.metadata_size)
+            {
+                match shared.observe_size(size as usize) {
+                    Ok(()) => {
+                        session.peer_id = id;
+                        let _ = session.issue(ctx.writer, Instant::now()).await;
+                    }
+                    Err(error) => {
+                        let _ = session
+                            .tx
+                            .try_send(MetadataFetched::Failed(error.to_string()));
+                        *ctx.metadata_abort = true;
+                    }
+                }
+            }
+        }
         if let Some(spec) = ctx.fetch_spec.take() {
             let session = match (hs.m_ut_metadata, hs.metadata_size) {
-                (Some(pid), Some(sz)) => {
-                    MetadataFetchSession::new(spec.expected, spec.tx.clone(), pid, sz as usize)
-                        .map_err(|e| e.to_string())
+                (Some(pid), size) if size.is_some() || spec.shared.is_some() => {
+                    MetadataFetchSession::new(
+                        spec.expected,
+                        spec.tx.clone(),
+                        pid,
+                        size.map(|size| size as usize),
+                        spec.shared,
+                        ctx.cuid,
+                    )
+                    .map_err(|e| e.to_string())
                 }
                 // The peer does not support ut_metadata / holds no
                 // metadata: the fetch fails (the same aria2 outcome —
@@ -510,6 +591,7 @@ where
                 "ut_pex received -> peers to connection manager");
             let ev = PexEvent {
                 from: ctx.cuid,
+                capabilities: msg.fresh_peers().to_vec(),
                 fresh,
                 dropped,
             };
@@ -689,14 +771,8 @@ where
                     "untracked ut_metadata data (no fetch session): ignored");
                 return;
             };
-            if total_size != session.fetcher.metadata_size() {
-                debug!(target: "taiji::bt::peer", index, total_size,
-                    expect = session.fetcher.metadata_size(),
-                    "ut_metadata data total_size mismatch: ignored");
-                return;
-            }
             let now = Instant::now();
-            match session.fetcher.on_data(index, &data, now) {
+            match session.on_data(index, total_size, &data, now) {
                 Ok(crate::ut_metadata::DataOutcome::Complete { metadata }) => {
                     debug!(target: "taiji::bt::peer", len = metadata.len(),
                         "ut_metadata complete: identity verified");
@@ -710,7 +786,7 @@ where
                 }
                 Ok(_) => {
                     // Not complete yet: request the next piece
-                    // immediately (a round-trip pipeline, in-flight <= 1).
+                    // immediately, refilling the requester's bounded window.
                     if let Err(e) = session.issue(ctx.writer, now).await {
                         debug!(target: "taiji::bt::peer", %e, "ut_metadata next request write failed");
                     }
@@ -735,6 +811,11 @@ where
                 debug!(target: "taiji::bt::peer", index, "untracked ut_metadata reject: ignored");
                 return;
             };
+            if let Some(shared) = &mut session.shared {
+                shared.reject(index, Instant::now());
+                debug!(target: "taiji::bt::peer", index, "metadata peer temporarily unavailable; requests reassigned");
+                return;
+            }
             let reason = "peer rejected metadata request (ut_metadata reject)".to_string();
             debug!(target: "taiji::bt::peer", index, %reason);
             let _ = session.tx.try_send(MetadataFetched::Failed(reason)).ok();

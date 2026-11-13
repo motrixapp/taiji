@@ -60,6 +60,8 @@ pub struct PexPeer {
     pub encrypted: PrefersEncryption,
     /// bit1 `0x02`: seed / upload_only (BEP21 naming).
     pub upload_only: UploadOnly,
+    pub supports_utp: bool,
+    pub supports_holepunch: bool,
 }
 
 /// added.f bit0 `0x01` projection (BEP11; "prefers encryption" — the
@@ -108,11 +110,19 @@ impl UploadOnly {
 }
 
 impl PexPeer {
+    pub fn with_transport_flags(mut self, flags: u8) -> Self {
+        self.supports_utp = flags & 0x04 != 0;
+        self.supports_holepunch = flags & 0x08 != 0;
+        self
+    }
+
     pub fn new(addr: std::net::SocketAddr, upload_only: UploadOnly) -> Self {
         PexPeer {
             addr,
             encrypted: PrefersEncryption::No,
             upload_only,
+            supports_utp: false,
+            supports_holepunch: false,
         }
     }
 
@@ -127,6 +137,8 @@ impl PexPeer {
             addr,
             encrypted,
             upload_only,
+            supports_utp: false,
+            supports_holepunch: false,
         }
     }
 }

@@ -344,11 +344,14 @@ impl PexMessage {
                 // Flags paired per unit; out of range (short/missing) = 0
                 // (leniency, see above).
                 let flag = flags.and_then(|f| f.get(n).copied()).unwrap_or(0x00);
-                list.push(PexPeer::with_flags(
-                    addr,
-                    PrefersEncryption::from_flag(flag),
-                    UploadOnly::from_flag(flag),
-                ));
+                list.push(
+                    PexPeer::with_flags(
+                        addr,
+                        PrefersEncryption::from_flag(flag),
+                        UploadOnly::from_flag(flag),
+                    )
+                    .with_transport_flags(flag),
+                );
             }
         }
         Ok(msg)
@@ -370,7 +373,8 @@ fn flag_of(p: &PexPeer) -> u8 {
         FLAG_SEEDER
     } else {
         0x00
-    })
+    }) | if p.supports_utp { 0x04 } else { 0 }
+        | if p.supports_holepunch { 0x08 } else { 0 }
 }
 
 fn pack_peers_with_flags(peers: &[PexPeer]) -> (Vec<u8>, Vec<u8>) {

@@ -136,14 +136,37 @@ impl SegmentSink for ThrottledSink {
         let inner = Arc::clone(&self.inner);
         let limiter = self.limiter.clone();
         let reporter = self.reporter.clone();
-        let n = bytes.len() as u64;
         Box::pin(async move {
-            let permit = limiter.acquire_down(n).await;
-            let out = inner.write_at(seg, off, bytes).await;
-            if let Some(reporter) = &reporter {
-                reporter.report(seg.source, n, permit.waited());
+            if bytes.is_empty() {
+                let out = inner.write_at(seg, off, bytes).await;
+                if let Some(reporter) = &reporter {
+                    reporter.report(seg.source, 0, Duration::ZERO);
+                }
+                return out;
             }
-            out
+            let mut position = 0;
+            while position < bytes.len() {
+                // Bound each limited write so disk/progress updates remain
+                // responsive even when the HTTP stack yields a large frame.
+                let limited = limiter.limits.as_ref().is_some_and(|set| {
+                    !set.global.down.is_unlimited() || !set.per_torrent.down.is_unlimited()
+                });
+                let length =
+                    (bytes.len() - position).min(if limited { 16 * 1024 } else { usize::MAX });
+                let permit = limiter.acquire_down(length as u64).await;
+                inner
+                    .write_at(
+                        seg,
+                        off + position as u64,
+                        bytes.slice(position..position + length),
+                    )
+                    .await?;
+                if let Some(reporter) = &reporter {
+                    reporter.report(seg.source, length as u64, permit.waited());
+                }
+                position += length;
+            }
+            Ok(())
         })
     }
 

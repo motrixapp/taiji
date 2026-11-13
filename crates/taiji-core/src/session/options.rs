@@ -70,6 +70,9 @@ pub(crate) fn checked_seed_ratio(r: f64) -> Option<f64> {
 /// directly, no lock).
 #[derive(Debug, Clone)]
 pub struct GlobalOptions {
+    /// Freeze every restored job until the embedding host authorizes it.
+    pub motrix_startup_hold: bool,
+    pub motrix_http_defaults: BTreeMap<String, String>,
     /// `--dir` (download directory; default ".").
     pub dir: PathBuf,
     /// `--max-concurrent-downloads` (default 5, SPEC §7.2/§11).
@@ -132,12 +135,8 @@ pub struct GlobalOptions {
     /// (`SessionActor::effective_task_dht`, consuming the per-task
     /// `bt-disable-dht` override) into `DhtWireConfig.enabled`.
     pub enable_dht: bool,
-    /// `--enable-dht6` (default false). Value face: accepted, echoed,
-    /// shown in the capability-bit view. There is no independent v6 DHT
-    /// gate here — the v6 DHT face follows the [`Self::enable_dht`]
-    /// master gate plus the IPv6 connectivity gate (probe_source_ip);
-    /// this key currently does not change engine wiring (declared
-    /// divergence).
+    /// `--enable-dht6` (default false). Enables IPv6 discovery when the
+    /// DHT master switch and IPv6 connectivity probe also permit it.
     pub enable_dht6: bool,
     /// `--dht-entry-point` (v4; `HOST:PORT`, the aria2
     /// HostPortOptionHandler `PREF_DHT_ENTRY_POINT` — **no default**).
@@ -149,9 +148,10 @@ pub struct GlobalOptions {
     /// factory's DHT group has no set* calls), so changeGlobalOption does
     /// not accept it — takes effect on restart. Consumed by the actor's
     /// activation-time snapshot into `config.dht.entry_points_v4` (the
-    /// magnet upgrade chain does not inject it yet — declared residual:
-    /// the upgrade engine uses the fallback constants).
+    /// metadata and payload engines consume the same configured source).
     pub dht_entry_point: Option<String>,
+    /// Optional IPv6 bootstrap source, applied to metadata and payload engines.
+    pub dht_entry_point6: Option<String>,
     /// `--dht-message-timeout` (seconds; the aria2 NumberOptionHandler
     /// default "10", domain 1..=60 — the OptionHandlerFactory.cc DHT-group
     /// anchors, pinned by [`DHT_MESSAGE_TIMEOUT_DEFAULT_SECS`]/MIN/MAX).
@@ -506,6 +506,8 @@ pub struct GlobalOptions {
 impl Default for GlobalOptions {
     fn default() -> Self {
         GlobalOptions {
+            motrix_startup_hold: false,
+            motrix_http_defaults: BTreeMap::new(),
             dir: PathBuf::from("."),
             max_concurrent_downloads: 5,
             // pre-merge state of the seed-budget knob (see the field doc's
@@ -530,6 +532,7 @@ impl Default for GlobalOptions {
             // DHT_MESSAGE_TIMEOUT are the same value); PEX default on
             // (the A2_V_TRUE default).
             dht_entry_point: None,
+            dht_entry_point6: None,
             dht_message_timeout: DHT_MESSAGE_TIMEOUT_DEFAULT_SECS,
             enable_peer_exchange: true,
             bt_detach_seed_only: false,
@@ -781,6 +784,10 @@ pub fn global_option_echo(g: &GlobalOptions) -> BTreeMap<String, String> {
         g.dht_entry_point.clone().unwrap_or_default(),
     );
     m.insert(
+        "dht-entry-point6".into(),
+        g.dht_entry_point6.clone().unwrap_or_default(),
+    );
+    m.insert(
         "dht-message-timeout".into(),
         g.dht_message_timeout.to_string(),
     );
@@ -848,7 +855,7 @@ pub fn crypto_level_str(l: taiji_bt::mse::CryptoLevel) -> &'static str {
 // uses a static concurrency count); under the static scheduler they
 // are the split count / minimum segment length. On the BT option face
 // max-connection-per-server maps to the bt-max-peers slot; the HTTP
-// task face uses it as the AIMD growth cap (domain 1..=16, out-of-range
+// task face uses it as the AIMD growth cap (domain 1..=64, out-of-range
 // rejected).
 // - `max-tries`: semantic redefinition = per-extent retries (aria2:
 // per-URI contact).
@@ -975,6 +982,7 @@ pub const ARIA2_OPTION_NAMES: &[&str] = &[
     // echoed + the CLI/conf face; no changeGlobal arm, capability bits
     // aligned with the reference).
     "dht-entry-point",
+    "dht-entry-point6",
     "dht-message-timeout",
     // The DNS resolution shape switch (reference prefs.cc
     // `makePref("async-dns")`; accepted as a no-op value face — the
@@ -1902,18 +1910,9 @@ static TASK_OPTION_TABLE: &[OptionDecl<TaskPatchApply>] = &[
         OptionFace::task_payload(),
         |p, v| p.bt_load_saved_metadata = parse_bool(v),
     ),
-    // bt-tracker per-task (the aria2 frozen name, prefs.cc
-    // `makePref("bt-tracker")`; accepted at the parse face: the Motrix
-    // TrackerManager/TaskTrackerService actually sends per-task tracker
-    // table edits via changeOption — parsed into the patch with the
-    // split_bt_tracker common parsing). **No consume arm yet (wired=false,
-    // a no-op)**: the actor change_option/add faces do not read this
-    // field (the wiring lands with the actor per-task tracker face);
-    // taiji's native equivalent face = taiji.addTracker/removeTracker
-    // (task tracker table edits) and the changeGlobalOption `bt-tracker`
-    // global import (the actor command arm). aria2 gives this key only
-    // the changeReserved bit (no live changeOption bit), so this
-    // acceptance is no narrower than the reference behavior face.
+    // The metadata job consumes this on admission and changeOption. Live
+    // tracker-only edits update discovery without discarding connected peers.
+    // Ordinary torrent edits use the native addTracker/removeTracker API.
     OptionDecl::table_row("bt-tracker", OptionFace::task_payload(), |p, v| {
         p.bt_tracker = Some(split_bt_tracker(v));
     }),
@@ -2692,7 +2691,7 @@ pub(crate) const HTTP_RUNTIME_OPTION_NAMES: &[&str] = &[
     // declaration in docs/design/core.md).
     "ca-certificate",
     // Scheduling group (the option group wired; split/min-split-size are
-    // semantic redefinitions, max-connection-per-server domain 1..=16
+    // semantic redefinitions, max-connection-per-server domain 1..=64
     // rejects out-of-range values).
     "split",
     "min-split-size",

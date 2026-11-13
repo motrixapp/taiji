@@ -1526,6 +1526,7 @@ async fn ut_metadata_fetch_completes_over_duplex() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let config = PeerConfig {
         ext: ExtConfig::fetch(MetadataFetchSpec {
+            shared: None,
             expected: ExpectedInfoHash::V1(sha1),
             tx,
         }),
@@ -1583,6 +1584,7 @@ async fn ut_metadata_inbound_routes_on_our_advertised_id() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let config = PeerConfig {
         ext: ExtConfig::fetch(MetadataFetchSpec {
+            shared: None,
             expected: ExpectedInfoHash::V1(sha1),
             tx,
         }),
@@ -1650,6 +1652,7 @@ async fn ut_metadata_reject_fails_and_disconnects() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let config = PeerConfig {
         ext: ExtConfig::fetch(MetadataFetchSpec {
+            shared: None,
             expected: ExpectedInfoHash::V1([7u8; 20]),
             tx,
         }),
@@ -1693,6 +1696,7 @@ async fn ut_metadata_infohash_mismatch_fails() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let config = PeerConfig {
         ext: ExtConfig::fetch(MetadataFetchSpec {
+            shared: None,
             expected: ExpectedInfoHash::V1([0x11u8; 20]),
             tx,
         }),
@@ -1730,6 +1734,7 @@ async fn ut_metadata_fetch_v2_identity_verified() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let config = PeerConfig {
         ext: ExtConfig::fetch(MetadataFetchSpec {
+            shared: None,
             expected: ExpectedInfoHash::V2(expect),
             tx,
         }),
@@ -2421,6 +2426,7 @@ async fn ut_metadata_peer_m_zero_builds_no_fetch() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     let config = PeerConfig {
         ext: ExtConfig::fetch(MetadataFetchSpec {
+            shared: None,
             expected: ExpectedInfoHash::V1([7u8; 20]),
             tx,
         }),

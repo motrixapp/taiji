@@ -41,7 +41,7 @@
 //!   announce_peer is fire-and-forget (`task_id: None`, no entry);
 //!   inbound query floods never register.
 //! - The registration rate is engine-driven and alpha-capped: each
-//!   lookup keeps at most [`super::task::ALPHA`] (= 3) queries in flight
+//!   lookup keeps at most [`super::task::ALPHA`] (= 5) queries in flight
 //!   (`LookupTask::next_outgoing` gates on `in_flight >= ALPHA`), and
 //!   the concurrent task population is itself bounded (bucket refresh ≤ 1
 //!   lookup per stale bucket × 8 buckets, peer lookups single-flight per
@@ -116,6 +116,7 @@ pub struct PendingTransaction {
     /// mirrors DHTMessageTrackerEntry's messageType_).
     pub method: MessageKind,
     pub registered_at: Instant,
+    soft_notified: bool,
     pub timeout: Duration,
     pub reply: oneshot::Sender<TransactionOutcome>,
 }
@@ -162,6 +163,7 @@ impl TransactionTable {
             key,
             method,
             registered_at: now,
+            soft_notified: false,
             timeout,
             reply,
         };
@@ -230,6 +232,51 @@ impl TransactionTable {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub fn cancel_keys(&mut self, keys: &[TransactionKey]) {
+        for key in keys {
+            if let Some(entry) = self.entries.remove(key) {
+                let _ = entry
+                    .reply
+                    .send(TransactionOutcome::Failed(TransactionFailure::Cancelled));
+            }
+        }
+    }
+    pub fn cancel_all(&mut self) {
+        for (_, entry) in self.entries.drain() {
+            let _ = entry
+                .reply
+                .send(TransactionOutcome::Failed(TransactionFailure::Cancelled));
+        }
+    }
+
+    /// One-second soft timeout for lookups; ping retry policy is unchanged.
+    pub fn soft_timeouts(&mut self, now: Instant) -> Vec<TransactionKey> {
+        self.entries
+            .values_mut()
+            .filter_map(|entry| {
+                if !entry.soft_notified
+                    && matches!(entry.method, MessageKind::FindNode | MessageKind::GetPeers)
+                    && now.saturating_duration_since(entry.registered_at) >= Duration::from_secs(1)
+                {
+                    entry.soft_notified = true;
+                    Some(entry.key)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    pub fn next_soft_deadline(&self) -> Option<Instant> {
+        self.entries
+            .values()
+            .filter(|entry| {
+                !entry.soft_notified
+                    && matches!(entry.method, MessageKind::FindNode | MessageKind::GetPeers)
+            })
+            .map(|entry| entry.registered_at + Duration::from_secs(1))
+            .min()
     }
 
     /// Earliest transaction deadline (the engine's in-loop wake source:

@@ -760,6 +760,17 @@ impl DhtEngine {
             self.on_transaction_done(pending.key, pending, outcome, now)
                 .await;
         }
+        for key in self.txns.soft_timeouts(now) {
+            let Some(task_id) = self.route.get(&key).map(|route| route.task_id) else {
+                continue;
+            };
+            if let Some((queue, mut task)) = self.take_task(task_id) {
+                if let Task::Lookup(lookup) = &mut task {
+                    lookup.on_soft_timeout(key.addr);
+                }
+                self.progress_task(queue, task_id, task, None, now).await;
+            }
+        }
     }
 }
 

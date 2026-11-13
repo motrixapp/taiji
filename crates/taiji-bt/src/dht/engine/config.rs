@@ -34,7 +34,7 @@ pub const DHT_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// traffic model:
 ///
 /// - A legitimate single source is one Kademlia client querying this
-///   node: its lookup keeps ALPHA=3 in flight
+///   node: its lookup starts with ALPHA=5 active queries (up to 3*ALPHA including soft timeouts)
 ///   ([`crate::dht::task::ALPHA`], aria2 `DHTAbstractNodeLookupTask.h`)
 ///   advancing once per RTT (tens of ms on the public internet), and this
 ///   node only appears at the fringe of its candidate set — a sustained

@@ -146,7 +146,7 @@ pub struct HttpArgs {
     #[arg(long)]
     pub min_split_size: Option<String>,
     /// Per-server connection cap (aria2-compatible name
-    /// `--max-connection-per-server`; domain 1-16, out-of-domain rejected).
+    /// `--max-connection-per-server`; domain 1-64, out-of-domain rejected).
     /// Growth cap of the AIMD connection loop: connections ramp from the
     /// slow-start start (= `--split`) up to this cap. Default = 16; the
     /// upstream default of 1 would pin the growth cap and keep dynamic

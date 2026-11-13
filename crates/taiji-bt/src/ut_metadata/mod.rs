@@ -1,3 +1,7 @@
+//! Magnet tasks use the shared coordinator: bounded pipelining, partial-block
+//! retention, selective retries and raw-info hash verification. The standalone
+//! fetcher below preserves the reference single-peer policy for embedding callers.
+//!
 //! ut_metadata metadata exchange (BEP9). The request timeout follows the
 //! reference's **20s** (the "1s" in the design spec was a typo).
 //!
@@ -52,7 +56,9 @@
 
 use thiserror::Error;
 
+mod coordinator;
 pub mod fetcher;
+pub use coordinator::{MetadataCoordinator, SharedMetadataPeer, SharedMetadataSpec};
 pub mod message;
 pub mod tracker;
 

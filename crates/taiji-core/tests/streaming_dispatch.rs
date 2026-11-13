@@ -185,6 +185,7 @@ async fn streaming_dispatch_playhead_drives_request_order() {
         hash_files: None,
     };
     let cfg = EngineConfig {
+        initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
         peer_id: *b"-TJ0001-ENGINEENGIN1",

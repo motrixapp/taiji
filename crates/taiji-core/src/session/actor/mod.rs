@@ -2957,6 +2957,7 @@ mod persist;
 /// module).
 pub(crate) mod summary;
 mod tasks;
+mod torrent_selection;
 mod views;
 
 /// HTTP task option declaration table governance tests (the registration

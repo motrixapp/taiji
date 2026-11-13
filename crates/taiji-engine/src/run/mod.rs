@@ -93,7 +93,6 @@ use tracing::{debug, info, warn};
 
 use crate::command::{EngineCommand, EngineHandle, engine_command_recv};
 use crate::config::{EngineConfig, TrackerWireConfig};
-use crate::faces::recheck_face_completion;
 use crate::pipeline::BLOCK_CHANNEL_CAPACITY;
 use crate::progress::EngineEnd;
 use arms::{
@@ -418,7 +417,11 @@ pub(super) async fn run(
     // are equal by construction — the written criterion is used
     // explicitly to prevent a verified-leads-written imbalance from
     // recurring).
-    recheck_face_completion(&mut state.faces, &state.required);
+    crate::faces::apply_file_selection(
+        &mut state.faces,
+        &state.required,
+        state.selected_mask.as_deref(),
+    );
 
     // Recovery activation emission point (the activation chain): when
     // the set of files whose post-assembly bookkeeping is still

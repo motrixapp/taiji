@@ -162,6 +162,7 @@ pub(super) type SnapshotSyncCell =
 
 /// Parameter bundle for the store pipeline task (one per face).
 pub(super) struct StoreJob {
+    pub(super) initial_selection: Option<Vec<u32>>,
     pub(super) face: usize,
     pub(super) expected: Vec<ExpectedPieceHash>,
     pub(super) piece_len: u32,
@@ -440,6 +441,7 @@ fn v2_hash_precompute_enabled(expected: &[ExpectedPieceHash]) -> bool {
 /// service - beat staggering + fair quota).
 pub(super) async fn store_pipeline(job: StoreJob) {
     let StoreJob {
+        initial_selection,
         face,
         expected,
         piece_len,
@@ -517,7 +519,10 @@ pub(super) async fn store_pipeline(job: StoreJob) {
                     // behaviour; falloc / prealloc semantics and
                     // platform capability notes in the store
                     // disk_policy).
-                    if let Err(e) = w.allocate_with(disk_policy.allocation) {
+                    if let Err(e) = w.allocate_selected_with(
+                        disk_policy.allocation,
+                        initial_selection.as_deref(),
+                    ) {
                         return Err(e.to_string());
                     }
                 }
@@ -1962,6 +1967,7 @@ mod tests {
         let (_policy_tx, policy_rx) = tokio::sync::watch::channel(DiskPolicy::default());
 
         tokio::spawn(store_pipeline(StoreJob {
+            initial_selection: None,
             face: 0,
             expected: (0..PIECES)
                 .map(|p| {

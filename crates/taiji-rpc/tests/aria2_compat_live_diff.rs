@@ -133,6 +133,7 @@ const DOC: &str = include_str!(concat!(
 /// promised to be live-driven).
 const WHITELIST: &[(&str, &str)] = &[
     ("get-version-face", "getVersion"),
+    ("http-output-ready-event", "taiji.onHttpOutputReady"),
     ("method-face-missing", "Method-face missing entries"),
     // Fork-specific task-level cookie RPC surface: accepted with Motrix as
     // the baseline, but committed under canonical `taiji.*` names
@@ -248,6 +249,7 @@ const TAIJI_ONLY_ECHO_AUDIT: &[(&str, &str)] = &[
     ("bt-tracker-file", "`bt-tracker-file`"),
     ("client-ban-prefixes", "`client-ban-prefixes`"),
     ("dht-entry-point", "`dht-entry-point`"),
+    ("dht-entry-point6", "`dht-entry-point6`"),
     ("enable-async-dns6", "`enable-async-dns6`"),
     (
         "http-max-per-host",
@@ -297,6 +299,8 @@ const TAIJI_ONLY_ECHO_AUDIT: &[(&str, &str)] = &[
         "media-variant-policy",
         "Media option family (unified registration",
     ),
+    ("motrix-peer-listeners", "`motrix-peer-listeners`"),
+    ("motrix-startup-tasks", "`motrix-startup-tasks`"),
     ("on-bt-download-complete", "`on-bt-download-complete`"),
     ("on-download-complete", "the hook notification family"),
     ("on-download-error", "the hook notification family"),
@@ -324,6 +328,7 @@ const TAIJI_ONLY_ECHO_AUDIT: &[(&str, &str)] = &[
 /// Rows stay sorted; a value drift outside this table is red, and a
 /// converged row is red until reclaimed (same governance as WHITELIST).
 const SHARED_VALUE_DIFF_AUDIT: &[(&str, &str)] = &[
+    ("async-dns", "`async-dns` / `enable-async-dns6` (resolver"),
     (
         "connect-timeout",
         "unset no-op value faces echo the empty string",
@@ -839,24 +844,54 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
         expect_extra,
         "the compat-face taiji.* extension set drifted"
     );
+    // Fork releases added checkpoint import and retained HTTP retry APIs.
+    // These names are intentionally absent: taiji owns its native persistence
+    // and import paths. Compare every name present in the selected reference;
+    // an undeclared future fork method still fails this exact-set assertion.
+    let known_fork_only = [
+        "aria2.addLegacyTorrentV1",
+        "aria2.addUriWithCookies",
+        "aria2.exportSession",
+        "aria2.getCheckpointStatus",
+        "aria2.getDownloadResultCount",
+        "aria2.getHttpRetryStatusV1",
+        "aria2.importLegacyCheckpointV1",
+        "aria2.inspectLegacyCheckpointV1",
+        "aria2.reconcileLegacyCheckpointV1",
+        "aria2.requeueDownloadResult",
+        "aria2.retryHttpDownloadV1",
+        "aria2.searchDownloadResult",
+        "aria2.setTaskCookies",
+    ];
+    let expected_missing: Vec<String> = known_fork_only
+        .iter()
+        .filter(|name| so.iter().any(|value| value == **name))
+        .map(|name| (*name).to_string())
+        .collect();
     assert_eq!(
         set_diff(&so, &sn),
-        [
-            "aria2.addUriWithCookies",
-            "aria2.exportSession",
-            "aria2.getDownloadResultCount",
-            "aria2.requeueDownloadResult",
-            "aria2.searchDownloadResult",
-            "aria2.setTaskCookies",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>(),
-        "the missing-method set drifted (the whitelist method-face-missing family: 6 fork-only names)"
+        expected_missing,
+        "the missing-method set drifted outside the declared fork-only families"
     );
     let (_, no) = call(oa, "system.listNotifications", &[]).await;
     let (_, nn) = call(na, "system.listNotifications", &[]).await;
-    zero_diff("listNotifications", result_of(&no), result_of(&nn));
+    declared("listNotifications", "http-output-ready-event", &no, &nn);
+    let compat_notifications: Vec<_> = result_of(&nn)
+        .as_array()
+        .unwrap_or_else(|| panic!("notification list missing"))
+        .iter()
+        .filter(|name| **name != json!("taiji.onHttpOutputReady"))
+        .cloned()
+        .collect();
+    zero_diff(
+        "listNotifications compatibility events",
+        result_of(&no),
+        &json!(compat_notifications),
+    );
+    assert_eq!(
+        result_of(&nn).as_array().map(Vec::len),
+        Some(compat_notifications.len() + 1)
+    );
 
     // Non-committed methods (registered on the fork; taiji answers with the
     // unknown-method surface — token auth runs first, same as the fork).
@@ -993,7 +1028,11 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     for m in NO_ARG_METHODS {
         if matches!(
             *m,
-            "getVersion" | "getGlobalOption" | "getSessionInfo" | "system.listMethods"
+            "getVersion"
+                | "getGlobalOption"
+                | "getSessionInfo"
+                | "system.listMethods"
+                | "system.listNotifications"
         ) {
             continue;
         }
@@ -1072,18 +1111,24 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
         !reference_only.is_empty(),
         "the fork's echo table is empty — the reference run shape is abnormal"
     );
-    // Audit (2026-10-28): the taiji-only set must equal the audited
-    // table member-for-member — the table IS the budget (25 ruled
-    // legitimate extensions, each with a declaration anchor checked by
-    // `whitelist_entries_are_anchored_in_the_declaration_doc`); a new
-    // taiji-only key without a ruled anchor row is red, and a key the live
-    // set no longer observes is red until its row is reclaimed via
-    // governance (the same discipline as WHITELIST reverse governance).
-    let mut audited: Vec<&str> = TAIJI_ONLY_ECHO_AUDIT.iter().map(|(k, _)| *k).collect();
+    // Reference builds differ in enabled features (notably c-ares). A key
+    // already echoed by that build is shared, not a taiji-only extension.
+    // Every declared native key must still exist; unknown additions fail.
+    for (key, _) in TAIJI_ONLY_ECHO_AUDIT {
+        assert!(
+            on.contains_key(*key),
+            "declared native echo key missing: {key}"
+        );
+    }
+    let mut audited: Vec<&str> = TAIJI_ONLY_ECHO_AUDIT
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| !oo.contains_key(*key))
+        .collect();
     audited.sort_unstable();
     assert_eq!(
         taiji_only, audited,
-        "the taiji-only echo keys drifted from the audit table (the budget = the audited actual 25)"
+        "taiji-only echo keys drifted outside the declared audit"
     );
     // Only the audited keys may differ in value among shared keys (three
     // Phase A declarations + the Motrix-alignment no-op value faces —

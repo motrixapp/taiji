@@ -57,7 +57,7 @@ use crate::dispatch::{
 };
 use crate::faces::{
     FaceState, PeerRegistration, attach_seeding_sources, on_piece_verified, on_piece_written,
-    pex_note_left, pex_note_registered, recheck_face_completion, release_download_state,
+    pex_note_left, pex_note_registered, release_download_state,
 };
 use crate::progress::{EngineEnd, Progress};
 use crate::query::{peer_snapshots, status_snapshot, tracker_snapshots};
@@ -214,8 +214,12 @@ pub(super) async fn handle_engine_command(
                     // still in flight) must not be marked complete
                     // (completed pieces get the ungated full seeding source
                     // and completion is reported).
-                    recheck_face_completion(&mut state.faces, &state.required);
                     state.selected_mask = Some(Arc::from(mask.as_slice()));
+                    crate::faces::apply_file_selection(
+                        &mut state.faces,
+                        &state.required,
+                        state.selected_mask.as_deref(),
+                    );
                     info!(target: "taiji::core::engine",
                         files = files.len(),
                         pieces = state.required.first().copied().unwrap_or(0),
@@ -797,8 +801,13 @@ pub(super) async fn handle_store_progress(
             // the face completion decision (written-based — the flushed
             // half of libtorrent RC_2_1 7f691246a have->flushed).
             let pass_senders = take_block_sender_map(&mut state.faces, fi, u64::from(index));
-            let all_done =
-                on_piece_written(&mut state.faces, fi, u64::from(index), &state.required);
+            let all_done = on_piece_written(
+                &mut state.faces,
+                fi,
+                u64::from(index),
+                &state.required,
+                state.selected_mask.as_deref(),
+            );
             // smart_ban pass arm (v1 faces only, the same gate as the
             // failure arm):
             // (1) reward (this round's deliverers get trust +1, capped at 0)

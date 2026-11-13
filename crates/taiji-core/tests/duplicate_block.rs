@@ -254,6 +254,7 @@ async fn cross_peer_duplicate_block_is_dropped_and_download_completes() {
     };
     let metrics = Arc::new(SessionMetrics::new());
     let cfg = EngineConfig {
+        initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
         peer_id: *b"-TJ0001-ENGINEENGIN1",

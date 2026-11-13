@@ -1202,6 +1202,7 @@ async fn pex_engine_iter(i: usize) -> Result<(usize, usize, f64, usize), String>
     let tmp = tmp_dir("pex-engine");
     let metrics = Arc::new(SessionMetrics::new());
     let cfg = EngineConfig {
+        initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
         peer_id: *b"-TJ0001-PEXENGBENCH1",

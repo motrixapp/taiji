@@ -1896,6 +1896,7 @@ async fn finalize(
     // goes to the session, bounded(1) lossy; see
     // spawn_with_upgrade_notify) + the upgraded engine's live readings.
     engine_cfg.nat = cfg.nat.clone();
+    engine_cfg.initial_selection = selected_files.clone();
     let (upgraded_handle, engine_join) = DownloadEngine::spawn_controlled(
         engine_cfg,
         TrackerWireConfig {

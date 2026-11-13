@@ -42,11 +42,11 @@ impl SessionActor {
                 view.piece_length = meta.meta.piece_length;
                 let lens: Vec<u64> = meta.meta.files.iter().map(|f| f.length).collect();
                 let bases = file_piece_bases(&lens, meta.meta.piece_length);
-                view.num_pieces = bases.last().copied().unwrap_or(0)
-                    + lens
-                        .last()
-                        .map(|&l| piece_count(l, meta.meta.piece_length))
-                        .unwrap_or(0);
+                view.num_pieces = if meta.meta.kind == taiji_bt::filetree::SwarmKind::V1Only {
+                    piece_count(meta.meta.total_len(), meta.meta.piece_length)
+                } else {
+                    total_piece_count(&bases, &lens, meta.meta.piece_length)
+                };
                 view.files = file_views(
                     &meta.meta,
                     None,
@@ -127,6 +127,7 @@ impl SessionActor {
             }
             None => {}
         }
+        project_selected_progress(&mut view);
         resolve_file_paths(&view.dir, &mut view.files);
         view
     }
@@ -294,6 +295,7 @@ impl SessionActor {
             let checked = sink.load(std::sync::atomic::Ordering::Relaxed);
             view.completed_length = (checked.saturating_mul(piece_len)).min(total);
         }
+        project_selected_progress(&mut view);
         resolve_file_paths(&view.dir, &mut view.files);
         view
     }
@@ -406,10 +408,27 @@ impl SessionActor {
             let bases = file_piece_bases(&lens, snap.piece_length);
             // Per-file completed amounts = bitmap-range conversion (the
             // createFileEntry accounting).
-            let per_file = snap
-                .bitfield
-                .as_ref()
-                .map(|bf| per_file_completed(bf, snap.piece_length, &bases, &lens));
+            let per_file = snap.bitfield.as_ref().map(|bf| {
+                if meta.kind == taiji_bt::filetree::SwarmKind::V2Only {
+                    per_file_completed(bf, snap.piece_length, &bases, &lens)
+                } else {
+                    let mut offset = 0;
+                    meta.files
+                        .iter()
+                        .map(|file| {
+                            let start = file.v1_offset.unwrap_or(offset);
+                            offset = start + file.length;
+                            super::super::view::offset_completed_length(
+                                bf,
+                                snap.piece_length,
+                                snap.num_pieces,
+                                start,
+                                file.length,
+                            )
+                        })
+                        .collect()
+                }
+            });
             view.files = file_views(
                 meta,
                 per_file.as_deref(),
@@ -436,6 +455,7 @@ impl SessionActor {
         if let Ok(peers) = engine.query_peers_summary().await {
             view.num_seeders = peers.iter().filter(|p| p.seeder).count() as u64;
         }
+        project_selected_progress(&mut view);
         resolve_file_paths(&view.dir, &mut view.files);
         view
     }
@@ -450,6 +470,7 @@ impl SessionActor {
     pub(super) async fn seeding_live_view(&mut self, gid: Gid) -> TorrentStatusView {
         let mut view = self.live_status_view(gid).await;
         view.status = StatusKind::Seeding;
+        project_selected_progress(&mut view);
         resolve_file_paths(&view.dir, &mut view.files);
         view
     }
@@ -492,6 +513,15 @@ impl SessionActor {
         // The seeder key is not in the stopped face
         // (gatherStoppedDownload has no KEY_SEEDER).
         v.seeder = None;
+        if v.status == StatusKind::Complete && v.files.iter().any(|file| !file.selected) {
+            v.bitfield = None;
+            for file in &mut v.files {
+                if !file.selected {
+                    file.completed_length = 0;
+                }
+            }
+        }
+        project_selected_progress(&mut v);
         v
     }
 
@@ -535,7 +565,11 @@ impl SessionActor {
                 e.piece_length = meta.piece_length;
                 let lens: Vec<u64> = meta.files.iter().map(|f| f.length).collect();
                 let bases = file_piece_bases(&lens, meta.piece_length);
-                e.num_pieces = total_piece_count(&bases, &lens, meta.piece_length);
+                e.num_pieces = if meta.kind == taiji_bt::filetree::SwarmKind::V1Only {
+                    piece_count(meta.total_len(), meta.piece_length)
+                } else {
+                    total_piece_count(&bases, &lens, meta.piece_length)
+                };
                 let per: Vec<u64> = if complete {
                     lens.clone()
                 } else {
@@ -555,6 +589,18 @@ impl SessionActor {
                     tj.selected_files.as_deref(),
                     tj.file_priorities.as_deref(),
                 );
+                if tj.selected_files.is_some() {
+                    e.total_length = full
+                        .iter()
+                        .filter(|file| file.selected)
+                        .map(|file| file.length)
+                        .sum();
+                    e.completed_length = if complete {
+                        e.total_length
+                    } else {
+                        completed.min(e.total_length)
+                    };
+                }
                 if full.len() > MAX_RESULT_FILES {
                     warn!(target: "taiji::core::session",
                         gid = %gid, total = full.len(),
@@ -577,7 +623,8 @@ impl SessionActor {
                 // (trailing bits 0); a partial bitmap of a partially
                 // complete terminal state is not kept -> None (key
                 // absent, the same default as aria2's empty bitmap).
-                e.bitfield = complete.then(|| all_ones_bitfield(e.num_pieces));
+                e.bitfield = (complete && tj.selected_files.is_none())
+                    .then(|| all_ones_bitfield(e.num_pieces));
                 e.info_hash = info_hash_20(&meta.identity);
                 e.bittorrent = Some(torrent_bittorrent_view(tj));
             }
@@ -859,4 +906,27 @@ fn resolve_file_paths(dir: &str, files: &mut [super::super::view::FileEntryView]
             file.path = root.join(&file.path).display().to_string();
         }
     }
+}
+
+/// Product task progress is measured over selected payload bytes. The full
+/// file list and piece bitmap still describe the complete torrent.
+fn project_selected_progress(view: &mut TorrentStatusView) {
+    if view.bittorrent.is_none()
+        || view.num_files_full.is_some()
+        || !view.files.iter().any(|file| !file.selected)
+    {
+        return;
+    }
+    view.total_length = view
+        .files
+        .iter()
+        .filter(|file| file.selected)
+        .map(|file| file.length)
+        .sum();
+    view.completed_length = view
+        .files
+        .iter()
+        .filter(|file| file.selected)
+        .map(|file| file.completed_length.min(file.length))
+        .sum();
 }

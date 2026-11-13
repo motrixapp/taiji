@@ -4,7 +4,7 @@
 # holds credentials never compiles anything.
 #
 # Flow (human-initiated, environment-gated):
-#   1. fetch   (unprivileged) — pull the unsigned macos-arm64/x64
+#   1. fetch   (no signing credentials) — pull the unsigned macos-arm64/x64
 #      assets from the draft release, verify them against their own
 #      SHA256SUMS, hand them to the sign job as artifacts.
 #   2. sign    (privileged, macos-release-signing environment) —
@@ -43,6 +43,10 @@ concurrency:
 jobs:
   fetch:
     name: fetch unsigned macos assets
+    # GitHub hides draft releases from read-only repository tokens. This job
+    # holds no signing secrets, checks out no source and executes no sidecar.
+    permissions:
+      contents: write
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:

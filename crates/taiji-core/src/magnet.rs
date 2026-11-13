@@ -2797,8 +2797,8 @@ mod tests {
     /// optional x.pe direct endpoint) runs MagnetEngine to the
     /// bt-metadata-only terminal; DHT/LSD/web all off — x.pe is the only
     /// usable discovery source, so a hit proves the direct injection
-    /// works. `listen_port` lets the self-connect guard case inject (the
-    /// metadata phase does not listen otherwise).
+    /// works. `listen_port` selects the metadata listener's preferred port;
+    /// the transport may bind another port when it is already occupied.
     async fn run_with_xpe(
         btih: [u8; 20],
         xpe: Option<std::net::SocketAddr>,
@@ -2884,51 +2884,89 @@ mod tests {
         );
     }
 
-    /// Defense regression (self-connect rejection): x.pe points back at
-    /// "ourselves" (loopback + our announce port) — the existing
-    /// spawn_dial self-connect check must swallow the address: zero
-    /// listener connections and no metadata peers -> the deadline fails
-    /// honestly (no faked completion).
+    /// The self-connect guard uses the actual bound listener, including
+    /// an ephemeral port. A different loopback listener remains a valid peer.
     #[tokio::test]
     async fn xpe_self_connect_is_not_dialed() {
         let (_torrent, btih, _info) = web_mirror_torrent();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let token = CancellationToken::new();
+        let cfg = metadata_fixture_config(btih, PathBuf::from("/tmp/taiji-self-test"));
+        let network = network::Network::bind(0, cfg.peer_id, vec![], None, &token)
             .await
-            .unwrap_or_else(|e| panic!("{e}"));
-        let port = listener
-            .local_addr()
-            .unwrap_or_else(|e| panic!("{e}"))
-            .port();
-        let hits = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&hits);
-        tokio::spawn(async move {
-            loop {
-                let Ok((_sock, _)) = listener.accept().await else {
-                    break;
-                };
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_ne!(network.dialer.port, 0);
+        let faces = vec![MetaFace {
+            index: 0,
+            info_hash: btih,
+            reserved: Reserved::aria2_default(),
+            expected: ExpectedInfoHash::V1(btih),
+            dht_kind: DhtSwarmKind::V1,
+        }];
+        let signals = Arc::new(PeerSignals {
+            network: network.dialer.clone(),
+            candidates: std::sync::Mutex::new(candidates::Candidates::new()),
+            metadata: vec![Arc::new(taiji_bt::ut_metadata::MetadataCoordinator::new(
+                ExpectedInfoHash::V1(btih),
+            ))],
+            pex: mpsc::channel(1).0,
+            holepunch: mpsc::channel(1).0,
+            reports: mpsc::channel(1).0,
+            next_id: AtomicU64::new(1),
+            introducers: AtomicUsize::new(0),
+            max_introducers: 0,
+            enabled: false,
         });
-        let end = run_with_xpe(
-            btih,
-            Some(
-                format!("127.0.0.1:{port}")
-                    .parse()
-                    .unwrap_or_else(|e| panic!("{e}")),
-            ),
-            port,
-            Duration::from_secs(2),
-        )
-        .await;
-        let MagnetEnd::Failed(reason) = &end else {
-            panic!("expected honest failure, got {end:?}")
-        };
-        assert!(reason.contains("deadline"), "{reason}");
-        assert_eq!(
-            hits.load(Ordering::Relaxed),
+        let peers = Arc::new(AtomicUsize::new(0));
+        let total = Arc::new(AtomicUsize::new(0));
+        let dialed = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let live: LivePeers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx, _rx) = mpsc::channel(1);
+        let own_address = std::net::SocketAddr::from(([127, 0, 0, 1], network.dialer.port));
+        spawn_dial_with_network(
+            &cfg,
+            &faces,
             0,
-            "self address must be rejected by the self-connect check (zero connections)"
+            own_address,
+            "xpe",
+            &peers,
+            &dialed,
+            &total,
+            &live,
+            tx.clone(),
+            &token,
+            Some(signals.clone()),
         );
+        assert_eq!(
+            total.load(Ordering::Relaxed),
+            0,
+            "self address must never acquire a dial slot"
+        );
+        assert!(crate::lock(&dialed).is_empty());
+
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+        let other_address = other.local_addr().unwrap_or_else(|error| panic!("{error}"));
+        spawn_dial_with_network(
+            &cfg,
+            &faces,
+            0,
+            other_address,
+            "xpe",
+            &peers,
+            &dialed,
+            &total,
+            &live,
+            tx,
+            &token,
+            Some(signals),
+        );
+        assert_eq!(
+            total.load(Ordering::Relaxed),
+            1,
+            "another local client remains reachable"
+        );
+        token.cancel();
     }
 
     /// Address-hygiene regression: malicious x.pe endpoint shapes (v4

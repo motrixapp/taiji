@@ -109,6 +109,7 @@ pub(crate) fn recovery_face(piece_count: usize, piece_len: u32) -> FaceState {
         // the two models diverge from here).
         written_progress: ProgressModel::from_lengths(&[file_len], piece_len),
         written_count: 0,
+        selected_written_count: 0,
         completed: false,
         hash_files: None,
         swarm: FaceView(Arc::new(Mutex::new(SwarmSnapshot {

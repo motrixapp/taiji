@@ -647,6 +647,7 @@ mod tests {
             // the two bitmaps diverge from here).
             written_progress: ProgressModel::from_lengths(&[0], merkle::BLOCK_SIZE),
             written_count: 0,
+            selected_written_count: 0,
             completed: false,
             hash_files: None,
             swarm: FaceView(Arc::new(Mutex::new(SwarmSnapshot {

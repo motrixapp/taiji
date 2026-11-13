@@ -89,6 +89,7 @@ include!("options.rs");
 include!("queue.rs");
 include!("bt.rs");
 include!("select.rs");
+include!("torrent_selection.rs");
 include!("events.rs");
 include!("persist.rs");
 include!("bans.rs");

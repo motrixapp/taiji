@@ -280,6 +280,15 @@ pub enum SessionCommand {
         gid: String,
     },
     /// Durable HTTP publication state and actual paths.
+    /// Read original verified metainfo without exposing engine filesystem paths.
+    GetTorrentMetadata {
+        gid: String,
+    },
+    /// Atomically confirm a parked magnet's selection and output layout.
+    ConfirmTorrentSelection {
+        gid: String,
+        options: BTreeMap<String, String>,
+    },
     GetHttpOutput {
         gid: String,
     },
@@ -484,9 +493,9 @@ pub enum SessionCommand {
         gid: String,
     },
     /// taiji.stopRecording (registration + dispatch; the LIVE
-    /// execution body lands in 0.4): a non-recording task
+    /// execution body is not implemented): a non-recording task
     /// answers an explicit error — never a silent no-op (the §3.2
-    /// recording phase is 0.4's; 0.3 tasks can never be recordings).
+    /// recording phase is not available yet).
     StopRecording {
         gid: String,
     },
@@ -537,6 +546,10 @@ pub enum CommandReply {
     /// never appears — the RpcMethodImpl.cc rule).
     Options(BTreeMap<String, String>),
     HttpOutput(Box<super::view::HttpOutputView>),
+    TorrentMetadata {
+        data: Vec<u8>,
+        awaiting_selection: bool,
+    },
     /// getSessionInfo: a random session id hex (RpcMethodImpl.cc;
     /// util::toHex(sessionId), 16 random bytes → 32 hex chars).
     SessionInfo {
@@ -740,6 +753,8 @@ mod tests {
         ("taiji.getSchedulerPolicy", true),
         ("taiji.setFilePriority", false),
         ("taiji.setStreamingPlayhead", false),
+        ("taiji.getTorrentMetadata", true),
+        ("taiji.confirmTorrentSelection", false),
         ("taiji.getHttpOutput", true),
         ("taiji.finalizeHttp", false),
         ("taiji.getDiskTier", true),

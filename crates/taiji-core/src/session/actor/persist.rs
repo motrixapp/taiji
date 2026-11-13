@@ -123,6 +123,7 @@ impl SessionActor {
     /// activated payload round-trips through [`Self::job_config`]).
     pub(super) fn patch_config(&self, patch: &TaskOptionPatch) -> PersistedTaskConfig {
         PersistedTaskConfig {
+            selection_pending: false,
             magnet_flags: None,
             output_paths: Default::default(),
             dir: patch
@@ -184,6 +185,9 @@ impl SessionActor {
     pub(super) fn job_config(&self, gid: &Gid) -> PersistedTaskConfig {
         match self.jobs.get(gid) {
             Some(Job::Torrent(tj)) => PersistedTaskConfig {
+                selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
+                    PersistedTaskConfig::from_json(&row.config_json).selection_pending
+                }),
                 magnet_flags: None,
                 output_paths: self
                     .rows
@@ -226,6 +230,9 @@ impl SessionActor {
                 bt_stop_timeout_secs: tj.seed.stop_timeout.as_secs(),
             },
             Some(Job::Magnet(mj)) => PersistedTaskConfig {
+                selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
+                    PersistedTaskConfig::from_json(&row.config_json).selection_pending
+                }),
                 magnet_flags: Some(crate::session::persist::PersistedMagnetFlags::from(
                     &mj.options,
                 )),
@@ -285,6 +292,9 @@ impl SessionActor {
                 enable_http_seeding,
                 ..
             }) => PersistedTaskConfig {
+                selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
+                    PersistedTaskConfig::from_json(&row.config_json).selection_pending
+                }),
                 magnet_flags: None,
                 output_paths: self
                     .rows
@@ -327,6 +337,9 @@ impl SessionActor {
             // arm exists only for match exhaustiveness (returns the
             // default payload).
             Some(Job::Http(_) | Job::Media(_)) => PersistedTaskConfig {
+                selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
+                    PersistedTaskConfig::from_json(&row.config_json).selection_pending
+                }),
                 magnet_flags: None,
                 output_paths: self
                     .rows
@@ -337,6 +350,9 @@ impl SessionActor {
                 ..PersistedTaskConfig::default()
             },
             None => PersistedTaskConfig {
+                selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
+                    PersistedTaskConfig::from_json(&row.config_json).selection_pending
+                }),
                 magnet_flags: None,
                 output_paths: self
                     .rows

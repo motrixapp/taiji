@@ -62,7 +62,7 @@ pub(super) async fn store(
     record: &PublicationRecord,
 ) -> Result<(), HttpError> {
     let row = {
-        let mut row = crate::lock(mirror);
+        let mut row = crate::lock(mirror).clone();
         let mut cfg = HttpPersistConfig::from_json(&row.config_json);
         cfg.publication = Some(record.clone());
         cfg.rename_pending = record.phase != PublicationPhase::Published;
@@ -92,10 +92,11 @@ pub(super) async fn store(
     };
     if let Some(persist) = &run.persist {
         persist
-            .upsert_http_task(row)
+            .upsert_http_task(row.clone())
             .await
             .map_err(|error| HttpError::Disk(error.to_string()))?;
     }
+    *crate::lock(mirror) = row;
     Ok(())
 }
 
@@ -140,8 +141,8 @@ pub(super) async fn finish(
         Ordering::Relaxed,
     );
     *crate::lock(&live.out_path) = record.intent.part_path.display().to_string();
-    live.output.set(record.clone());
     store(run, mirror, &record).await?;
+    live.output.set(record.clone());
     if let Some(notices) = &run.notices {
         let _ = notices
             .send(TaskNotice::HttpFinalizing {

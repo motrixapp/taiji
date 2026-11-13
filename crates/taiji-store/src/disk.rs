@@ -286,6 +286,29 @@ mod unix_impl {
     }
 
     impl FileDiskWriter {
+        /// Open payload storage lazily without truncating an existing or
+        /// concurrently created file. Shared boundary pieces may need it.
+        pub fn open_for_write(&mut self, path: &Path) -> Result<(), StoreError> {
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(taiji_io::winpath::to_fs_path(parent))
+                    .map_err(|error| classify_io(path, error))?;
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .custom_flags(O_NOFOLLOW)
+                .open(taiji_io::winpath::to_fs_path(path))
+                .map_err(|error| classify_io(path, error))?;
+            self.file = Some(file);
+            self.path = path.to_path_buf();
+            self.read_only = false;
+            Ok(())
+        }
+
         pub fn new() -> Self {
             FileDiskWriter {
                 file: None,
@@ -642,6 +665,40 @@ mod windows_impl {
     }
 
     impl FileDiskWriter {
+        /// Open payload storage lazily without truncating an existing or
+        /// concurrently created file. Shared boundary pieces may need it.
+        pub fn open_for_write(&mut self, path: &Path) -> Result<(), StoreError> {
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(taiji_io::winpath::to_fs_path(parent))
+                    .map_err(|error| classify_io(path, error))?;
+            }
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(taiji_io::winpath::to_fs_path(path))
+                .map_err(|error| classify_io(path, error))?;
+            if file
+                .metadata()
+                .map_err(|error| classify_io(path, error))?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(StoreError::FileIo {
+                    path: path.display().to_string(),
+                    source: io::Error::other("refusing to open a symlink/reparse point"),
+                });
+            }
+            self.file = Some(file);
+            self.path = path.to_path_buf();
+            self.read_only = false;
+            Ok(())
+        }
+
         pub fn new() -> Self {
             FileDiskWriter {
                 file: None,
@@ -931,6 +988,19 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn lazy_payload_open_preserves_existing_bytes_across_handles() {
+        let tmp = TempDir::new("lazy-open");
+        let path = tmp.path("nested/payload.bin");
+        let mut first = FileDiskWriter::new();
+        ok(first.open_for_write(&path), "first open");
+        ok(first.write_at(0, b"existing"), "initial bytes");
+        let mut second = FileDiskWriter::new();
+        ok(second.open_for_write(&path), "second open");
+        ok(second.write_at(8, b" appended"), "append");
+        assert_eq!(ok(std::fs::read(path), "read"), b"existing appended");
     }
 
     /// Test Result unwrap (lints forbid unwrap/expect).

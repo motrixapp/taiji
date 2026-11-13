@@ -93,6 +93,12 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
             "numSynthesizing": g.num_synthesizing.to_string(),
         })),
         CommandReply::Options(map) => Ok(json!(map)),
+        CommandReply::TorrentMetadata {
+            data,
+            awaiting_selection,
+        } => Ok(
+            json!({ "data": crate::base64::encode(&data), "awaitingSelection": awaiting_selection }),
+        ),
         CommandReply::HttpOutput(output) => {
             use taiji_core::session::HttpOutputPhase;
             let state = match output.phase {

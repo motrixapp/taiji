@@ -133,3 +133,37 @@ mod tests {
         assert_eq!(decode(&enc).as_deref(), Some(&payload[..]));
     }
 }
+
+/// Standard padded encoding for returning verified torrent metadata.
+pub fn encode(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let bits = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for index in 0..4 {
+            out.push(if index > chunk.len() {
+                '='
+            } else {
+                char::from(ALPHABET[((bits >> (18 - index * 6)) & 63) as usize])
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[test]
+fn metadata_encoding_round_trips_binary_and_padding() {
+    for (plain, encoded) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v")] {
+        assert_eq!(encode(plain.as_bytes()), encoded);
+    }
+    let bytes: Vec<u8> = (0..=255).collect();
+    for size in 0..=bytes.len() {
+        assert_eq!(
+            decode(&encode(&bytes[..size])),
+            Some(bytes[..size].to_vec())
+        );
+    }
+}

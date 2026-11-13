@@ -116,6 +116,7 @@ impl SeedStats for EngineSeedStats {
 /// Store-pipeline wiring for face assembly (extracted; gathers the former
 /// run assembly locals, passed to [`build_faces`] by shared reference).
 struct StoreWiring<'a> {
+    initial_selection: Option<&'a [u32]>,
     dest: &'a PathBuf,
     layout: &'a Layout,
     writer_factory: &'a Option<Arc<dyn WriterFactory>>,
@@ -310,6 +311,7 @@ pub(super) async fn assemble_engine(
     conn_type: PeerConnectionType,
 ) -> Result<AssembledEngine, EngineEnd> {
     let EngineConfig {
+        initial_selection,
         peer_id,
         announce,
         listen_port,
@@ -347,6 +349,11 @@ pub(super) async fn assemble_engine(
         // difference; the CLI/session chain overwrites before spawn).
         tracker_options,
     } = cfg;
+    let initial_mask = initial_selection
+        .as_deref()
+        .map(|files| crate::dispatch::selection_mask(&layout, piece_len, files))
+        .transpose()
+        .map_err(EngineEnd::Failed)?;
     // Engine gauge slot (connections / choke / DHT nodes / hash queue
     // depth); dropped on engine exit -> the renderer-side totals fall back
     // automatically.
@@ -643,6 +650,7 @@ pub(super) async fn assemble_engine(
             dest: &dest,
             layout: &layout,
             writer_factory: &writer_factory,
+            initial_selection: initial_selection.as_deref(),
             disk_policy,
             // Live disk-tier surface: policy watch + applied reading (the
             // construction-time initial = the EngineConfig policy; re-geared
@@ -843,14 +851,21 @@ pub(super) async fn assemble_engine(
     // BEP53 select-file (None = select all): the session sends it right
     // after activation via SetFileSelection (the engine consumes it before
     // announce dials — bounded command-channel order precedes dispatch).
-    let selected_mask: Option<Arc<[bool]>> = None;
+    let selected_mask: Option<Arc<[bool]>> = initial_mask.map(Arc::from);
     // Per-file priorities (None = the all-zero default): sent by the session
     // after activation via SetFilePriority (the same channel/timing as
     // SetFileSelection).
     let piece_priority: Option<Arc<[i8]>> = None;
     // Pieces required for completion per face (pieces inside the mask once
     // a mask applies; default = piece_count).
-    let required: Vec<usize> = faces.iter().map(|f| f.piece_count).collect();
+    let required: Vec<usize> = faces
+        .iter()
+        .map(|f| {
+            selected_mask.as_ref().map_or(f.piece_count, |mask| {
+                mask.iter().filter(|value| **value).count()
+            })
+        })
+        .collect();
     // BEP21 upload_only (the seeding-state announcement): set and broadcast
     // when all faces complete (the state transition itself re-advertises);
     // PeerConfig of connections registered afterwards is caught up via
@@ -1374,6 +1389,7 @@ async fn build_faces(
                 writer_factory: store.writer_factory.clone(),
                 layout: store.layout.clone(),
                 allocate: !store.resume_existing,
+                initial_selection: store.initial_selection.map(<[u32]>::to_vec),
                 block_rx,
                 progress_tx: store.progress_tx.clone(),
                 token: store.token.clone(),
@@ -1678,6 +1694,7 @@ async fn build_faces(
                 written_bits,
                 written_progress,
                 written_count: restored,
+                selected_written_count: 0,
                 completed: false,
                 hash_files: f.hash_files,
                 swarm,

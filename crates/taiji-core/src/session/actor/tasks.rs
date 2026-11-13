@@ -329,6 +329,7 @@ impl SessionActor {
                 }
                 config.dht.engine.message_timeout =
                     std::time::Duration::from_secs(dht_message_timeout);
+                config.initial_selection = selected_files.clone();
                 let (engine, join) = DownloadEngine::spawn_controlled(
                     config,
                     TrackerWireConfig {
@@ -2195,7 +2196,7 @@ impl SessionActor {
     /// BT dest conflict error (`taiji.bt.path_conflict` — the error shape
     /// is aligned with the HTTP-face `taiji.http.path_conflict` semantics:
     /// explicit rejection + path info).
-    fn dest_conflict_error(dir: &Path, name: &str) -> SessionError {
+    pub(super) fn dest_conflict_error(dir: &Path, name: &str) -> SessionError {
         SessionError::failed(format!(
             "taiji.bt.path_conflict: dest {} conflicts with an active BT task \
              (same dir+name; remove it first)",
@@ -2429,10 +2430,21 @@ impl SessionActor {
                 .get("motrix-metadata-holepunch")
                 .is_none_or(|value| value != "false");
             cfg.magnet_uri = Some(uri.clone());
-            let metadata_options = MagnetOptions {
+            cfg.selection_pending = match options.get("motrix-await-selection").map(String::as_str)
+            {
+                None | Some("false") => false,
+                Some("true") => true,
+                _ => return Err(SessionError::failed("invalid selection barrier")),
+            };
+            let mut metadata_options = MagnetOptions {
                 holepunch: cfg.holepunch,
                 ..magnet_options_from_patch(&patch, self.global.bt_peer_connection_type)
             };
+            if cfg.selection_pending {
+                metadata_options.pause_metadata = true;
+                metadata_options.bt_metadata_only = false;
+                metadata_options.follow_torrent = true;
+            }
             cfg.magnet_flags = Some(crate::session::persist::PersistedMagnetFlags::from(
                 &metadata_options,
             ));
@@ -3600,6 +3612,11 @@ impl SessionActor {
     /// arm (a failed task may re-enter the probe queue; previously a failed
     /// task could only be deleted and re-added).
     pub(super) async fn unpause(&mut self, gid: Gid) -> Result<CommandReply, SessionError> {
+        if self.awaiting_torrent_selection(gid) {
+            return Err(SessionError::failed(
+                "torrent file selection is awaiting confirmation",
+            ));
+        }
         if self.queue.startup_held.remove(&gid).is_some()
             && !matches!(
                 self.queue.find(gid),
@@ -3610,7 +3627,11 @@ impl SessionActor {
         }
         if self.queue.find(gid).is_none() {
             if let Some(persist) = &self.persist {
-                if let Ok(Some(snapshot)) = persist.load_http_task(&gid.to_string()).await {
+                if let Some(snapshot) = persist
+                    .load_http_task(&gid.to_string())
+                    .await
+                    .map_err(|error| SessionError::failed(error.to_string()))?
+                {
                     if snapshot.row.state == "error"
                         && http_task::HttpPersistConfig::from_json(&snapshot.row.config_json)
                             .retain_request_context
@@ -3619,6 +3640,7 @@ impl SessionActor {
                     }
                 }
             }
+            return Err(SessionError::failed(format!("GID {gid} is not found")));
         }
         match self.queue.find(gid) {
             // Complete-content provenance (§4.1.3 — the

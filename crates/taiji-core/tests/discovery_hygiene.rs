@@ -266,6 +266,7 @@ async fn tracker_arm_hygiene_rejects_bogon_and_dials_legit() {
 
     let root = CancellationToken::new();
     let cfg = EngineConfig {
+        initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
         peer_id: *b"-TJ0001-HYGIENEHYGN1",

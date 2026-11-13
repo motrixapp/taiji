@@ -148,6 +148,8 @@ pub struct PresetProgress {
 
 /// Engine configuration (CLI/tests assemble it from metainfo).
 pub struct EngineConfig {
+    /// Zero-based non-padding file indices, applied before storage and dispatch.
+    pub initial_selection: Option<Vec<u32>>,
     pub peer_id: [u8; 20],
     pub announce: String,
     pub listen_port: u16,
@@ -493,6 +495,7 @@ pub fn engine_config(
         }
     }
     Ok(EngineConfig {
+        initial_selection: None,
         peer_id,
         announce: meta.announce.clone(),
         listen_port,

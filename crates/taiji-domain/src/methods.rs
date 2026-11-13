@@ -98,6 +98,8 @@ pub const RPC_METHODS: &[&str] = &[
     // disk_tier RPC face (taiji.* namespace; get = query face, set =
     // write face). Naming follows the unified taiji.* camelCase (the six
     // older snake_case names were renamed, no aliases kept).
+    "taiji.getTorrentMetadata",
+    "taiji.confirmTorrentSelection",
     "taiji.getHttpOutput",
     "taiji.finalizeHttp",
     "taiji.getDiskTier",
@@ -473,6 +475,16 @@ pub const RPC_METHOD_INFO: &[RpcMethodDescriptor] = &[
     },
     RpcMethodDescriptor {
         name: "taiji.setStreamingPlayhead",
+        read_only: false,
+        kind: RpcMethodKind::Control,
+    },
+    RpcMethodDescriptor {
+        name: "taiji.getTorrentMetadata",
+        read_only: true,
+        kind: RpcMethodKind::Control,
+    },
+    RpcMethodDescriptor {
+        name: "taiji.confirmTorrentSelection",
         read_only: false,
         kind: RpcMethodKind::Control,
     },

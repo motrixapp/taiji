@@ -84,6 +84,8 @@ impl PersistedMagnetFlags {
 /// aria2 announce-list persistence).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PersistedTaskConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub selection_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub magnet_flags: Option<PersistedMagnetFlags>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -243,6 +245,7 @@ fn is_true(v: &bool) -> bool {
 impl Default for PersistedTaskConfig {
     fn default() -> PersistedTaskConfig {
         PersistedTaskConfig {
+            selection_pending: false,
             magnet_flags: None,
             output_paths: Default::default(),
             dir: String::new(),
@@ -584,6 +587,7 @@ mod tests {
     #[test]
     fn config_json_roundtrip_is_lossless_and_tolerant() {
         let cfg = PersistedTaskConfig {
+            selection_pending: false,
             magnet_flags: None,
             output_paths: Default::default(),
             dir: "/tmp/dl".into(),
@@ -661,6 +665,7 @@ mod tests {
         );
         // Non-zero value round-trip.
         let cfg = PersistedTaskConfig {
+            selection_pending: false,
             magnet_flags: None,
             output_paths: Default::default(),
             bt_stop_timeout_secs: 45,
@@ -691,6 +696,7 @@ mod tests {
         );
         // Tier override round-trip.
         let cfg = PersistedTaskConfig {
+            selection_pending: false,
             magnet_flags: None,
             output_paths: Default::default(),
             disk_tier: Some("ssd-protect".into()),
@@ -730,6 +736,7 @@ mod tests {
         // Both explicit-override arms round-trip.
         for v in [true, false] {
             let cfg = PersistedTaskConfig {
+                selection_pending: false,
                 magnet_flags: None,
                 output_paths: Default::default(),
                 bt_disable_dht: Some(v),
@@ -768,6 +775,7 @@ mod tests {
         // and default stay distinguishable).
         for v in [true, false] {
             let cfg = PersistedTaskConfig {
+                selection_pending: false,
                 magnet_flags: None,
                 output_paths: Default::default(),
                 enable_http_seeding: Some(v),

@@ -54,7 +54,9 @@ notarization result, then replaces the two draft macOS archives with updated
 checksums and notarization receipts. A standalone command-line Mach-O cannot
 be stapled; the accepted receipt records its signed binary digest. Published
 release assets cannot be overwritten by these workflows. Windows binaries
-are unsigned; release notes must disclose that status.
+are unsigned; release notes must disclose that status. Windows builds statically
+link the Visual C++ runtime so Motrix does not require a separate redistributable
+installation; CI checks the actual imported DLL names.
 
 ## Runtime and migration
 

@@ -103,7 +103,8 @@ def assemble(args):
         "rustc": run("rustc", "--version"),
         "profile": "release",
         "cargo_locked": True,
-        "rustflags": "--remap-path-prefix=<repo>=/taiji",
+        "rustflags": "--remap-path-prefix=<repo>=/taiji"
+        + (" -C target-feature=+crt-static" if args.target.endswith("-windows-msvc") else ""),
     }
     (output / "VERSION.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

@@ -105,6 +105,27 @@ jobs:
       # Windows-semantics regression for the on-disk surface (sync_dir/seek_write/rename)
       - run: cargo test -p taiji-http --lib
 
+      - name: Build the Windows sidecar with a static CRT
+        if: runner.os == 'Windows'
+        run: cargo build --locked -p taiji --target x86_64-pc-windows-msvc
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+      - name: Verify Windows runtime dependencies and version
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "target/x86_64-pc-windows-msvc/debug/taiji.exe"
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { throw "sidecar startup failed" }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (!$dumpbin) { throw "dumpbin is unavailable" }
+          $imports = & $dumpbin /DEPENDENTS $binary
+          if ($LASTEXITCODE -ne 0) { throw "dependency inspection failed" }
+          if ($imports -match '(?i)(VCRUNTIME|MSVCP)[0-9].*\.dll') {
+            throw "sidecar depends on an external Visual C++ runtime"
+          }
+
   # metalink feature-off two-legged job (--no-default-features: one leg each
   # for taiji-rpc/taiji, off-state compile + test — without a CI guard
   # the off-state compile surface rots freely).

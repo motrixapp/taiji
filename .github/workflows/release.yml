@@ -144,7 +144,7 @@ jobs:
       - name: Build taiji release
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/taiji
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/taiji ${{ endsWith(matrix.target, '-windows-msvc') && '-C target-feature=+crt-static' || '' }}
           # Android cross-compile face (only consulted for the
           # aarch64-linux-android target; empty elsewhere).
           CC_aarch64-linux-android: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang

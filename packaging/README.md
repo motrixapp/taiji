@@ -56,7 +56,9 @@ be stapled; the accepted receipt records its signed binary digest. Published
 release assets cannot be overwritten by these workflows. Windows binaries
 are unsigned; release notes must disclose that status. Windows builds statically
 link the Visual C++ runtime so Motrix does not require a separate redistributable
-installation; CI checks the actual imported DLL names.
+installation; CI checks the actual imported DLL names. The Windows main thread
+reserves an 8 MiB stack, matching the headroom required by the CLI's debug async
+bootstrap. CI exercises version probing and RPC startup/shutdown as well.
 
 ## Runtime and migration
 

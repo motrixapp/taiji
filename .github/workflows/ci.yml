@@ -109,14 +109,14 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo build --locked -p taiji --target x86_64-pc-windows-msvc
         env:
-          RUSTFLAGS: -C target-feature=+crt-static
+          RUSTFLAGS: -C target-feature=+crt-static -C link-arg=/STACK:8388608
       - name: Verify Windows runtime dependencies and version
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $binary = "target/x86_64-pc-windows-msvc/debug/taiji.exe"
           & $binary --version
-          if ($LASTEXITCODE -ne 0) { throw "sidecar startup failed" }
+          if ($LASTEXITCODE -ne 0) { throw "sidecar startup failed: $LASTEXITCODE" }
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $dumpbin = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
           if (!$dumpbin) { throw "dumpbin is unavailable" }
@@ -124,6 +124,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "dependency inspection failed" }
           if ($imports -match '(?i)(VCRUNTIME|MSVCP)[0-9].*\.dll') {
             throw "sidecar depends on an external Visual C++ runtime"
+          }
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = $listener.LocalEndpoint.Port
+          $listener.Stop()
+          $root = Join-Path $env:RUNNER_TEMP "taiji-rpc-smoke"
+          New-Item -ItemType Directory -Force $root | Out-Null
+          $process = Start-Process -FilePath (Resolve-Path $binary) -WorkingDirectory $root -ArgumentList @(
+            '--enable-rpc', '--rpc-secret=ci-test-secret-020', "--rpc-listen-port=$port",
+            '--enable-dht=false', '--enable-dht6=false', '--bt-lsd=false'
+          ) -PassThru -NoNewWindow
+          try {
+            $uri = "http://127.0.0.1:$port/jsonrpc"
+            $request = @{jsonrpc='2.0'; id=1; method='taiji.getVersion'; params=@('token:ci-test-secret-020')} | ConvertTo-Json -Compress
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 100; $attempt++) {
+              if ($process.HasExited) { throw "sidecar exited: $($process.ExitCode)" }
+              try {
+                $reply = Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' -Body $request -TimeoutSec 2
+                if ($reply.result.version -eq 'taiji/0.2.0') { $ready = $true; break }
+              } catch { Start-Sleep -Milliseconds 200 }
+            }
+            if (!$ready) { throw "RPC readiness timed out" }
+            $shutdown = @{jsonrpc='2.0'; id=2; method='taiji.shutdown'; params=@('token:ci-test-secret-020')} | ConvertTo-Json -Compress
+            Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' -Body $shutdown -TimeoutSec 2 | Out-Null
+            if (!$process.WaitForExit(10000) -or $process.ExitCode -ne 0) { throw "RPC shutdown failed" }
+          } finally {
+            if (!$process.HasExited) { Stop-Process -Id $process.Id -Force }
           }
 
   # metalink feature-off two-legged job (--no-default-features: one leg each

@@ -104,7 +104,7 @@ def assemble(args):
         "profile": "release",
         "cargo_locked": True,
         "rustflags": "--remap-path-prefix=<repo>=/taiji"
-        + (" -C target-feature=+crt-static" if args.target.endswith("-windows-msvc") else ""),
+        + (" -C target-feature=+crt-static -C link-arg=/STACK:8388608" if args.target.endswith("-windows-msvc") else ""),
     }
     (output / "VERSION.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"

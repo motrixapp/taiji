@@ -481,7 +481,7 @@ and summarized here.
   concurrency count); under static scheduling they are the split count /
   minimum segment length. `max-connection-per-server` maps to the
   `bt-max-peers` slot on the BT option face and is the AIMD growth cap on
-  the HTTP task face (domain 1..=16, out-of-range rejected; lowering at
+  the HTTP task face (domain 1..=64, out-of-range rejected; lowering at
   runtime goes through changeOption restart semantics).
 - `max-tries`: redefined as per-extent retries (aria2: per URI attempt).
 - `ca-certificate` (accepted face): PEM CA file path — the task-level
@@ -1694,7 +1694,7 @@ adaptively by the AIMD criterion (start = the `--split` default 5; >=10% gain
 doubling; threshold convergence; multiplicative decrease/recovery unchanged -
 the decision-table regression pins live in taiji-http `aimd.rs`). An explicit
 `--max-connection-per-server=1` still pins a single connection (domain
-1..=16 unchanged). Declared in docs/rpc-api-diff.md.
+1..=64 unchanged). Declared in docs/rpc-api-diff.md.
 
 ### Fast-path range planning vs upstream
 
@@ -1737,7 +1737,7 @@ URI userinfo > the ftp slot > anonymous/anonymous@. FTP has no proxy face
   (session-shared per-host registry). Scheduling group: `--split`/
   `--min-split-size` (redefined semantics in dynamic mode - an
   initial-extent reference only; static = segment count / minimum segment
-  length), `--max-connection-per-server` (the AIMD growth cap, 1..=16),
+  length), `--max-connection-per-server` (the AIMD growth cap, 1..=64),
   `--http-stall-window` (the stall-steal decision window). Guided assembly
   keys: `--http-block-size` (4MiB), `--http-max-chunk` (32MiB). Scheduler
   default = dynamic (guided self-scheduling + AIMD connection loop +

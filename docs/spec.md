@@ -432,6 +432,19 @@ The queue manager is a pure, testable state machine cross-checked against a
 line-by-line transcription of the reference implementation (saturating
 arithmetic with the upstream overflow documented as the reason).
 
+Metadata-only magnet jobs use a separate four-slot queue so full payload
+slots cannot block the file-selection workflow. Pause and startup recovery
+holds take precedence over both queues. Metadata intent is persisted across
+restart; normal magnet auto-upgrades still use the payload queue.
+
+Fetching shares session-owned DHT and TCP/µTP listeners. Per-swarm metadata
+assembly pipelines 4–8 blocks per peer with bounded duplicate requests,
+reassigns rejected/stalled blocks, and verifies the infohash before accepting
+metadata. PEX transport flags drive early `ut_holepunch`; host NAT mappings
+refer to the active listener binding. Explicit magnet sources race peer
+retrieval; a bounded verified cache reuses info bytes without retaining old
+tracker credentials.
+
 ### 7.3 Option surface
 
 An aria2-compatible name surface (global + per-task, startup vs hot-reload

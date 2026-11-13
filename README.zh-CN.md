@@ -4,8 +4,8 @@
 
 **taiji** 是用 Rust 编写的多协议下载引擎，以单一二进制（`taiji`）交付：
 BitTorrent（v1 / v2 / 混合）、HTTP（S）、FTP（S）、Metalink v4 与磁力链接
-运行在同一个会话模型下，并通过 aria2 兼容的 JSON-RPC 面驱动 —— Motrix
-等 aria2 前端不做协议改动即可直接换用。
+运行在同一个会话模型下，通过 taiji JSON-RPC 接口驱动，并提供可选的 aria2
+别名。taiji 为 Motrix 开发，作为桌面端与服务端的唯一下载引擎。
 
 ## 核心特性
 
@@ -34,7 +34,7 @@ cargo build --release
 ```
 
 > taiji 不发布到 crates.io；预编译二进制随发布矩阵提供
-> （macOS universal / linux-x64 / windows-x64）。
+> （[七个平台的发布矩阵](./packaging/README.md)）。
 
 ## 快速上手
 

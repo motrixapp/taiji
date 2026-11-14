@@ -135,8 +135,9 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
   wire identity。
 - 通过验证的 info 即可显示并持久化文件选择列表。`verificationReady=false`
   表示仍缺少部分 v2 piece-layer 证明，此时不能视为完整的可导出种子。
-  确认后只为选中文件恢复并验证证明，再允许下载数据。返回补全后的 artifact 时
-  会重新验证恢复的证明。仅获取元数据或保存元数据的请求仍等待完整证明。
+  确认后，缺少可用校验依据的选中文件需先恢复并验证证明。混合种子可通过已验证的
+  v1 hash 下载，`verificationReady` 仍表示返回 artifact 的 v2 证明材料是否完整。
+  返回补全后的 artifact 时会重新验证恢复的证明。仅获取元数据或保存元数据的请求仍等待完整证明。
   Motrix 用校验和绑定 manifest sidecar，证明齐全后先写入新的不可变文件，
   再更新任务引用，保证崩溃恢复时旧引用仍然有效。
 - `taiji.confirmTorrentSelection(gid, options)` 仅接受 `dir`、

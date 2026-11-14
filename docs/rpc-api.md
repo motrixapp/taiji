@@ -159,7 +159,10 @@ pause semantics when this additional option is absent.
 - Verified info is sufficient to display and persist a file-selection manifest.
   `verificationReady=false` means some v2 piece-layer proofs remain missing;
   clients must not treat the envelope as a complete exported torrent. After
-  confirmation, selected files recover and verify proofs before payload IO.
+  confirmation, files without usable verification anchors recover and verify
+  proofs before payload IO. Hybrid torrents may use their verified v1 hashes
+  while v2 proofs remain unavailable; `verificationReady` still describes the
+  completeness of v2 proof material in the returned artifact.
   Recovered proofs are revalidated when enriching the returned artifact.
   Metadata-only or save-metadata requests still wait for complete proofs.
   Motrix stores the manifest in a checksum-bound sidecar and promotes a complete

@@ -165,7 +165,10 @@ pub fn enrich(
         }
     }
     output.push(b'e');
-    Ok((meta, output))
+    // One piece-layer entry may serve several identical file roots. Reparse
+    // the enriched envelope so every file and the manifest reflect those proofs.
+    let complete = Metainfo::parse(&output).map_err(|error| error.to_string())?;
+    Ok((complete, output))
 }
 
 #[cfg(test)]
@@ -194,7 +197,10 @@ mod tests {
         let info = dict(vec![
             (
                 "file tree",
-                dict(vec![("file.bin", dict(vec![("", leaf)]))]),
+                dict(vec![
+                    ("copy.bin", dict(vec![("", leaf.clone())])),
+                    ("file.bin", dict(vec![("", leaf)])),
+                ]),
             ),
             ("meta version", Value::Int(2)),
             ("name", Value::Bytes(b"file.bin".to_vec())),

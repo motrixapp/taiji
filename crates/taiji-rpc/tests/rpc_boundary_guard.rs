@@ -99,39 +99,36 @@ const STATUS_WORDS: &[&str] = &[
     "done",
 ];
 
-/// Measured leak baseline (2026-11-12, after the 2026-11-11 kernel
-/// closure — 内核收口, the kernel write-face convergence reached the
-/// core actor / http driver / import faces, phases B2-B5 of the
-/// protocol/internal split plan): 25, down from 102 (2026-11-11) and
-/// 125 (2026-11-10). The 25 was re-derived by hand on 2026-11-12
-/// against the counting rules in this module's doc (grep the scan
-/// face for the whole-word literal forms, then strip test faces,
-/// comments, display-macro arguments and `.field(` labels site by
-/// site) — the total and every per-file attribution below came out
-/// of that recount, not out of the closure step's own bookkeeping.
-/// Per crate: taiji-media 18, taiji-core 5, taiji-http 1,
-/// taiji-store 1. The residual 25, exhaustively (every counted
-/// site, file by file — nothing else is counted):
+/// Measured leak baseline: 20 (2026-11-14, Phase C of the
+/// protocol/internal split plan — the rpc adapter layer
+/// `taiji-rpc/src/aria2/` took over every status word table:
+/// `StatusKind::as_str` was deleted from taiji-core (−3) and the
+/// media per-track liveness words went enum-payload (−2); 2026-11-12's
+/// kernel closure measured 25, down from 102 (2026-11-11) and 125
+/// (2026-11-10). The 20 was re-derived by hand on 2026-11-14 against
+/// the counting rules in this module's doc (grep the scan face for the
+/// whole-word literal forms, then strip test faces, comments,
+/// display-macro arguments and `.field(` labels site by site). Per
+/// crate: taiji-media 18, taiji-http 1, taiji-store 1. The residual
+/// 20, exhaustively (every counted site, file by file — nothing else
+/// is counted):
 ///
 /// - `taiji-media/src/phase.rs` (18): `MediaPhase`'s own two literal
 ///   tables (`as_str` + `parse` arms) — the media `state` domain's
 ///   single source, this crate's canonical table (its store edge is
 ///   dev-only, so the store-side exemption cannot host it);
-/// - `taiji-core/src/session/view.rs` (3): `StatusKind::as_str` — the
-///   aria2 online-projection wire table (VLB_* constants); 3 of its 8
-///   words (`paused`/`seeding`/`checking`) double as row-state words.
-///   The projection face is deliberately core-side vocabulary, not a
-///   row-state table;
-/// - `taiji-core/src/session/media.rs` (2): `MediaTrackLive`'s
-///   per-track liveness words (`"active"`/`"done"`, an in-memory live
-///   view) — same word *shape* as the task-phase word, different
-///   concept (track finished, not the task-state column);
+///
 /// - `taiji-http/src/finalize.rs` (1): `STATE_DONE`, the finalize
 ///   face's frozen terminal seam constant (documented mirror of the
 ///   row contract);
+///
 /// - `taiji-store/src/persist/fork_import.rs` (1): `ForkTaskState`'s
 ///   `paused` arm — the fork archive's own two-word domain table
 ///   (`waiting` is not a governed word).
+///
+/// The taiji-core residuals of the 2026-11-12 baseline (view.rs 3 +
+/// media.rs 2) are gone: the wire words now live only in the rpc
+/// adapter (`taiji-rpc/src/aria2/status.rs`, outside this scan face).
 ///
 /// Write-point status, two calibers. The 14 governed words' write
 /// points below rpc are zero — this counter's own verdict: every
@@ -145,7 +142,7 @@ const STATUS_WORDS: &[&str] = &[
 /// `TaskPhase::Error.as_v1_str()` on 2026-11-12 (review finding) —
 /// a hand-audit fact this guard does not pin, regressing it would
 /// not move the count. Ratchets down only — see the module doc.
-const BASELINE: usize = 25;
+const BASELINE: usize = 20;
 
 /// The persistence layer's canonical v1 string table (phase B1 of the
 /// protocol/internal split plan): `task_phase.rs` owns the TaskPhase
@@ -425,6 +422,65 @@ fn kernel_manifests_do_not_declare_rpc_dependencies() {
          every walked crate in the layering (cli -> rpc -> core -> engine -> \
          domain, see the root Cargo.toml layering comment); a reverse edge is a \
          layering violation:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// Excision premise (registered 2026-11-14, Phase C): the excision
+/// check (`scripts/ci/excision_check.sh`) deletes
+/// `crates/taiji-rpc/src/aria2/` from a throwaway copy and compiles
+/// the kernel ten with `cargo check --locked --all-targets`.
+/// `--all-targets` also compiles dev-dependency graphs, so its premise
+/// is **stronger than guard B**: the kernel crates must not declare
+/// taiji-rpc even as a dev-dependency (guard B deliberately allows
+/// dev-deps). If someone adds one, guard B stays green but the
+/// excision job goes red — this pin closes that gap at review time.
+#[test]
+fn kernel_dev_dependencies_also_stay_rpc_free_for_excision() {
+    let root = workspace_root();
+    let crates_dir = root.join("crates");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut walked = 0usize;
+    for entry in std::fs::read_dir(&crates_dir)
+        .unwrap_or_else(|e| panic!("read crates dir {}: {e}", crates_dir.display()))
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n != RPC_CRATE && !RPC_CONSUMERS.contains(&n.as_str()))
+    {
+        walked += 1;
+        let manifest = crates_dir.join(&entry).join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|e| panic!("read {}: {e}", manifest.display()));
+        // Section state machine (same shape as guard B): only the
+        // [dev-dependencies] table is in this pin's face.
+        let mut in_dev = false;
+        for (i, line) in text.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(header) = table_header(trimmed) {
+                let inner = header.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+                in_dev = inner.is_some_and(|name| {
+                    name == "dev-dependencies" || name.starts_with("dev-dependencies.")
+                });
+                continue;
+            }
+            if in_dev && mentions_crate(trimmed, RPC_CRATE) {
+                offenders.push(format!("{entry}/Cargo.toml:{}: {trimmed}", i + 1));
+            }
+        }
+    }
+    assert!(
+        walked >= MIN_SCANNED_MANIFESTS,
+        "scan surface distorted: only {walked} crate manifests walked"
+    );
+    assert!(
+        offenders.is_empty(),
+        "a kernel crate declares {RPC_CRATE} in [dev-dependencies] — the \
+         excision check compiles --all-targets, so its copy goes red; drop the \
+         dev-dep (or fold dev-deps into guard B):\n{}",
         offenders.join("\n")
     );
 }

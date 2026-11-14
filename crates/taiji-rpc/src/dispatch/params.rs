@@ -11,17 +11,18 @@
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::error::RpcError;
+use crate::aria2::error::RpcError;
 
 // ---- parameter decoding helpers (reference = the checkRequiredParam/checkParam shape) ----
 
-/// Standard error surface for missing params / wrong types (the same
-/// template texts as RpcMethodImpl.h).
+/// Standard error surface for missing params / wrong types (the
+/// template texts live in the adapter error table —
+/// [`RpcError::param_missing`] / [`RpcError::param_wrong_type`]).
 pub(crate) fn param_error(index: usize, missing: bool) -> RpcError {
     if missing {
-        RpcError::generic(format!("The parameter at {index} is required but missing."))
+        RpcError::param_missing(index)
     } else {
-        RpcError::generic(format!("The parameter at {index} has wrong type."))
+        RpcError::param_wrong_type(index)
     }
 }
 
@@ -139,10 +140,7 @@ pub(crate) fn uint_param(params: &[Value], index: usize, max: u64) -> Result<u64
 pub(crate) fn required_num(params: &[Value], index: usize) -> Result<i64, RpcError> {
     let v = required_i64(params, index)?;
     if v < 0 {
-        return Err(RpcError::generic(format!(
-            "The integer parameter at {index} has invalid value: \
-             the value must be greater than or equal to 0."
-        )));
+        return Err(RpcError::integer_param_not_ge_zero(index));
     }
     Ok(v)
 }

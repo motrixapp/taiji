@@ -86,6 +86,21 @@ jobs:
         env:
           TAIJI_DIFF_ALLOW_SKIP: "1"
 
+  # Excision check (Phase C, protocol/internal split plan): delete the
+  # aria2 adapter layer from a throwaway copy and compile the kernel ten
+  # with zero kernel changes. A separate job, not a gates step: the copy
+  # is a fresh tree (rust-cache gains nothing — cold compile accepted,
+  # ~5-10 min) and the gates budget (45min) stays untouched. Details:
+  # scripts/ci/excision_check.sh.
+  excision:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned toolchain, aligned with the gates job (2026-10-13).
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - run: bash scripts/ci/excision_check.sh
+
   store-bt-subset:
     strategy:
       fail-fast: false

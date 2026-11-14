@@ -38,7 +38,8 @@ use crate::dispatch::AppState;
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 /// Task-state distribution (derived in the rpc layer via the existing
-/// query face; label values = the six aria2 status states).
+/// query face; label values = the six aria2 status states, rendered
+/// through the adapter word table — see the render loop).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TorrentStateCounts {
     pub active: u64,
@@ -47,6 +48,23 @@ pub(crate) struct TorrentStateCounts {
     pub complete: u64,
     pub error: u64,
     pub removed: u64,
+}
+
+impl TorrentStateCounts {
+    /// The count of one [`StatusKind`] (the render loop's only field
+    /// access point — exhaustive, so a new METRICS_STATES member that
+    /// lacks a counter breaks here at compile time).
+    pub(crate) fn count(&self, kind: StatusKind) -> u64 {
+        match kind {
+            StatusKind::Active => self.active,
+            StatusKind::Waiting => self.waiting,
+            StatusKind::Paused => self.paused,
+            StatusKind::Complete => self.complete,
+            StatusKind::Error => self.error,
+            StatusKind::Removed => self.removed,
+            StatusKind::Seeding | StatusKind::Checking => 0,
+        }
+    }
 }
 
 /// `GET /metrics` rendering (the Basic gate lives in the server layer's
@@ -206,20 +224,16 @@ pub(crate) fn render(
         "# HELP taiji_torrents Torrent count by aria2 status (bounded label set).\n\
          # TYPE taiji_torrents gauge\n",
     );
-    for (state, n) in [
-        ("active", states.active),
-        ("waiting", states.waiting),
-        ("paused", states.paused),
-        ("complete", states.complete),
-        ("error", states.error),
-        ("removed", states.removed),
-    ] {
+    // Label set + words share one source with the wire table
+    // (crate::aria2::status::METRICS_STATES + status_word — no
+    // second handwritten list).
+    for kind in crate::aria2::status::METRICS_STATES {
         write_sample(
             &mut out,
             Sample {
                 name: "taiji_torrents",
-                labels: &[("state", state.to_string())],
-                value: n.to_string(),
+                labels: &[("state", crate::aria2::status::status_word(kind).to_string())],
+                value: states.count(kind).to_string(),
             },
         );
     }

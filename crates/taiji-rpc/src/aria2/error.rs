@@ -1,4 +1,6 @@
-//! RPC error mapping table — the repo-wide single source.
+//! RPC error mapping table — the repo-wide single source (the adapter
+//! layer's home: `crate::aria2::error`; migrated whole from the former
+//! `src/error.rs`, byte-frozen behavior).
 //!
 //! The aria2 numeric error codes and the `taiji.*` string codes get
 //! their names, values, and HTTP mappings here; other crates (core/cli)
@@ -6,16 +8,24 @@
 //! ([`SessionError`]); StoreError is normalized by taiji-core and
 //! enters through the SessionCommand face (new branches extend
 //! [`map_session_error`] here — the single source stays in this file).
+//! Every frozen wire message (parameter templates, cookie validation
+//! texts, metalink seams, the unknown-method wording, the caps
+//! receipts) is named here as a constant or a constructor — call sites
+//! never spell a wire message inline.
 //!
 //! Error-code stability invariants:
+//!
 //! - numeric code 1 = the generic method-execution error (aria2
 //!   `RpcMethod.cc` `createErrorResponse`; unknown methods and auth
 //!   failures land there too, see dispatch.rs);
+//!
 //! - JSON-RPC protocol errors -32700/-32600/-32602 (`rpc_helper.cc`,
 //!   `HttpServerBodyCommand.cc`);
+//!
 //! - `-32601` is never produced: unknown methods use [`CODE_GENERIC`];
 //!   the constant exists only to keep the HTTP mapping aligned with the
 //!   reference switch;
+//!
 //! - the HTTP failure -> aria2 numeric-code mapping table is frozen; it
 //!   grows only in reviewed increments, and the executable mirror
 //!   [`try_http_numeric_code`] plus the `http_failure_*` tests must
@@ -81,6 +91,68 @@ pub const STR_METALINK_TIMEOUT: &str = "taiji.metalink.timeout";
 /// compatibility face).
 pub const STR_UNAUTH_WRITE: &str = "unauthenticated write requires --rpc-secret";
 
+/// The option-value rejection string code (the message-face prefix of
+/// `taiji.option.invalid` rejections raised adapter-side; core raises
+/// the same code through SessionError texts).
+pub const STR_OPTION_INVALID: &str = "taiji.option.invalid";
+
+// ---- frozen wire message texts (named constants; the single source) ----
+// Every externally visible message is named here (or built by a named
+// constructor below) — call sites never spell a wire message inline.
+// Byte-frozen: changing a value is a wire change, not a refactor.
+
+/// Parameter templates (the checkRequiredParam/checkParam face,
+/// RpcMethodImpl.h). The two texts' upstream provenance is unverified
+/// against the aria2 1.37.0 tree (2026-11-14 measurement gap); the
+/// bytes are frozen as observed regardless.
+pub(crate) const MSG_PARAM_REQUIRED_MISSING: &str =
+    "The parameter at {index} is required but missing.";
+pub(crate) const MSG_PARAM_WRONG_TYPE: &str = "The parameter at {index} has wrong type.";
+/// checkRequiredInteger(req, 1, IntegerGE(0))'s inner text
+/// (RpcMethodImpl.h).
+pub(crate) const MSG_PARAM_INTEGER_NOT_GE_ZERO: &str = concat!(
+    "The integer parameter at {index} has invalid value: ",
+    "the value must be greater than or equal to 0."
+);
+
+/// system.multicall shape texts (RpcMethodImpl.cc; the recursion guard
+/// wording is cross-validated live against the reference).
+pub(crate) const MSG_RECURSIVE_MULTICALL: &str = "Recursive system.multicall forbidden.";
+pub(crate) const MSG_MULTICALL_EXPECTED_STRUCT: &str = "system.multicall expected struct.";
+pub(crate) const MSG_MULTICALL_MISSING_METHOD_NAME: &str = "Missing methodName.";
+
+/// Task-cookie validation texts (RpcCookie.cc parseRpcCookies,
+/// verbatim; module-doc anchor `rpc_cookies`).
+pub(crate) const MSG_COOKIE_TOO_MANY: &str = "Too many task cookies.";
+pub(crate) const MSG_COOKIE_NOT_OBJECT: &str = "Task cookie must be an object.";
+pub(crate) const MSG_COOKIE_UNKNOWN_FIELD: &str = "Unknown task cookie field.";
+pub(crate) const MSG_COOKIE_SYNTAX: &str = "Invalid task cookie syntax.";
+pub(crate) const MSG_COOKIE_DOMAIN: &str = "Invalid task cookie domain.";
+pub(crate) const MSG_COOKIE_EXPIRY: &str =
+    "Task cookie expiry must be nonnegative Unix milliseconds.";
+pub(crate) const MSG_COOKIE_STRING_FIELD: &str = "Invalid task cookie string field.";
+pub(crate) const MSG_COOKIE_BOOL_FIELD: &str = "Invalid task cookie boolean field.";
+
+/// addUri/addTorrent/addTracker/addMedia empty-set and shape texts
+/// (RpcMethodImpl.cc wording family).
+pub(crate) const MSG_URI_NOT_PROVIDED: &str = "URI is not provided.";
+pub(crate) const MSG_URL_NOT_PROVIDED: &str = "URL is not provided.";
+pub(crate) const MSG_TORRENT_NOT_BASE64: &str = "torrent data is not valid base64.";
+pub(crate) const MSG_FILE_PATHS_NOT_PROVIDED: &str = "file paths are not provided.";
+pub(crate) const MSG_TRACKER_URLS_NOT_PROVIDED: &str = "tracker URLs are not provided.";
+/// changePosition's closed `how` domain text (RpcMethodImpl.cc).
+pub(crate) const MSG_ILLEGAL_ARGUMENT: &str = "Illegal argument.";
+/// changeUri's fileIndex bound text (RpcMethodImpl.cc
+/// checkRequiredInteger(req, 1, IntegerGE(1))).
+pub(crate) const MSG_INTEGER_GE_ONE: &str = "Integer value must be greater than or equal to 1.";
+
+/// The metalink seam's own texts (the declared-difference family; the
+/// string-code prefixes go through `RpcError::option_invalid` /
+/// [`STR_METALINK_TIMEOUT`], never hand-spliced). Gated: the seam's
+/// only consumer is the metalink feature.
+#[cfg(feature = "metalink")]
+pub(crate) const MSG_METALINK_NOT_BASE64: &str = "metalink data is not valid base64.";
+
 /// RPC error (a mapping-table product; encoded into the JSON-RPC error object in [`jsonrpc`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcError {
@@ -122,6 +194,134 @@ impl RpcError {
             unauthorized: false,
         }
     }
+
+    /// "No such method: <name>" (NoSuchMethodRpcMethod /
+    /// RpcMethodImpl.cc — the raw caller spelling is echoed verbatim).
+    pub(crate) fn no_such_method(raw_method: &str) -> Self {
+        RpcError::generic(format!("No such method: {raw_method}"))
+    }
+
+    /// The missing-required-parameter text (checkRequiredParam,
+    /// RpcMethodImpl.h) at position `index`.
+    pub(crate) fn param_missing(index: usize) -> Self {
+        RpcError::generic(MSG_PARAM_REQUIRED_MISSING.replace("{index}", &index.to_string()))
+    }
+
+    /// The wrong-parameter-type text (checkParam, RpcMethodImpl.h) at
+    /// position `index`.
+    pub(crate) fn param_wrong_type(index: usize) -> Self {
+        RpcError::generic(MSG_PARAM_WRONG_TYPE.replace("{index}", &index.to_string()))
+    }
+
+    /// The IntegerGE(0) rejection text at position `index`
+    /// (checkRequiredInteger, RpcMethodImpl.h).
+    pub(crate) fn integer_param_not_ge_zero(index: usize) -> Self {
+        RpcError::generic(MSG_PARAM_INTEGER_NOT_GE_ZERO.replace("{index}", &index.to_string()))
+    }
+
+    /// An adapter-side option-value rejection: code 1 + the
+    /// `taiji.option.invalid` string-code prefix + the detail (the
+    /// same face as the core-side changeOption rejections). Gated:
+    /// the only raiser is the metalink seam.
+    #[cfg(feature = "metalink")]
+    pub(crate) fn option_invalid(detail: impl std::fmt::Display) -> Self {
+        RpcError::generic(format!("{STR_OPTION_INVALID}: {detail}"))
+    }
+
+    /// The over-limit request error (HTTP 413 face): code 1 + the
+    /// `taiji.request.too_large` string code + the knob pointer.
+    pub(crate) fn request_too_large() -> Self {
+        RpcError::generic(format!(
+            "{STR_REQUEST_TOO_LARGE}: see --rpc-max-request-size"
+        ))
+    }
+
+    /// The batch/multicall item-cap receipt.
+    pub(crate) fn too_many_items(cap: usize) -> Self {
+        RpcError::generic(format!(
+            "{STR_TOO_MANY_ITEMS}: batch/multicall capped at {cap} calls"
+        ))
+    }
+
+    /// The request-level subcall-budget receipt.
+    pub(crate) fn subcall_budget_exceeded(total: usize, max: usize) -> Self {
+        RpcError::generic(format!(
+            "{STR_TOO_MANY_ITEMS}: batch subcall budget exceeded ({total} > {max})"
+        ))
+    }
+
+    /// The defensive unexpected-reply face (a reply variant this method
+    /// face does not encode — a broken structural invariant, never a
+    /// faked payload). `method` is the canonical method name.
+    pub(crate) fn unexpected_reply(method: &str, other: &dyn std::fmt::Debug) -> Self {
+        RpcError::generic(format!("unexpected {method} reply: {other:?}"))
+    }
+
+    /// `taiji.createTorrent`'s closed format-domain rejection (the
+    /// taiji.* namespace; no reference wording).
+    pub(crate) fn unknown_torrent_format(shown: &str) -> Self {
+        RpcError::generic(format!(
+            "unknown torrent format: {shown} (expected one of v1|v2|hybrid)"
+        ))
+    }
+
+    /// `taiji.setSchedulerPolicy`'s unknown-name rejection.
+    pub(crate) fn unknown_scheduler_policy(shown: &str) -> Self {
+        RpcError::generic(format!("unknown scheduler policy: {shown}"))
+    }
+
+    /// `taiji.setStreamingPlayhead`'s zero-rate rejection (position 3;
+    /// the default rate is carried by omitting the parameter).
+    pub(crate) fn playhead_bps_zero() -> Self {
+        RpcError::generic(
+            "The integer parameter at 3 has invalid value: bytes_per_sec must be greater than 0 \
+             (omit the parameter for the default rate)"
+                .to_string(),
+        )
+    }
+
+    /// `taiji.setFilePriority`'s empty-pairs rejection (position 1).
+    pub(crate) fn file_priority_pairs_empty() -> Self {
+        RpcError::generic("The parameter at 1 has invalid value: pairs must not be empty.")
+    }
+
+    /// `taiji.setFilePriority`'s non-object entry rejection (entry `n`).
+    pub(crate) fn file_priority_entry_not_object(n: usize) -> Self {
+        RpcError::generic(format!(
+            "The parameter at 1 has invalid value: entry {n} is not an object."
+        ))
+    }
+
+    /// `taiji.setFilePriority`'s missing-index rejection (entry `n`).
+    pub(crate) fn file_priority_entry_misses_index(n: usize) -> Self {
+        RpcError::generic(format!(
+            "The parameter at 1 has invalid value: entry {n} misses index."
+        ))
+    }
+
+    /// `taiji.setFilePriority`'s out-of-domain priority rejection
+    /// (entry `n`; the -1..=7 domain).
+    pub(crate) fn file_priority_entry_bad_priority(n: usize) -> Self {
+        RpcError::generic(format!(
+            "The parameter at 1 has invalid value: entry {n} priority must be \
+             an integer in -1..=7."
+        ))
+    }
+
+    /// `taiji.setDiskTier`'s unknown-name rejection (the tier value
+    /// domain echoes `DiskTier::NAMES`).
+    pub(crate) fn unknown_disk_tier(name: &str, names: &[&str]) -> Self {
+        RpcError::generic(format!(
+            "unknown disk tier: {name} (expected one of {names:?})"
+        ))
+    }
+}
+
+/// system.multicall inline error slot (shape = createErrorResponse's
+/// error object, `RpcMethod.cc`): the raw `{code,message}` JSON value
+/// the multicall array embeds in place of a wrapped result.
+pub(crate) fn multicall_inline_error(message: &str) -> serde_json::Value {
+    serde_json::json!({ "code": CODE_GENERIC, "message": message })
 }
 
 /// SessionError -> RPC error (the single mapping point; core only supplies semantics).
@@ -358,6 +558,51 @@ pub fn http_status(code: i64) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The consolidated constructors are byte-frozen (each reproduces
+    /// the exact wire text that used to be spelled inline at the call
+    /// sites — Phase C's collection step must not drift a byte).
+    #[test]
+    fn consolidated_constructors_are_byte_frozen() {
+        assert_eq!(
+            RpcError::no_such_method("aria2.getX").message,
+            "No such method: aria2.getX"
+        );
+        assert_eq!(
+            RpcError::param_missing(2).message,
+            "The parameter at 2 is required but missing."
+        );
+        assert_eq!(
+            RpcError::param_wrong_type(0).message,
+            "The parameter at 0 has wrong type."
+        );
+        assert_eq!(
+            RpcError::integer_param_not_ge_zero(1).message,
+            "The integer parameter at 1 has invalid value: the value must be greater than or \
+             equal to 0."
+        );
+        assert_eq!(
+            RpcError::request_too_large().message,
+            "taiji.request.too_large: see --rpc-max-request-size"
+        );
+        assert_eq!(
+            RpcError::too_many_items(1000).message,
+            "taiji.request.too_many_items: batch/multicall capped at 1000 calls"
+        );
+        assert_eq!(
+            RpcError::subcall_budget_exceeded(10001, 10_000).message,
+            "taiji.request.too_many_items: batch subcall budget exceeded (10001 > 10000)"
+        );
+        #[cfg(feature = "metalink")]
+        assert_eq!(
+            RpcError::option_invalid("bad value").message,
+            "taiji.option.invalid: bad value"
+        );
+        assert_eq!(
+            multicall_inline_error("Missing methodName."),
+            serde_json::json!({"code": 1, "message": "Missing methodName."})
+        );
+    }
 
     #[test]
     fn http_status_mirrors_reference_switch() {

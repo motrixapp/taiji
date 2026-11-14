@@ -37,8 +37,16 @@
 #                                              机器不解析 refs;
 #     - `taiji-implicit-state-machines-zh.md`   工作区根审计报告。
 #
-# 【统计快照】2026-11-10 创建,共 46 条:
-#   known-deviation 15 · taiji-extension 27 · fold 2 · test-gating 2
+# 【统计快照】2026-11-10 创建,共 46 条;2026-11-14 Phase C 台账接线扩至 56 条:
+#   known-deviation 24 · taiji-extension 28 · fold 2 · test-gating 2
+#   2026-11-14 扩条(Phase C 差分测试改为按本台账 id 豁免):新增 9 条
+#   known-deviation(method-face-missing / echo-shared-value-faces /
+#   getoption-echo-face / http-option-invalid-tightening /
+#   status-progress-granularity / pre-probe-projection / sftp-deferred /
+#   unknown-scheme / add-torrent-base64)+ 1 条 taiji-extension
+#   (echo-taiji-only-budget,38 键预算);扩 4 条既有条目 stanza 补全键清单
+#   (getglobaloption-echo-subset / media-option-family / four-pool-budgets /
+#   diff-whitelist-governance refs)。差分侧 WHITELIST id 同步改名为台账 id。
 #   2026-11-10 复核修订:where 收敛单段格式(extension-events,原双锚点逗号缩写);
 #   修正 5 处 refs 悬空路径(taiji/src/… ×4、taiji/tests/… ×1,实际位于
 #   taiji/crates/taiji/… 下,已逐处对行核实引文);known-deviation 组加注 2 条对齐锚
@@ -46,7 +54,8 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# kind: known-deviation(15 条)—— taiji 与 aria2 之间的已声明行为分歧
+# kind: known-deviation(24 条,2026-11-14 起:15 + Phase C 接线新增 9)
+#   —— taiji 与 aria2 之间的已声明行为分歧
 #   组内口径注(2026-11-10 复核):其中 2 条(seed-check-sticky-latch、
 #   peer-status-am-choking-live-bool)为对齐锚(alignment pin)——行为与 aria2 一致、
 #   无线上分歧,登记的是"拒绝 taiji 侧自然实现/审计建议"的决策;Phase C 按 id 豁免
@@ -168,9 +177,9 @@
   kind: known-deviation
   where: "taiji/docs/rpc-api-diff.md:64-90"
   what: >-
-    getGlobalOption 回显面方向差:fork 回显完整全局选项表(~130 键、仅已定义 pref),taiji 回显 Phase A 承诺子集+扩展(~30 键起、后续经审计表扩张);taiji 恒回显接受值面(空串=未设)——fork 对 NO_DEFAULT 键未设置时不回显;不承诺补齐全表回显。
+    getGlobalOption 回显面方向差:fork 回显完整全局选项表(~130 键、仅已定义 pref),taiji 回显 Phase A 承诺子集+扩展(~30 键起、后续经审计表扩张);taiji 恒回显接受值面(空串=未设)——fork 对 NO_DEFAULT 键未设置时不回显;不承诺补齐全表回显。恒回显接受值面族(2026-11-14 补全键清单,10 键):all-proxy、https-proxy、async-dns、enable-async-dns6、bt-exclude-tracker、dht-entry-point、dht-entry-point6、load-cookies、pause、save-session——fork 仅在已定义/已设置时回显,taiji 恒回显空串值面。
   refs: >-
-    docs/rpc-api-diff.md §3:64-67(echo-subset direction)、:86-90(accepted-value faces 审计);差分测试注释 aria2_compat_live_diff.rs:209-218(2026-10-28 实测:默认启动回显 132 个已定义键,NO_DEFAULT pref 仅命令行设过才出现)与预算表 :198-235(38 键逐键裁定)
+    docs/rpc-api-diff.md §3:64-67(echo-subset direction)、:86-90(accepted-value faces 审计);差分测试注释 aria2_compat_live_diff.rs:209-218(2026-10-28 实测:默认启动回显 132 个已定义键,NO_DEFAULT pref 仅命令行设过才出现)与预算表 :198-235(38 键逐键裁定);键清单机器校验 = 差分测试 TAIJI_ONLY_ECHO_AUDIT 按键映射本 id
 
 - id: metalink-seam-differences
   kind: known-deviation
@@ -180,8 +189,81 @@
   refs: >-
     docs/rpc-api-diff.md §6:697-836(含 :721 "Later entries with the same (dir,out) are skipped"、:740 "Caller-supplied out/checksum stripped wholesale"、:820 taiji.metalink.timeout);差分白名单 metalink 族条目 aria2_compat_live_diff.rs:170-195(含声明面条目不 live 驱动的治理说明 :172-174);缝名守护 metalink.rs:1083-1095
 
+- id: method-face-missing
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:36"
+  what: >-
+    方法面缺失条目:fork 独有的 sqlite3 家族 4 名(getDownloadResultCount / searchDownloadResult / exportSession / requeueDownloadResult)不在 taiji 承诺集内,compat 面同名调用落 "No such method: aria2.X"(token 鉴权先行,与 fork 同序);是否接受该 4 名仍待用户裁决(承诺集扩张 + 新 ADR)。
+  refs: >-
+    docs/rpc-api-diff.md §1:36(Method-face missing entries,4 sqlite3 名的承诺集状态与治理项);差分实测锚 aria2_compat_live_diff.rs(method-face-missing declared() 四行,含 "No such method" 逐字比对);RPC_METHODS 承诺面 taiji-domain/src/methods.rs
+
+- id: echo-shared-value-faces
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:105-120"
+  what: >-
+    getGlobalOption 共享键值面差(17 键,2026-11-14 补全键清单):listen-port(fork 区间默认 6881-6999 vs 单值)、peer-id-prefix(A2-1-37-0- vs -TJ0001-)、seed-ratio(字面 1.0 vs 最小数字形)三条 Phase A 声明 + Motrix 对齐无操作值面 14 键(connect-timeout、continue、max-connection-per-server、max-download-result、max-file-not-found、max-mmap-limit、max-resume-failure-tries、max-tries、min-split-size、remote-time、retry-wait、split、timeout、user-agent)——未设时 taiji 回显空串(无覆盖记录),fork 回显已定义默认值。
+  refs: >-
+    docs/rpc-api-diff.md §3:105-120(Shared-key value differences 三 Phase A 声明 + 14 无操作值面行);差分实测锚 aria2_compat_live_diff.rs(SHARED_VALUE_DIFF_AUDIT 17 键逐键映射本条,2026-10-28 live run)
+
+- id: getoption-echo-face
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:340"
+  what: >-
+    getOption(单任务选项读)回显面:接受子集投影、基线值投影、值形状、默认处理、终态域读五类行为差——仅在真实任务取活值时可观测,参数矩阵零差行不受影响;声明面登记,差分测试按 id 豁免。
+  refs: >-
+    docs/rpc-api-diff.md §3:340("`getOption` echo surface (single-task option reads)" 三域查读声明);差分白名单原 get-option-echo-face 条目(2026-11-14 改名对齐台账 id)
+
+- id: http-option-invalid-tightening
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:121-140"
+  what: >-
+    HTTP 面已知键非法值的显式拒绝收紧(合并声明):changeOption 对 HTTP 任务的越域调度值(如 max-connection-per-server 超出 1..64)显式拒收(taiji.option.invalid,不截断);select-file 同族收紧(空串/含 0/越域/重复/乱序/重叠倒置区间/非十进制整体拒绝)——fork 仅对非数字与不完整区间报错,重复乱序被 normalize 吸收。fork 对已知键非法值统一报错而 taiji 默认忽略(方向相反的声明差),本条登记的是收紧侧。
+  refs: >-
+    docs/rpc-api-diff.md §3:121-127(Invalid-value semantics:fork 报错 vs taiji 忽略 + max-connection-per-server 1..64 显式拒绝)、:131-140(select-file 三向收紧);差分实测锚 aria2_compat_live_diff.rs(option-invalid-value 与 option-domain-reject 两 declared() 行,2026-11-14 合并为本条)
+
+- id: status-progress-granularity
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:532"
+  what: >-
+    进度计量基准差:活动读数在场时 tellStatus completedLength 是字节级实时计数(单调、可超前于块计数;http.blocksDone/blocksTotal 保持块单位),终值收敛到块记账终值——fork 的 completedLength 以块记账为基准。
+  refs: >-
+    docs/rpc-api-diff.md §4:532(Progress accounting basis (completedLength));自证 pin 测试 aria2_compat_live_diff.rs live_completed_length_projects_byte_level_and_converges_to_accounting(30s 采样窗口内字节级超前 + 单调 + 终值收敛三断言)
+
+- id: pre-probe-projection
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:517"
+  what: >-
+    探测前投影差:任务创建到 probe/规划之间,taiji 已投影完整条目(files/uris 等以计划面先行呈现),fork 在该窗口的字段呈现面不同;getFiles/tellStatus 的差分按本条豁免。
+  refs: >-
+    docs/rpc-api-diff.md §4:517(Pre-probe projection,含 :556 交叉引用 "see Pre-probe projection above");差分实测锚 aria2_compat_live_diff.rs(pre-probe-projection declared() 行,getFiles 与 tellStatus 两处)
+
+- id: sftp-deferred
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:638-642"
+  what: >-
+    sftp:// 延迟实现:fork 支持 SFTP;taiji 0.2 在任务创建时显式拒绝(addUri 报 taiji.sftp.deferred)——SFTP 传输管线随独立项目交付,--sftp-* 选项面同批。
+  refs: >-
+    docs/rpc-api-diff.md §5:638-642("sftp:// deferred");差分实测锚 aria2_compat_live_diff.rs(sftp-deferred declared() 行,断言 err_msg 以 taiji.sftp.deferred 起头)
+
+- id: unknown-scheme
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:643-648"
+  what: >-
+    未知 scheme 的报错文案差:fork 统一报 "No URI to download.";taiji 按拒绝面给出自身文案——消息面差声明,HTTP 状态与错误码面保持对齐。
+  refs: >-
+    docs/rpc-api-diff.md §5:643-648("Unknown scheme");差分实测锚 aria2_compat_live_diff.rs(unknown-scheme declared() 行,xyz:// 输入)
+
+- id: add-torrent-base64
+  kind: known-deviation
+  where: "taiji/docs/rpc-api-diff.md:649-652"
+  what: >-
+    addTorrent 非法 base64 的处理差:fork 解码宽松(去空白后仍失败才报错),taiji 用严格标准字母表+补位校验,非法输入报 "torrent data is not valid base64."。
+  refs: >-
+    docs/rpc-api-diff.md §5:649-652("addTorrent invalid base64");taiji 侧严格解码器 crates/taiji-rpc/src/base64.rs( fuzz 目标 rpc_base64);差分实测锚 aria2_compat_live_diff.rs(add-torrent-base64 declared() 行)
+
 # ------------------------------------------------------------------------------
-# kind: taiji-extension(27 条)—— aria2 无对应面的 taiji 扩展(选项/RPC/事件/机制)
+# kind: taiji-extension(28 条,2026-11-14 起:27 + Phase C 接线新增
+#   echo-taiji-only-budget)—— aria2 无对应面的 taiji 扩展(选项/RPC/事件/机制)
 # ------------------------------------------------------------------------------
 
 - id: http-max-per-host-extension
@@ -206,7 +288,7 @@
   what: >-
     媒体线 5 个扩展方法 taiji.addMedia/probeMedia/getMediaFormats/stopRecording/clearMediaArchive(点分扩展字面量,无裸名/别名形态);probeMedia 返回不透明 token+TTL 10min,全局在途上限 2+按源 1/s 限速。
   refs: >-
-    methods.rs:130-147(含 addMedia 直下任务零新面规则、probeMedia token+TTL、clearMediaArchive 破坏性整表清理 fail-closed 注释);docs/rpc-api-diff.md §1:40;媒体错误码族投影 error.rs:306-338
+    methods.rs:130-147(含 addMedia 直下任务零新面规则、probeMedia token+TTL、clearMediaArchive 破坏性整表清理 fail-closed 注释);docs/rpc-api-diff.md §1:40;媒体错误码族投影 aria2/error.rs:306-338
 
 - id: force-recheck-rpc
   kind: taiji-extension
@@ -308,17 +390,17 @@
   kind: taiji-extension
   where: "taiji/crates/taiji/src/main.rs:1442-1489"
   what: >-
-    四池预算模型扩展选项 --max-concurrent-seeds(0..=4096,两态默认 16/0)、--max-concurrent-checks(1..=16,默认 2)、--media-synthesis-concurrency(1..=16,默认 2)——aria2 无;收窄不清抢在途,changeGlobalOption 热改。
+    四池预算模型扩展选项 --max-concurrent-seeds(0..=4096,两态默认 16/0)、--max-concurrent-checks(1..=16,默认 2)、--media-synthesis-concurrency(1..=16,默认 2)——aria2 无;收窄不清抢在途,changeGlobalOption 热改。三键同入 getGlobalOption taiji-only 回显预算(2026-11-14 补全键清单:max-concurrent-seeds、max-concurrent-checks、media-synthesis-concurrency)。
   refs: >-
-    main.rs:1442-1489(逐项 "four-pool model; aria2 has no such option",含两态默认注记);docs/rpc-api-diff.md §3:77-78(Four-pool budget trio);投影见 getGlobalStat 扩展键(view.rs:85-93)
+    main.rs:1442-1489(逐项 "four-pool model; aria2 has no such option",含两态默认注记);docs/rpc-api-diff.md §3:77-78(Four-pool budget trio);投影见 getGlobalStat 扩展键(view.rs:85-93);键清单机器校验 = 差分测试 TAIJI_ONLY_ECHO_AUDIT 按键映射本 id
 
 - id: media-option-family
   kind: taiji-extension
   where: "taiji/crates/taiji-core/src/session/options.rs:242-259"
   what: >-
-    媒体族会话默认选项统一注册挂全局选项面(--media-variant-policy/--media-audio-lang/--media-subtitles/--media-segment-concurrency/--media-staging-quota-gib 等 10 键)——fork 无任何媒体面;addMedia 任务逐任务合并缺省键,changeGlobalOption 对之后新增任务生效。
+    媒体族会话默认选项统一注册挂全局选项面(10 键,2026-11-14 补全键清单:media-variant-policy、media-audio-lang、media-subtitles、media-segment-concurrency、media-staging-quota-gib、media-staging-dir、media-allow-private-key-url、media-ffmpeg-path、media-archive、media-info-json)——fork 无任何媒体面;addMedia 任务逐任务合并缺省键,changeGlobalOption 对之后新增任务生效。
   refs: >-
-    options.rs:242-259;差分预算表 media 族 10 键 aria2_compat_live_diff.rs:260-279(注释 "the fork has no media surface at all");docs/rpc-api-diff.md §3 media 族声明
+    options.rs:242-259;差分预算表 media 族 10 键 aria2_compat_live_diff.rs:260-279(注释 "the fork has no media surface at all");docs/rpc-api-diff.md §3 media 族声明;键清单机器校验 = 差分测试 TAIJI_ONLY_ECHO_AUDIT 按键映射本 id
 
 # 加注(2026-11-10 复核):where 原为双锚点逗号缩写 "events.rs:124,358-359",为保持
 # 全表 where 单段 `taiji/…:起-止` 格式,收敛于 recovery 事件锚 358-359(该两行正是
@@ -355,6 +437,14 @@
     选项面声明扩展/改名键族(权威表 DECLARED_OPTION_DIFFS):bt-tracker-file、bt-peer-connection-type、bt-enable-upnp、bt-enable-nat-pmp、max-connection(Motrix UX 别名映射 bt-max-peers)、client-ban-prefixes、bt-metadata-web-sources、http-incomplete-suffix、metalink 缝名(metalink-auto-discover/metalink-force-protocol,aria2 1.37.0 prefs.cc 无此名)、bt-lsd↔bt-enable-lpd 改名对——凡 aria2 无此名的接受键必须落表,镜像测试防漂移。
   refs: >-
     options.rs:1178-1209(逐项 "no aria2 counterpart/no aria2 option name");metalink.rs:1083-1095(缝名必须走差表白名单、不得混入参考名清单的镜像断言);docs/rpc-api-diff.md §3:68-76(Phase A 改名对与 0.2 扩展键);:154-155(changeOption 拒收 http-max-per-host 语义)
+
+- id: motrix-session-options
+  kind: taiji-extension
+  where: "taiji/crates/taiji-core/src/session/options.rs:1150-1166"
+  what: >-
+    Motrix 集成专属全局选项(上游 aria2 无此面):motrix-peer-listeners(P2P 监听端口列表,逗号分隔)、motrix-startup-tasks(启动时自动恢复的任务声明)——Motrix GUI 集成层注入,经统一选项注册面进入 getGlobalOption 回显。
+  refs: >-
+    options.rs 全局选项注册面;差分审计表 TAIJI_ONLY_ECHO_AUDIT 按键映射本 id
 
 - id: per-task-dht-webseed-switches
   kind: taiji-extension
@@ -398,11 +488,19 @@
 
 - id: media-error-code-mapping
   kind: taiji-extension
-  where: "taiji/crates/taiji-rpc/src/error.rs:306-338"
+  where: "taiji/crates/taiji-rpc/src/aria2/error.rs:306-338"
   what: >-
     taiji.media.* 错误码族(ffmpeg_missing/not_media/manifest_parse/ssrf_blocked 等 18 行)无 aria2 对应行,数值面全部投影 UNKNOWN_ERROR(1),唯一共享行 taiji.option.invalid(28);字符串码 verbatim 随 message 传递。
   refs: >-
-    error.rs:306-338("The whole taiji.media.* family: no aria2 counterpart row — the generic execution-error face (1), the error message carries the canonical string code verbatim")
+    aria2/error.rs:306-338("The whole taiji.media.* family: no aria2 counterpart row — the generic execution-error face (1), the error message carries the canonical string code verbatim")
+
+- id: echo-taiji-only-budget
+  kind: taiji-extension
+  where: "taiji/crates/taiji-rpc/tests/aria2_compat_live_diff.rs:198-309"
+  what: >-
+    getGlobalOption taiji-only 回显键预算(38 键,2026-11-14 起整表挂账):声明扩展名族与接受值面族——媒体 10 键(media-variant-policy、media-audio-lang、media-subtitles、media-segment-concurrency、media-staging-quota-gib、media-staging-dir、media-allow-private-key-url、media-ffmpeg-path、media-archive、media-info-json,详情条目 media-option-family)、四池 3 键(max-concurrent-seeds、max-concurrent-checks、media-synthesis-concurrency,详情条目 four-pool-budgets)、bt-tracker(bt-tracker-rpc-union)、http-max-per-host(http-max-per-host-extension)、声明扩展 7 键(bt-tracker-file、bt-peer-connection-type、bt-enable-upnp、bt-enable-nat-pmp、client-ban-prefixes、bt-metadata-web-sources、bt-lsd,详情条目 declared-extension-option-keys)、恒回显接受值面 9 键(all-proxy、https-proxy、async-dns、enable-async-dns6、bt-exclude-tracker、dht-entry-point、load-cookies、pause、save-session,详情条目 getglobaloption-echo-subset)、hook 6 键(on-download-start、on-download-stop、on-download-complete、on-download-error、on-download-pause、on-bt-download-complete)+ seed-time(fork 无此回显面;hook 族与 seed-time 的细分锚在本条)。live 集与预算表逐成员相等,新键无账即红。
+  refs: >-
+    差分审计表 aria2_compat_live_diff.rs:198-309(2026-10-28 live run + 2026-10-30 media 增补,38 键逐键裁定;2026-11-14 起按键映射台账条目,机器校验 key ∈ 所映射条目 what+refs);docs/rpc-api-diff.md §3:68-104(taiji-only echo keys 两族声明);细分条目 media-option-family / four-pool-budgets / bt-tracker-rpc-union / http-max-per-host-extension / declared-extension-option-keys / getglobaloption-echo-subset
 
 # ------------------------------------------------------------------------------
 # kind: fold(2 条)—— 多相位折叠共用一个状态词(行态域零新增,投影面声明)
@@ -442,4 +540,4 @@
   what: >-
     差分测试白名单双向治理:每一处观测差异必须命中 WHITELIST 条目(锚文本在编译期对 docs/rpc-api-diff.md 校验,文档掉锚变红);反向治理=两侧已收敛(无实际差异)的白名单条目也变红,删除条目需 PR;forceRecheck(无 fork 对应面)与 shutdown 族、system.multicall 一起按声明方向排除出参数矩阵;taiji-only echo 键有独立预算表 TAIJI_ONLY_ECHO_AUDIT(live 集与表逐成员相等)。
   refs: >-
-    aria2_compat_live_diff.rs:12-17(白名单外零差异+反向治理)、:63-73(MATRIX_EXCLUDED,forceRecheck 的排除方向注释)、:118-123(DOC include_str! 编译期嵌入)、:134-196(WHITELIST 锚表)、:198-235(TAIJI_ONLY_ECHO_AUDIT 预算=38 键);docs/rpc-api-diff.md:5-11(治理规则:PR+用户批准、锚点双向完备)
+    aria2_compat_live_diff.rs:12-17(白名单外零差异+反向治理)、:63-73(MATRIX_EXCLUDED,forceRecheck 的排除方向注释;其能力扩展本体在账条目 force-recheck-rpc,矩阵排除治理即挂该条)、:118-123(台账 include_str! 编译期嵌入,2026-11-14 起豁免源=docs/compat/aria2-v1-deviations.yaml 按 id)、:134-196(EXEMPTION_IDS 表)、:198-235(TAIJI_ONLY_ECHO_AUDIT 预算=38 键,按键映射台账条目);docs/rpc-api-diff.md:5-11(治理规则:PR+用户批准、锚点双向完备)

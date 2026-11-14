@@ -548,12 +548,11 @@ pub(crate) fn activate_recovered_file(
 /// (carried on the QueryStatus snapshot; the session face merges it into the
 /// file entries).
 ///
-/// Recovery projection state values (the wire value domain; the RPC layer's
-/// `recoveryStatus` maps directly, snake_case matching the existing policy
-/// values).
-pub(crate) const RECOVERY_LAYER_MISSING: &str = "layer_missing";
-pub(crate) const RECOVERY_RECOVERING: &str = "recovering";
-pub(crate) const RECOVERY_READY: &str = "ready";
+/// Recovery projection state (the kernel enum, owned by
+/// `taiji_domain::recovery`; the RPC adapter's `recoveryStatus` word table
+/// renders it — snake_case matching the existing policy values is decided
+/// at that render point).
+pub(crate) use crate::recovery::RecoveryStatus;
 
 /// Event tracking (EngineLoop single-writer field; initialized at the
 /// activation emit point, the consumer arm monotonically drains the open
@@ -609,12 +608,14 @@ pub(super) fn note_promotions_core(
 /// getFiles layer-missing projection (pure function): files involved in
 /// recovery (booked ∪ was-missing) → 0-based meta.files position + state:
 /// - Booked: `Missing` = no hashes in flight/staged yet ("waiting for hash
-///   recovery") → [`RECOVERY_LAYER_MISSING`]; `Requesting/Received/Delivered`
-///   = fetch in progress → [`RECOVERY_RECOVERING`];
+///   recovery") → [`RecoveryStatus::LayerMissing`];
+///   `Requesting/Received/Delivered` = fetch in progress →
+///   [`RecoveryStatus::Recovering`];
 /// - Was-missing (in the started set) and promoted (not in the open set) →
-///   [`RECOVERY_READY`];
+///   [`RecoveryStatus::Ready`];
 /// - Was-missing, bookkeeping removed but the gate still closed (the benign
-///   edge of bad-layer redundant removal) → [`RECOVERY_LAYER_MISSING`]
+///   edge of bad-layer redundant removal) →
+///   [`RecoveryStatus::LayerMissing`]
 ///   (the gate is still shut; the miss stays observable);
 /// - Other files are not projected (metadata-carried layers / v1 /
 ///   single-piece files — keys absent by default).
@@ -622,15 +623,15 @@ pub(super) fn recovery_file_states_core(
     faces: &[FaceState],
     recovery: &[RecoveryBook],
     track: &RecoveryEventTrack,
-) -> Vec<(u32, &'static str)> {
-    let mut out: Vec<(usize, &'static str)> = Vec::new();
+) -> Vec<(u32, RecoveryStatus)> {
+    let mut out: Vec<(usize, RecoveryStatus)> = Vec::new();
     for book in recovery {
         for (&file_idx, entry) in &book.files {
             let state = match entry.state {
-                RecoveryFetchState::Missing => RECOVERY_LAYER_MISSING,
+                RecoveryFetchState::Missing => RecoveryStatus::LayerMissing,
                 RecoveryFetchState::Requesting { .. }
                 | RecoveryFetchState::Received
-                | RecoveryFetchState::Delivered => RECOVERY_RECOVERING,
+                | RecoveryFetchState::Delivered => RecoveryStatus::Recovering,
             };
             out.push((file_idx, state));
         }
@@ -650,11 +651,11 @@ pub(super) fn recovery_file_states_core(
             .iter()
             .find_map(|face| face.layers.get(*f).map(|l| &l.state));
         let state = if promoted {
-            RECOVERY_READY
+            RecoveryStatus::Ready
         } else {
             match gate {
-                Some(LayerFetchState::Pending) | None => RECOVERY_LAYER_MISSING,
-                Some(_) => RECOVERY_READY,
+                Some(LayerFetchState::Pending) | None => RecoveryStatus::LayerMissing,
+                Some(_) => RecoveryStatus::Ready,
             }
         };
         out.push((*f, state));
@@ -730,7 +731,7 @@ pub(super) fn note_promotions(
 
 /// getFiles layer-missing projection (QueryStatus snapshot half; the
 /// EngineLoop wrapper of [`recovery_file_states_core`]).
-pub(super) fn recovery_file_states(state: &EngineLoop) -> Vec<(u32, &'static str)> {
+pub(super) fn recovery_file_states(state: &EngineLoop) -> Vec<(u32, RecoveryStatus)> {
     recovery_file_states_core(&state.faces, &state.recovery, &state.recovery_track)
 }
 
@@ -1754,10 +1755,10 @@ mod tests {
         assert_eq!(
             states,
             vec![
-                (0, RECOVERY_LAYER_MISSING),
-                (1, RECOVERY_RECOVERING),
-                (2, RECOVERY_READY),
-                (3, RECOVERY_LAYER_MISSING),
+                (0, RecoveryStatus::LayerMissing),
+                (1, RecoveryStatus::Recovering),
+                (2, RecoveryStatus::Ready),
+                (3, RecoveryStatus::LayerMissing),
             ],
             "projection value range item by item: missing/recovering/ready/the stuck edge, accurately"
         );

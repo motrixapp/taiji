@@ -66,6 +66,35 @@ impl RecoveryEventKind {
     }
 }
 
+/// Per-file hash-recovery projection state (the getFiles missing-layer
+/// face: engine snapshot -> session file entry). A kernel enum with no
+/// wire strings — the RPC adapter owns the rendered words (the
+/// `recoveryStatus` key and the completed event's `status` slot).
+///
+/// There is no failure terminal: an exhausted fetch budget stays
+/// [`RecoveryStatus::Recovering`], waiting for a new peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RecoveryStatus {
+    /// The layer is missing and no hashes are in flight or staged yet
+    /// (waiting for hash recovery; also the stuck edge where the
+    /// bookkeeping is gone but the gate is still closed).
+    LayerMissing,
+    /// A hash fetch is in progress (requested / received / delivered).
+    Recovering,
+    /// The recovered layer was admitted and the gate promoted.
+    Ready,
+}
+
+impl RecoveryStatus {
+    /// The full set (shared by iteration and the adapter's frozen
+    /// word-table test).
+    pub const ALL: [RecoveryStatus; 3] = [
+        RecoveryStatus::LayerMissing,
+        RecoveryStatus::Recovering,
+        RecoveryStatus::Ready,
+    ];
+}
+
 /// Engine-to-session relay payload for recovery events (HookRunner recovery
 /// notify slot). The engine side has no gid (`EngineConfig` carries none —
 /// CLI/test direct runs have no session ownership); the session-side relay

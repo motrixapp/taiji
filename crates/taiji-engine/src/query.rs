@@ -21,6 +21,7 @@ use taiji_domain::seed::SessionSpeedCalc;
 
 use crate::bitmap::PieceBitmap;
 use crate::faces::FaceState;
+use crate::recovery::RecoveryStatus;
 /// Bitmap row -> compact bytes (big-endian bit order, trailing pad bits
 /// zero; the BEP3 wire layout).
 /// `bits = None` (no peer bitfield/have received yet) -> an all-zero
@@ -186,7 +187,7 @@ pub(super) fn status_snapshot(
     upload_length: u64,
     upload_speed: u64,
     download_speed: u64,
-    recovery_files: Vec<(u32, &'static str)>,
+    recovery_files: Vec<(u32, RecoveryStatus)>,
 ) -> EngineStatusSnapshot {
     let (completed, bitfield, num_pieces, connections, seeder) = match faces.first() {
         None => (0, None, 0, 0, true),
@@ -331,13 +332,13 @@ pub struct EngineStatusSnapshot {
     /// All faces complete (the aria2 group->isSeeder judgment face).
     pub seeder: bool,
     /// getFiles missing-layer projection: files involving a missing
-    /// layer -> recovery status (0-based meta.files position; values =
-    /// `layer_missing|recovering|ready`, semantics in
-    /// `run::recovery_admit::recovery_file_states_core`). The session
-    /// face merges it into the file entries (the RPC layer
-    /// `recoveryStatus` key); an empty table = this module has no
-    /// missing-layer files.
-    pub recovery_files: Vec<(u32, &'static str)>,
+    /// layer -> recovery status (0-based meta.files position; the
+    /// enum's semantics live in
+    /// `run::recovery_admit::recovery_file_states_core`, the rendered
+    /// words in the RPC adapter). The session face merges it into the
+    /// file entries (the RPC layer `recoveryStatus` key); an empty
+    /// table = this module has no missing-layer files.
+    pub recovery_files: Vec<(u32, RecoveryStatus)>,
 }
 
 /// getPeers per-connection snapshot (the query seam; the

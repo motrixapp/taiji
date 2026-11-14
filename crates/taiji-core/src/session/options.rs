@@ -2743,11 +2743,11 @@ pub(crate) const ADD_URI_DIRECT_OPTION_NAMES: &[&str] =
 
 /// Mirror of the metalink seam's accepted names (the single facts live
 /// in taiji-rpc
-/// `metalink::{UNSUPPORTED_METALINK_OPTIONS, AUTO_DISCOVER_OPTION}` +
-/// the taiji CLI `--metalink-file`). The core table is the
-/// declaration single source; the subset check (seam face ⊆ declaration
-/// table) lives in the taiji-rpc seam tests (mirror/seam drift turns
-/// red).
+/// `aria2::option::{UNSUPPORTED_METALINK_OPTIONS, AUTO_DISCOVER_OPTION}`
+/// and the taiji CLI `--metalink-file`). The core table is the
+/// declaration single source; the subset check (seam face is a subset
+/// of the declaration table) lives in the taiji-rpc seam tests
+/// (mirror/seam drift turns red).
 #[cfg(test)]
 pub(crate) const METALINK_ACCEPTED_SEAM_OPTION_NAMES: &[&str] = &[
     "metalink-file",

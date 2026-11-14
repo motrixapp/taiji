@@ -99,8 +99,9 @@ pub const PROBE_ORIGIN_INTERVAL: Duration = Duration::from_secs(1);
 pub struct MediaTrackLive {
     pub label: String,
     pub kind: &'static str,
-    /// active|done.
-    pub state: &'static str,
+    /// Track liveness (the kernel enum; wire words rendered by the rpc
+    /// adapter's word table).
+    pub state: super::view::MediaTrackState,
     pub segments_done: usize,
     pub segments_total: usize,
     pub bytes: u64,
@@ -2200,9 +2201,14 @@ pub(crate) async fn media_panic_terminal(
 /// the honest rollup granularity wired here).
 fn progress_note(live: &Arc<StdMutex<MediaLiveState>>, note: &MediaProgressNote) {
     if let Ok(mut st) = live.lock() {
+        let state = if note.started {
+            super::view::MediaTrackState::Active
+        } else {
+            super::view::MediaTrackState::Done
+        };
         match st.tracks.iter_mut().find(|t| t.label == note.label) {
             Some(t) => {
-                t.state = if note.started { "active" } else { "done" };
+                t.state = state;
                 t.segments_done = note.segments_done;
                 t.segments_total = note.segments_total;
                 t.bytes = note.delivered_bytes;
@@ -2210,7 +2216,7 @@ fn progress_note(live: &Arc<StdMutex<MediaLiveState>>, note: &MediaProgressNote)
             None => st.tracks.push(MediaTrackLive {
                 label: note.label.clone(),
                 kind: note.kind,
-                state: if note.started { "active" } else { "done" },
+                state,
                 segments_done: note.segments_done,
                 segments_total: note.segments_total,
                 bytes: note.delivered_bytes,
@@ -2561,7 +2567,7 @@ mod tests {
 
     /// The sample_aes spelling reconciliation's
     /// parse→core consistency pin (the rpc numeric leg rides the §14
-    /// row list test in taiji-rpc/src/error.rs, which pins the same
+    /// row list test in taiji-rpc/src/aria2/error.rs, which pins the same
     /// string verbatim): one SAMPLE-AES playlist drives the chain and
     /// every layer reports the SAME code string (the 0.3.0 wording —
     /// the spec's `sample_aes_pending` row takes the errata via the

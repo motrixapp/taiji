@@ -2,19 +2,13 @@
 // list kv recovery ----
 
 /// ban_list view unwrap (the ListBans reply -> (target, reason, source,
-/// until)).
-fn ban_rows(r: &CmdResult) -> Vec<(String, String, &'static str, i64)> {
+/// until)). The source element is the kernel enum — its wire words are
+/// rendered by the rpc adapter's word table, not here.
+fn ban_rows(r: &CmdResult) -> Vec<(String, String, BanSource, i64)> {
     match r {
         Ok(CommandReply::Bans(rows)) => rows
             .iter()
-            .map(|b| {
-                (
-                    b.target.clone(),
-                    b.reason.clone(),
-                    b.source.as_str(),
-                    b.until,
-                )
-            })
+            .map(|b| (b.target.clone(), b.reason.clone(), b.source, b.until))
             .collect(),
         other => panic!("expected Bans reply, got {other:?}"),
     }
@@ -68,7 +62,7 @@ async fn manual_ban_roundtrip_survives_restart() {
         (
             "10.66.0.0/24".to_string(),
             "manual".to_string(),
-            "manual",
+            BanSource::Manual,
             i64::MAX
         ),
         "permanent CIDR ban (until = i64::MAX, the RPC face renders \"0\")"

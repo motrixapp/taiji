@@ -17,7 +17,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::error::RpcError;
+use crate::aria2::error::RpcError;
 
 /// A parsed single call (params is the positional array).
 #[derive(Debug, Clone)]
@@ -118,7 +118,7 @@ fn invalid_request(id: Value) -> RpcResponse {
     // createJsonRpcErrorResponse.
     RpcResponse::error(
         &RpcError {
-            code: crate::error::CODE_INVALID_REQUEST,
+            code: crate::aria2::error::CODE_INVALID_REQUEST,
             message: "Invalid Request.".to_string(),
             unauthorized: false,
         },
@@ -129,7 +129,7 @@ fn invalid_request(id: Value) -> RpcResponse {
 fn invalid_params(id: Value) -> RpcResponse {
     RpcResponse::error(
         &RpcError {
-            code: crate::error::CODE_INVALID_PARAMS,
+            code: crate::aria2::error::CODE_INVALID_PARAMS,
             message: "Invalid params.".to_string(),
             unauthorized: false,
         },
@@ -142,7 +142,7 @@ fn invalid_params(id: Value) -> RpcResponse {
 pub fn parse_error_response() -> RpcResponse {
     RpcResponse::error(
         &RpcError {
-            code: crate::error::CODE_PARSE_ERROR,
+            code: crate::aria2::error::CODE_PARSE_ERROR,
             message: "Parse error.".to_string(),
             unauthorized: false,
         },
@@ -153,7 +153,7 @@ pub fn parse_error_response() -> RpcResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_PARSE_ERROR};
+    use crate::aria2::error::{CODE_INVALID_PARAMS, CODE_INVALID_REQUEST, CODE_PARSE_ERROR};
 
     #[test]
     fn parses_positional_request_and_echoes_id() {

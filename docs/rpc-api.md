@@ -146,9 +146,24 @@ This selection barrier survives restart; `unpauseAll` skips it and `unpause`
 rejects it until confirmation. Ordinary `pause-metadata` keeps its existing
 pause semantics when this additional option is absent.
 
-- `taiji.getTorrentMetadata(gid)` returns `{data, awaitingSelection}`. `data`
-  is the original verified `.torrent` envelope encoded as base64. Clients do not
-  need access to the engine's metadata directory.
+- `taiji.getTorrentManifest(gid)` returns `{data, awaitingSelection, manifest}`.
+  The retained `getTorrentMetadata` alias returns the same envelope. `data` is
+  base64 metainfo with the original raw info bytes. `manifest` contains
+  `infoHash`, nullable `v1`/`v2`, `name`, `multiFile`, `isPrivate`,
+  `verificationReady`, and `files` (`index`, path `components`, `length`,
+  `padding`). Indices use the engine's primary file view, including padding;
+  hybrid torrents use the v2 view. Original paths survive output renaming.
+  Pure v2 identity is the full 64-character SHA-256; v1/hybrid use SHA-1.
+  Native status and filtered status lists follow this identity convention;
+  the aria2 compatibility namespace retains its 20-byte wire identity.
+- Verified info is sufficient to display and persist a file-selection manifest.
+  `verificationReady=false` means some v2 piece-layer proofs remain missing;
+  clients must not treat the envelope as a complete exported torrent. After
+  confirmation, selected files recover and verify proofs before payload IO.
+  Recovered proofs are revalidated when enriching the returned artifact.
+  Metadata-only or save-metadata requests still wait for complete proofs.
+  Motrix stores the manifest in a checksum-bound sidecar and promotes a complete
+  artifact through a new immutable path before updating its task pointer.
 - `taiji.confirmTorrentSelection(gid, options)` accepts only `dir`,
   `select-file`, and `motrix-output-paths`. `dir` must be absolute;
   `select-file` is required and uses the non-padding, 1-based convention above.

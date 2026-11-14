@@ -90,10 +90,25 @@ backend queries and actual system activity; they do not expose hostnames.
 Motrix prepares enabled DHT discovery asynchronously after connecting to its
 matching taiji engine. File-list resolution has a separate four-task
 queue. The metadata connection budget respects `bt-max-peers` up to 128 attempts
-(128 when unlimited), including pending handshakes, with a 30/s dial rate and a
-24-attempt initial burst. Pending handshakes do not count as connected peers for
+(128 when unlimited), including pending handshakes, with a session-wide 30/s dial rate and a
+30-attempt initial burst. Pending handshakes do not count as connected peers for
 tracker requests. Across metadata tasks, at most 128 ordinary connection
 attempts and eight urgent hole-punch or relay attempts may run concurrently.
+
+The shared queue is bounded at 512 candidates. Tasks receive round-robin turns;
+foreground file-list requests receive four turns per background turn under
+contention. Only one ordinary admission per task waits at a time. Pressure can
+retire a handshake without progress after two seconds. Candidate ordering uses
+BEP40 with a salted endpoint tie-break instead of tracker response order.
+Metadata tracker announces share 32 slots and yield borrowed stalled slots when
+another task is waiting; private torrents keep one tracker attempt at a time.
+Verified private info disables public discovery and session tracker supplements.
+
+Metadata blocks start with one probe per supplier, then grow to a fair window
+of at most eight. Progress wakes other suppliers immediately; adaptive hedging
+has a bounded duplicate budget. BEP52 proofs use the piece-length-derived base
+layer and chunks of at most 512 hashes, with a 16 MiB aggregate retrieval budget.
+512 is a request chunk limit, not a limit on the number of pieces in a file.
 
 Verified metadata is reused in memory (128 entries / 16 MiB) and in the session
 database (1024 entries / 64 MiB, at most 16 MiB per entry). Cache records contain

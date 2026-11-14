@@ -124,9 +124,21 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
 `unpauseAll` 跳过它，`unpause` 在确认前拒绝启动。没有该附加选项时，普通
 `pause-metadata` 仍保持原有的暂停语义。
 
-- `taiji.getTorrentMetadata(gid)` 返回 `{data, awaitingSelection}`。
-  `data` 是经过验证的原始 `.torrent` 内容的 base64 编码，客户端无需访问
-  引擎的元数据目录。
+- `taiji.getTorrentManifest(gid)` 返回 `{data, awaitingSelection, manifest}`，
+  保留的 `getTorrentMetadata` 别名返回相同结构。`data` 是保留原始 info 字节的
+  base64 metainfo。`manifest` 包含 `infoHash`、可空的 `v1`/`v2`、`name`、
+  `multiFile`、`isPrivate`、`verificationReady`，以及 `files` 数组（`index`、
+  路径分量 `components`、`length`、`padding`）。索引对应引擎主文件视图，包含
+  填充项；混合种子使用 v2 视图。输出重命名不会改变这里的原始路径。
+  纯 v2 身份使用完整的 64 位十六进制 SHA-256，v1/混合种子使用 SHA-1。
+  原生状态与按字段过滤的状态列表遵循同一约定；aria2 兼容命名空间保留 20 字节
+  wire identity。
+- 通过验证的 info 即可显示并持久化文件选择列表。`verificationReady=false`
+  表示仍缺少部分 v2 piece-layer 证明，此时不能视为完整的可导出种子。
+  确认后只为选中文件恢复并验证证明，再允许下载数据。返回补全后的 artifact 时
+  会重新验证恢复的证明。仅获取元数据或保存元数据的请求仍等待完整证明。
+  Motrix 用校验和绑定 manifest sidecar，证明齐全后先写入新的不可变文件，
+  再更新任务引用，保证崩溃恢复时旧引用仍然有效。
 - `taiji.confirmTorrentSelection(gid, options)` 仅接受 `dir`、
   `select-file` 和 `motrix-output-paths`。`dir` 必须是绝对路径；
   `select-file` 必填，使用上述不计填充文件、从 1 开始的序号。

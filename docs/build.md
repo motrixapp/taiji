@@ -50,10 +50,22 @@ fixture; encryption and transport interoperability need their separate tests.
 Default fixtures use no public swarm or user client profile. No service is
 installed or started by the script.
 
-Scenarios include healthy discovery, 64 silent handshakes before a healthy peer,
+Scenarios include healthy discovery, 64 silent handshakes plus a healthy peer,
 24 silent HTTP trackers before a healthy tracker, and delayed metadata blocks.
 `--baseline` adds an earlier taiji binary. `--clients` selects references;
 `--scenarios` selects fixtures. Runs are interleaved using a recorded seed.
+`--scenarios v2-32k,v2-513 --clients taiji,baseline,libtorrent` also checks
+info-first file lists when no piece-layer proofs are offered. Export/recovery
+correctness is covered separately by the native integration tests.
+Candidate order defaults to a reproducible shuffle (`--peer-order seeded`);
+`first`, `middle`, and `last` provide explicit placement probes. Every row records
+the healthy positions and duplicate metadata bytes. Before a comparison,
+libtorrent must reach a healthy tracker behind 24 silent trackers on the wire.
+Both `announce_to_all_tiers` and `announce_to_all_trackers` are enabled because
+libtorrent 2.1.1's setting-name table swaps these boolean entries; a settings
+readback alone does not validate behavior. Magnet trackers occupy distinct tiers.
+Latency ends after the file manifest is retrieved and identity checked, before
+optional diagnostic RPC calls. The same deadline applies to all clients.
 Output retains all timeouts/errors, raw per-run counters, native stage timings,
 and success-only latency percentiles. A libtorrent session is a protocol-engine
 reference, not a measurement of qBittorrent's complete UI. Existing results are

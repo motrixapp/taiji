@@ -73,3 +73,17 @@ Transmission 的 RPC 不能在元数据到达前落实文件排除，因此不�
   平台的未签名归档并创建草稿发布；独立的 `sign-macos` 工作流负责两个 macOS
   二进制的签名与公证，通过后再公开发布。Windows 二进制未签名。
   详见[打包约定](../packaging/README.md)。
+
+### 磁链基准配置与判定
+
+候选默认使用可复现的乱序（`--peer-order seeded`），`first`、`middle`、`last`
+用于固定位置探测；每条结果保留有效候选位置和重复元数据字节数。比较前先进行
+真实网络预检：libtorrent 必须访问排在 24 个静默 tracker 后面的有效 tracker。
+同时启用 `announce_to_all_tiers` 和 `announce_to_all_trackers`，规避 libtorrent
+2.1.1 设置名称表中两个布尔项对调的问题；只读回设置无法验证实际行为。
+磁链中的 tracker 分属不同 tier。延迟统计到文件列表取回并校验身份为止，
+不包含随后可选的诊断 RPC。所有客户端使用相同截止时间，超时保留为失败，
+不纳入成功样本的延迟百分位数。
+
+`--scenarios v2-32k,v2-513 --clients taiji,baseline,libtorrent` 验证没有提供
+piece-layer 证明时的 info-first 文件列表；完整导出与证明恢复由原生集成测试覆盖。

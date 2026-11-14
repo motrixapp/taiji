@@ -247,8 +247,8 @@ fn registered_guard_before(
             inner: resolver.inner.clone(),
             host: host.into(),
             flight,
-            queued: true,
-            active: false,
+            queued_at: Some(Instant::now()),
+            started_at: None,
             finished: false,
             fallback: ResolveError::Cancelled,
             slot: Some(slot),
@@ -424,4 +424,76 @@ async fn panicking_worker_releases_registry_and_permits_for_retry() {
     assert_eq!(resolver.query("panic.test".into()).await, Ok(vec![ip(2)]));
     assert_eq!(metrics.dns().snapshot().system_started, 2);
     assert_eq!(metrics.dns().snapshot().system_active, 0);
+}
+
+#[tokio::test]
+async fn network_change_rejects_a_published_result_not_yet_consumed() {
+    let (lookup, _release) = GatedLookup::new(1);
+    let (resolver, _) = service(lookup.clone(), 1, 4);
+    let waiting = query(&resolver, "published.test");
+    until(|| lookup.calls.load(Ordering::SeqCst) == 1).await;
+    lookup.gate.release();
+    // Keep this current-thread runtime on the test task while the dedicated
+    // system thread publishes. The waiting task cannot consume its result yet.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !crate::lock(&resolver.inner.flights).is_empty() {
+        assert!(Instant::now() < deadline, "system lookup did not publish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    resolver.invalidate_all();
+    assert_eq!(
+        waiting.await.unwrap_or_else(|e| panic!("{e}")),
+        Ok(vec![ip(2)])
+    );
+    assert_eq!(lookup.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn closed_runtime_submission_releases_guards_without_locking_itself() {
+    let (done, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let (lookup, _release) = GatedLookup::new(0);
+        let (resolver, metrics) = service(lookup.clone(), 1, 1);
+        let shared = SharedDns::with_policy(
+            Arc::new(resolver.clone()),
+            metrics.clone(),
+            DnsPolicy {
+                max_in_flight: 1,
+                ..DnsPolicy::default()
+            },
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("runtime: {error}"));
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let entered = handle.enter();
+        // A stopped runtime may reject a timer as well as cancel a new task.
+        // Either result must leave the resolver usable, without a lock held
+        // by a synchronously dropped admission/query guard.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(resolver.query("closed.test".into()))
+        }));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(shared.resolve_for_transport("closed.test", 80))
+        }));
+        drop(entered);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(metrics.snapshot().dns.system_queued, 0);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("replacement runtime: {error}"));
+        let answer = runtime.block_on(shared.resolve_for_transport("closed.test", 80));
+        assert_eq!(answer.map(|values| values[0].ip()), Ok(ip(1)));
+        done.send(())
+            .unwrap_or_else(|error| panic!("completion: {error}"));
+    });
+    completed
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap_or_else(|error| panic!("closed-runtime cleanup did not finish: {error}"));
+    worker
+        .join()
+        .unwrap_or_else(|error| std::panic::resume_unwind(error));
 }

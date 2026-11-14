@@ -142,6 +142,16 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
 被预分配；当选中和未选文件共享同一个分块时，为完成哈希验证，仍可能需要
 下载选中文件以外的部分字节。
 
+## 网络上下文通知
+
+`taiji.notifyNetworkChange()` 不接收参数，返回 `"OK"`。这是仅在 taiji 原生
+命名空间提供、需要认证的写操作。宿主在检测到网络/DNS 配置变化或恢复后调用。
+该操作使正负 DNS 缓存失效、隔离旧世代结果，并让 tracker 刷新连接状态。
+现有 DNS 调用在原始期限内重试；正在运行的系统调用仍持有真实资源许可，直到
+实际结束。此操作不更改系统 DNS 设置，也不传入其他 DNS 服务器。
+`/metrics` 提供 `taiji_dns_network_changes_total`，并分别记录系统查询排队时间
+和实际解析时间，帮助区分本地资源等待与解析服务延迟。
+
 ## CLI 捷径面（`taiji http`）
 
 `taiji http <URL…> [-d dir] [-o name] [--checksum md5|sha-1|sha-224|sha-256|sha-384|sha-512=<hex>]`

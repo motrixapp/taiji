@@ -58,6 +58,31 @@ fn as_arr<'a>(v: &'a Value, ctx: &str) -> &'a Vec<Value> {
 }
 
 #[tokio::test]
+async fn network_change_is_native_authenticated_and_retires_resolution_context() {
+    let no_secret = state(None);
+    assert_ne!(
+        call(&no_secret, "taiji.notifyNetworkChange", vec![])
+            .await
+            .code,
+        0
+    );
+    let st = state(Some("network-test-secret"));
+    assert_ne!(call(&st, "taiji.notifyNetworkChange", vec![]).await.code, 0);
+    let before = st.session.metrics().snapshot().dns_network_changes_total;
+    let response = call_auth(&st, "taiji.notifyNetworkChange", vec![]).await;
+    assert_eq!(response.code, 0, "{:?}", response.payload);
+    assert_eq!(response.payload, json!("OK"));
+    assert!(st.session.metrics().snapshot().dns_network_changes_total > before);
+    let compat = state_compat(Some("network-test-secret"));
+    assert_ne!(
+        call_auth(&compat, "aria2.notifyNetworkChange", vec![])
+            .await
+            .code,
+        0
+    );
+}
+
+#[tokio::test]
 async fn get_version_has_enabled_features_and_prefixed_alias_works() {
     let st = state(None);
     // Canonical face (default): bare name (frozen registry) and `taiji.*` alias.
@@ -305,6 +330,7 @@ const PROMISED_TAIJI_EXTENSION_METHODS: &[&str] = &[
     // Multi-level file priority write face (the write gate applies).
     "taiji.setFilePriority",
     "taiji.setStreamingPlayhead",
+    "taiji.notifyNetworkChange",
     "taiji.getTorrentMetadata",
     "taiji.confirmTorrentSelection",
     "taiji.getHttpOutput",

@@ -297,6 +297,10 @@ impl SessionActor {
             C::GetServers { gid } => {
                 let _ = reply.send(self.get_servers(&gid).await);
             }
+            C::NotifyNetworkChange => {
+                taiji_io::dns::SharedDns::shared_default().network_changed();
+                let _ = reply.send(Ok(CommandReply::Accepted));
+            }
             C::GetTorrentMetadata { gid } => {
                 let result = self.get_torrent_metadata(&gid);
                 let _ = reply.send(result);

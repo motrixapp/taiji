@@ -898,6 +898,12 @@ pub(crate) fn render(
     // Work counters distinguish caller cache misses from actual OS queries.
     for (name, kind, help, value) in [
         (
+            "taiji_dns_network_changes_total",
+            "counter",
+            "Network notifications that retired DNS cache and pending query generations.",
+            snap.dns_network_changes_total,
+        ),
+        (
             "taiji_dns_backend_queries_total",
             "counter",
             "Logical backend DNS lookups started after request coalescing.",
@@ -942,7 +948,7 @@ pub(crate) fn render(
         (
             "taiji_dns_system_queued",
             "gauge",
-            "Distinct system lookups waiting for a physical resolver permit.",
+            "Physical system lookups awaiting admission or thread execution.",
             snap.dns_system_queued,
         ),
     ] {
@@ -964,6 +970,50 @@ pub(crate) fn render(
                 value: value.to_string(),
             },
         );
+    }
+
+    for (name, help, buckets, count, sum_us) in [
+        (
+            "taiji_dns_system_queue_seconds",
+            "Physical lookup admission and scheduling time, including cancelled queued work.",
+            &snap.dns_system_queue_seconds_buckets,
+            snap.dns_system_queue_seconds_count,
+            snap.dns_system_queue_seconds_sum_us,
+        ),
+        (
+            "taiji_dns_system_lookup_seconds",
+            "Actual system lookup duration until return or panic, including abandoned work.",
+            &snap.dns_system_lookup_seconds_buckets,
+            snap.dns_system_lookup_seconds_count,
+            snap.dns_system_lookup_seconds_sum_us,
+        ),
+    ] {
+        out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n"));
+        let bucket_name = format!("{name}_bucket");
+        let mut cumulative = 0;
+        for (index, bound) in DNS_RESOLVE_BUCKETS_SECONDS.iter().enumerate() {
+            cumulative += buckets.get(index).copied().unwrap_or(0);
+            write_sample(
+                &mut out,
+                Sample {
+                    name: &bucket_name,
+                    labels: &[("le", fmt_float(*bound))],
+                    value: cumulative.to_string(),
+                },
+            );
+        }
+        write_sample(
+            &mut out,
+            Sample {
+                name: &bucket_name,
+                labels: &[("le", "+Inf".into())],
+                value: count.to_string(),
+            },
+        );
+        out.push_str(&format!(
+            "{name}_sum {}\n{name}_count {count}\n",
+            fmt_float(sum_us as f64 / 1_000_000.0)
+        ));
     }
 
     // ---- HTTP transport families (the io shared layer via the core
@@ -1949,6 +1999,7 @@ mod tests {
     #[test]
     fn dns_family_projects_into_metrics() {
         let mut snap = MetricsSnapshot {
+            dns_network_changes_total: 7,
             dns_backend_queries_total: 1,
             dns_coalesced_total: 2,
             dns_negative_hits_total: 3,
@@ -1975,9 +2026,22 @@ mod tests {
         snap.dns_resolve_seconds_buckets[1] = 3;
         snap.dns_resolve_seconds_count = 5;
         snap.dns_resolve_seconds_sum_us = 1_500_000;
+        snap.dns_system_queue_seconds_buckets[3] = 2;
+        snap.dns_system_queue_seconds_count = 2;
+        snap.dns_system_queue_seconds_sum_us = 40_000;
+        snap.dns_system_lookup_seconds_buckets[4] = 1;
+        snap.dns_system_lookup_seconds_count = 1;
+        snap.dns_system_lookup_seconds_sum_us = 80_000;
 
         let out = render(&snap, &TorrentStateCounts::default(), "taiji/0.1.0", 0);
         let expect: &[&str] = &[
+            "taiji_dns_network_changes_total 7",
+            "taiji_dns_system_queue_seconds_bucket{le=\"0.05\"} 2",
+            "taiji_dns_system_queue_seconds_count 2",
+            "taiji_dns_system_queue_seconds_sum 0.04",
+            "taiji_dns_system_lookup_seconds_bucket{le=\"0.1\"} 1",
+            "taiji_dns_system_lookup_seconds_count 1",
+            "taiji_dns_system_lookup_seconds_sum 0.08",
             "taiji_dns_backend_queries_total 1",
             "taiji_dns_coalesced_total 2",
             "taiji_dns_negative_hits_total 3",
@@ -2649,6 +2713,7 @@ mod tests {
             // with the method face).
             "taiji_rpc_requests_total{method=\"taiji.setFilePriority\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.setStreamingPlayhead\"} 0",
+            "taiji_rpc_requests_total{method=\"taiji.notifyNetworkChange\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.getTorrentMetadata\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.confirmTorrentSelection\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.getHttpOutput\"} 0",

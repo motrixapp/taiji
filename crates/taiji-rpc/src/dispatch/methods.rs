@@ -663,6 +663,7 @@ pub(crate) async fn execute_session_method(
                     pos,
                 })
             }
+            "taiji.notifyNetworkChange" => Ok(SessionCommand::NotifyNetworkChange),
             "taiji.getTorrentMetadata" => Ok(SessionCommand::GetTorrentMetadata { gid: gid_param(&params, 0)? }),
             "taiji.confirmTorrentSelection" => Ok(SessionCommand::ConfirmTorrentSelection { gid: gid_param(&params, 0)?, options: opt_options(&params, 1)? }),
             "taiji.getHttpOutput" => Ok(SessionCommand::GetHttpOutput { gid: gid_param(&params, 0)? }),

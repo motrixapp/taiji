@@ -101,12 +101,14 @@ impl Dialer {
         token: &CancellationToken,
     ) -> Option<(Stream, Handshake, Transport)> {
         // Bound process-wide half-open pressure independently of live peers.
+        // Match one task's 128-attempt metadata budget: a lower shared limit
+        // would serialize healthy candidates behind silent handshake timeouts.
         static DIALS: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
         static URGENT: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
         let permits = if urgent {
             URGENT.get_or_init(|| Arc::new(Semaphore::new(8)))
         } else {
-            DIALS.get_or_init(|| Arc::new(Semaphore::new(64)))
+            DIALS.get_or_init(|| Arc::new(Semaphore::new(128)))
         };
         let _permit = tokio::select! { _ = token.cancelled() => return None, permit = permits.acquire() => permit.ok()? };
         let run = async {

@@ -519,7 +519,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=float, default=0, help="Idle preparation time excluded from resolution latency")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    allowed = {"public-trackers", "public-dht"} if args.torrent else {"healthy", "dead-peers", "dead-trackers", "slow-blocks"}
+    allowed = {"public-trackers", "public-dht"} if args.torrent else {"healthy", "dead-peers", "dead-trackers", "slow-blocks", "v2-32k", "v2-513"}
     if not set(args.scenarios.split(",")).issubset(allowed) or args.samples < 1 or args.timeout <= 0 or args.warmup < 0:
         parser.error("invalid scenarios, sample count or time budgets")
     asyncio.run(main(args))

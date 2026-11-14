@@ -25,6 +25,9 @@
 //! - winpath: Windows long-path verbatim conversion — a uniform wrapper
 //!   applied at each crate's fs choke point just before a path is handed
 //!   to the OS (zero-cost identity off Windows).
+//! - fsmove: storage-migration primitives for `taiji.moveStorage` —
+//!   same-volume atomic rename, EXDEV copy fallback, crash safety by
+//!   idempotent redo (the source is never destroyed before the commit).
 //!
 //! Status: udp_demux, mse, utp, nat, dns implemented; the remaining
 //! faces are scaffolding. Hard constraints: SPEC §2 (unsafe banned
@@ -35,6 +38,12 @@
 pub mod block_arena;
 
 pub mod dns;
+
+// Storage-migration primitives for taiji.moveStorage — same-volume
+// rename / EXDEV copy fallback with crash safety by idempotent redo
+// (taiji-io is the lowest common reachable layer for the http/bt/core
+// consumers; rationale in the module docs).
+pub mod fsmove;
 
 // `BH_*` env-knob central registry (the single read face shared by all
 // downstream public consumers; registry and read-timing classes in the

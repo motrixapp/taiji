@@ -92,7 +92,8 @@ matching taiji engine. File-list resolution has a separate four-task
 queue. The metadata connection budget respects `bt-max-peers` up to 128 attempts
 (128 when unlimited), including pending handshakes, with a 30/s dial rate and a
 24-attempt initial burst. Pending handshakes do not count as connected peers for
-tracker requests.
+tracker requests. Across metadata tasks, at most 128 ordinary connection
+attempts and eight urgent hole-punch or relay attempts may run concurrently.
 
 Verified metadata is reused in memory (128 entries / 16 MiB) and in the session
 database (1024 entries / 64 MiB, at most 16 MiB per entry). Cache records contain

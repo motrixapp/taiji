@@ -56,6 +56,26 @@ verdict):
 python3 scripts/http_5gb_resume_demo.py   # run against the ≥5GiB criterion
 ```
 
+## DNS and Tracker Address Recovery
+
+HTTP, FTP, trackers and DHT bootstrap share system DNS resolution and a bounded
+cache. Same-host concurrent requests share one lookup. Successful answers are
+cached for 5 minutes, failures for 2 seconds and timeouts for 1 second; a
+cancelled request or local capacity limit is not cached as a hostname failure.
+The resolver retains the operating system's hosts-file and VPN DNS settings.
+
+UDP trackers try alternate addresses when an endpoint is unreachable. Only a
+successful CONNECT endpoint receives ANNOUNCE, and changing addresses does not
+extend the attempt's total timeout. DNS/endpoint recovery helps discovery but
+cannot produce metadata when no reachable peer has it.
+IPv6 availability checks run in the background so an unresponsive IPv6 route
+does not hold up IPv4 tracker requests or cancellation.
+
+A timed-out system lookup may continue in the OS. taiji bounds these calls to
+32 active and 256 active/queued hosts, and isolates them from other blocking
+I/O. The `/metrics` DNS counters distinguish cache hits, coalesced callers,
+backend queries and actual system activity; they do not expose hostnames.
+
 ## Download and Seeding
 
 ```sh

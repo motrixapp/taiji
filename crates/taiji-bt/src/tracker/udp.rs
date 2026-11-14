@@ -83,6 +83,8 @@ pub enum UdpError {
 #[derive(Debug, Clone)]
 pub struct UdpRequest {
     pub remote: SocketAddr,
+    /// Local operation identity; never serialized into BEP15 packets.
+    pub owner: u64,
     pub action: UdpAction,
     /// Batch of info_hashes for SCRAPE; exactly one for ANNOUNCE.
     pub info_hashes: Vec<[u8; 20]>,
@@ -116,6 +118,7 @@ impl UdpRequest {
     pub fn announce(remote: SocketAddr, info_hash: [u8; 20], key: u32) -> Self {
         UdpRequest {
             remote,
+            owner: 0,
             action: UdpAction::Announce,
             info_hashes: vec![info_hash],
             peer_id: [0; PEER_ID_LEN],
@@ -144,6 +147,16 @@ impl UdpRequest {
             action: UdpAction::Scrape,
             info_hashes,
             ..UdpRequest::announce(remote, [0; 20], 0)
+        }
+    }
+
+    /// An explicit CONNECT probe. Unlike an automatic CONNECT, it has no
+    /// queued announce and lets the owner pick one winning address first.
+    pub fn connect(remote: SocketAddr, owner: u64) -> Self {
+        Self {
+            action: UdpAction::Connect,
+            owner,
+            ..Self::announce(remote, [0; 20], 0)
         }
     }
 
@@ -196,14 +209,17 @@ pub struct UdpScrapeEntry {
 #[derive(Debug, Clone)]
 pub enum UdpReply {
     /// CONNECT completed (the connection id is cached).
-    Connected,
+    Connected(Box<UdpRequest>),
     /// ANNOUNCE completed (the request carries the reply).
     Announce(Box<UdpRequest>),
     /// SCRAPE completed (the request carries the reply; BEP15 extension,
     /// see the module header).
     Scrape(Box<UdpRequest>),
     /// ERROR reply (message text).
-    Error { message: String },
+    Error {
+        request: Box<UdpRequest>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -247,6 +263,7 @@ pub struct UdpTrackerClient {
     /// announce/scrape requests waiting for a connection id (aria2
     /// `connectRequests_`).
     connect_waiting: VecDeque<UdpRequest>,
+    failed: VecDeque<UdpRequest>,
 }
 
 impl UdpTrackerClient {
@@ -361,8 +378,8 @@ impl UdpTrackerClient {
     }
 
     /// `requestSent`: the front of pending was sent -> move it to
-    /// inflight and stamp dispatched; sending CONNECT resets the
-    /// connection cache to CONNECTING.
+    /// inflight and stamp dispatched. A concurrent CONNECT must not
+    /// overwrite an already established connection ID.
     pub fn request_sent(&mut self, now: Instant) {
         let Some(mut req) = self.pending.pop_front() else {
             return;
@@ -370,9 +387,25 @@ impl UdpTrackerClient {
         req.dispatched = Some(now);
         if req.action == UdpAction::Connect {
             self.connection_id_cache
-                .insert((req.remote.ip(), req.remote.port()), Connection::default());
+                .entry((req.remote.ip(), req.remote.port()))
+                .or_default();
         }
         self.inflight.push_back(req);
+    }
+
+    /// Most recent actual CONNECT send for this operation and endpoint.
+    /// A retransmit can be queued while the carrier is full, so inspect both
+    /// queues; `dispatched` remains unset until `request_sent` succeeds.
+    pub(crate) fn connect_sent_at(&self, owner: u64, remote: SocketAddr) -> Option<Instant> {
+        self.inflight
+            .iter()
+            .chain(self.pending.iter())
+            .find(|request| {
+                request.owner == owner
+                    && request.remote == remote
+                    && request.action == UdpAction::Connect
+            })
+            .and_then(|request| request.dispatched)
     }
 
     /// `requestFail`: the send of the front request itself failed (e.g.
@@ -385,6 +418,7 @@ impl UdpTrackerClient {
             self.fail_connect(req.remote, error);
         }
         req.done = Some(error);
+        self.failed.push_back(req);
     }
 
     /// `handleTimeout`: failCount==0 and >= 5s -> resend once (back to
@@ -392,6 +426,10 @@ impl UdpTrackerClient {
     /// timeout (CONNECT additionally fails same-host waiters via
     /// failConnect). Returns the requests completed as timed out.
     pub fn handle_timeout(&mut self, now: Instant) -> Vec<UdpRequest> {
+        self.connection_id_cache.retain(|_, c| {
+            c.last_updated
+                .is_none_or(|at| now.saturating_duration_since(at) <= CONNECTION_ID_TTL)
+        });
         let mut resend = Vec::new();
         let mut timed_out = Vec::new();
         let mut keep = VecDeque::new();
@@ -411,9 +449,6 @@ impl UdpTrackerClient {
             } else if elapsed >= TIMEOUT_DELAY {
                 req.fail_count += 1;
                 req.done = Some(UdpError::Timeout);
-                if req.action == UdpAction::Connect {
-                    self.fail_connect(req.remote, UdpError::Timeout);
-                }
                 timed_out.push(req);
             } else {
                 keep.push_back(req);
@@ -426,6 +461,12 @@ impl UdpTrackerClient {
         for req in resend.into_iter().rev() {
             self.pending.push_front(req);
         }
+        for req in &timed_out {
+            if req.action == UdpAction::Connect {
+                self.fail_connect(req.remote, UdpError::Timeout);
+            }
+        }
+        timed_out.extend(self.take_failures());
         timed_out
     }
 
@@ -452,6 +493,18 @@ impl UdpTrackerClient {
                 "unknown udp tracker action {action}"
             )));
         };
+        // A matching transaction is only consumed after the complete reply
+        // has been validated, including its action and carrier-family shape.
+        let Some(expected) = self
+            .inflight
+            .iter()
+            .find(|req| req.remote == from && req.transaction_id == Some(transaction_id))
+        else {
+            return Ok(None);
+        };
+        if action != UdpAction::Error && action != expected.action {
+            return Ok(None);
+        }
         match action {
             UdpAction::Connect => {
                 // Exactly 16 bytes.
@@ -464,7 +517,6 @@ impl UdpTrackerClient {
                 let Some(req) = self.remove_inflight(from, transaction_id) else {
                     return Ok(None);
                 };
-                let _ = req;
                 let connection_id = u64::from_be_bytes([
                     data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
                 ]);
@@ -492,7 +544,7 @@ impl UdpTrackerClient {
                 for w in waiting {
                     self.pending.push_front(w);
                 }
-                Ok(Some(UdpReply::Connected))
+                Ok(Some(UdpReply::Connected(Box::new(req))))
             }
             UdpAction::Announce => {
                 // At least 20 bytes.
@@ -502,9 +554,6 @@ impl UdpTrackerClient {
                         data.len()
                     )));
                 }
-                let Some(mut req) = self.remove_inflight(from, transaction_id) else {
-                    return Ok(None);
-                };
                 let interval = i32::from_be_bytes([data[8], data[9], data[10], data[11]]);
                 let leechers = i32::from_be_bytes([data[12], data[13], data[14], data[15]]);
                 let seeders = i32::from_be_bytes([data[16], data[17], data[18], data[19]]);
@@ -533,8 +582,12 @@ impl UdpTrackerClient {
                         });
                     }
                 } else {
-                    // v4 carrier: 6B stride (unpackcompact AF_INET;
-                    // unchanged).
+                    if !body.len().is_multiple_of(6) {
+                        return Err(TrackerError::Malformed(format!(
+                            "ipv4 carrier announce peers length {} not multiple of 6",
+                            body.len()
+                        )));
+                    }
                     for chunk in body.as_chunks::<6>().0 {
                         peers.push(PeerAddr {
                             ip: std::net::Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
@@ -542,6 +595,9 @@ impl UdpTrackerClient {
                         });
                     }
                 }
+                let Some(mut req) = self.remove_inflight(from, transaction_id) else {
+                    return Ok(None);
+                };
                 req.reply = Some(UdpAnnounceReply {
                     transaction_id,
                     interval,
@@ -555,19 +611,17 @@ impl UdpTrackerClient {
             UdpAction::Scrape => {
                 // BEP15 extension (absent upstream): 8B header + 12B per
                 // hash.
-                let Some(mut req) = self.remove_inflight(from, transaction_id) else {
-                    return Ok(None);
-                };
+                let hashes = expected.info_hashes.clone();
                 let body = &data[8..];
-                if body.len() < req.info_hashes.len() * 12 {
+                if body.len() != hashes.len() * 12 {
                     return Err(TrackerError::Malformed(format!(
-                        "scrape reply length {} < {} entries*12",
+                        "scrape reply length {} != {} entries*12",
                         body.len(),
-                        req.info_hashes.len()
+                        hashes.len()
                     )));
                 }
-                let mut entries = Vec::with_capacity(req.info_hashes.len());
-                for (i, hash) in req.info_hashes.iter().enumerate() {
+                let mut entries = Vec::with_capacity(hashes.len());
+                for (i, hash) in hashes.iter().enumerate() {
                     let e = &body[i * 12..(i + 1) * 12];
                     entries.push(UdpScrapeEntry {
                         info_hash: *hash,
@@ -576,21 +630,28 @@ impl UdpTrackerClient {
                         leechers: i32::from_be_bytes([e[8], e[9], e[10], e[11]]),
                     });
                 }
+                let Some(mut req) = self.remove_inflight(from, transaction_id) else {
+                    return Ok(None);
+                };
                 req.scrape_reply = Some(entries);
                 Ok(Some(UdpReply::Scrape(Box::new(req))))
             }
             UdpAction::Error => {
                 // At least 8 bytes; the message is the remaining bytes.
-                let Some(req) = self.remove_inflight(from, transaction_id) else {
+                let Some(mut req) = self.remove_inflight(from, transaction_id) else {
                     return Ok(None);
                 };
+                req.done = Some(UdpError::Tracker);
                 let message = String::from_utf8_lossy(&data[8..]).into_owned();
                 if req.action == UdpAction::Connect {
                     // CONNECT ERROR -> same-host waiting requests fail
                     // with it.
                     self.fail_connect(from, UdpError::Tracker);
                 }
-                Ok(Some(UdpReply::Error { message }))
+                Ok(Some(UdpReply::Error {
+                    request: Box::new(req),
+                    message,
+                }))
             }
         }
     }
@@ -599,12 +660,25 @@ impl UdpTrackerClient {
     /// clear the connection cache and fail same-host waiting requests
     /// (announce/scrape only).
     pub fn fail_connect(&mut self, remote: SocketAddr, error: UdpError) {
+        if self
+            .pending
+            .iter()
+            .chain(self.inflight.iter())
+            .any(|r| r.remote == remote && r.action == UdpAction::Connect)
+            || self
+                .connection_id_cache
+                .get(&(remote.ip(), remote.port()))
+                .is_some_and(|c| matches!(c.state, ConnectionState::Connected))
+        {
+            return;
+        }
         self.connection_id_cache
             .remove(&(remote.ip(), remote.port()));
         let mut keep = VecDeque::new();
         while let Some(mut w) = self.connect_waiting.pop_front() {
             if w.remote == remote && w.action != UdpAction::Connect {
                 w.done = Some(error);
+                self.failed.push_back(w);
             } else {
                 keep.push_back(w);
             }
@@ -614,6 +688,7 @@ impl UdpTrackerClient {
         while let Some(mut w) = self.pending.pop_front() {
             if w.remote == remote && w.action != UdpAction::Connect {
                 w.done = Some(error);
+                self.failed.push_back(w);
             } else {
                 keep.push_back(w);
             }
@@ -621,17 +696,123 @@ impl UdpTrackerClient {
         self.pending = keep;
     }
 
-    /// `failAll`: fail everything on shutdown.
+    /// Settle every operation on shutdown; completions are drained once with
+    /// `take_failures`, and no queued packet may be emitted afterwards.
     pub fn fail_all(&mut self, error: UdpError) {
-        for req in self.inflight.iter_mut() {
+        for mut req in self
+            .inflight
+            .drain(..)
+            .chain(self.pending.drain(..))
+            .chain(self.connect_waiting.drain(..))
+        {
             req.done = Some(error);
+            self.failed.push_back(req);
         }
-        for req in self.pending.iter_mut() {
-            req.done = Some(error);
+        self.connection_id_cache.clear();
+    }
+
+    /// Drain failed logical operations, including those whose shared CONNECT failed.
+    pub fn take_failures(&mut self) -> Vec<UdpRequest> {
+        self.failed.drain(..).collect()
+    }
+
+    /// True when this endpoint has a current connection ID. Identity is IP + port.
+    pub fn connected(&mut self, remote: SocketAddr, now: Instant) -> bool {
+        self.get_connection((remote.ip(), remote.port()), now)
+            .is_some_and(|c| matches!(c.state, ConnectionState::Connected))
+    }
+
+    /// Cancel only this local owner. A shared automatic CONNECT survives while
+    /// another owner is still waiting for it; completed IDs are reusable.
+    pub fn cancel_owner(&mut self, owner: u64) {
+        self.preserve_shared_connect(owner, None);
+        self.pending.retain(|r| r.owner != owner);
+        self.inflight.retain(|r| r.owner != owner);
+        self.connect_waiting.retain(|r| r.owner != owner);
+        self.failed.retain(|r| r.owner != owner);
+        let used: std::collections::HashSet<_> = self
+            .pending
+            .iter()
+            .chain(self.inflight.iter())
+            .chain(self.connect_waiting.iter())
+            .filter(|r| r.action != UdpAction::Connect || r.owner != 0)
+            .map(|r| r.remote)
+            .collect();
+        self.pending
+            .retain(|r| r.action != UdpAction::Connect || r.owner != 0 || used.contains(&r.remote));
+        self.inflight
+            .retain(|r| r.action != UdpAction::Connect || r.owner != 0 || used.contains(&r.remote));
+        self.connection_id_cache.retain(|(ip, port), c| {
+            matches!(c.state, ConnectionState::Connected)
+                || used.contains(&SocketAddr::new(*ip, *port))
+        });
+    }
+
+    /// Cancel one address probe without disturbing the owner's other candidate.
+    pub fn cancel_owner_at(&mut self, owner: u64, remote: SocketAddr) {
+        self.preserve_shared_connect(owner, Some(remote));
+        self.pending
+            .retain(|r| r.owner != owner || r.remote != remote);
+        self.inflight
+            .retain(|r| r.owner != owner || r.remote != remote);
+        self.connect_waiting
+            .retain(|r| r.owner != owner || r.remote != remote);
+        self.failed
+            .retain(|r| r.owner != owner || r.remote != remote);
+        let still_connecting = self
+            .pending
+            .iter()
+            .chain(self.inflight.iter())
+            .any(|r| r.remote == remote && r.action == UdpAction::Connect);
+        if !still_connecting
+            && self
+                .connection_id_cache
+                .get(&(remote.ip(), remote.port()))
+                .is_some_and(|c| matches!(c.state, ConnectionState::Connecting))
+        {
+            self.connection_id_cache
+                .remove(&(remote.ip(), remote.port()));
         }
-        for req in self.connect_waiting.iter_mut() {
-            req.done = Some(error);
+    }
+
+    // An explicit probe can become the connection source for another owner's
+    // queued scrape. Transfer that physical CONNECT to the automatic owner so
+    // cancelling the probe does not strand unrelated waiting operations.
+    fn preserve_shared_connect(&mut self, owner: u64, remote: Option<SocketAddr>) {
+        if owner == 0 {
+            return;
         }
+        let shared: std::collections::HashSet<_> = self
+            .pending
+            .iter()
+            .chain(self.inflight.iter())
+            .chain(self.connect_waiting.iter())
+            .filter(|r| r.owner != owner && r.action != UdpAction::Connect)
+            .map(|r| r.remote)
+            .collect();
+        for request in self.pending.iter_mut().chain(self.inflight.iter_mut()) {
+            if request.owner == owner
+                && request.action == UdpAction::Connect
+                && remote.is_none_or(|addr| request.remote == addr)
+                && shared.contains(&request.remote)
+            {
+                request.owner = 0;
+            }
+        }
+    }
+
+    /// Reconfiguration invalidates every previous queue and connection binding.
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.inflight.clear();
+        self.connect_waiting.clear();
+        self.failed.clear();
+        self.connection_id_cache.clear();
+    }
+
+    pub fn invalidate_connection(&mut self, remote: SocketAddr) {
+        self.connection_id_cache
+            .remove(&(remote.ip(), remote.port()));
     }
 
     /// `getConnectionId`: CONNECTED but older than 1min -> discard (drop
@@ -880,7 +1061,7 @@ mod tests {
         reply.extend_from_slice(&conn_id.to_be_bytes());
         assert!(matches!(
             expect_reply(&mut c, tracker, &reply, t(base, 1)),
-            Some(UdpReply::Connected)
+            Some(UdpReply::Connected(_))
         ));
         // Second frame = ANNOUNCE (carrying the connection id).
         let now1 = t(base, 2);
@@ -939,7 +1120,7 @@ mod tests {
         cr.extend_from_slice(&0xdead_c0de_dead_c0deu64.to_be_bytes());
         assert!(matches!(
             expect_reply(&mut c, tracker, &cr, t(base, 1)),
-            Some(UdpReply::Connected)
+            Some(UdpReply::Connected(_))
         ));
         // The earlier-queued announce emits its frame first (pending
         // FIFO).
@@ -1014,13 +1195,14 @@ mod tests {
         let tracker = addr(1337);
         c.add_request(UdpRequest::announce(tracker, [7; 20], 42));
         let base = Instant::now();
-        let _ = expect_frame(&mut c, &mut rng, base);
+        let (_, frame) = expect_frame(&mut c, &mut rng, base);
         c.request_sent(base);
-        // Bad length (connect reply not 16B).
-        assert!(
-            c.receive_reply(tracker, &[0, 0, 0, 0, 1, 2, 3, 4, 5], t(base, 1))
-                .is_err()
-        );
+        // Bad length for the current transaction cannot consume it.
+        let mut malformed = vec![0; 4];
+        malformed.extend_from_slice(&front_tid(&frame).to_be_bytes());
+        malformed.push(5);
+        assert!(c.receive_reply(tracker, &malformed, t(base, 1)).is_err());
+        assert_eq!(c.inflight.len(), 1);
         // Unknown action.
         assert!(
             c.receive_reply(tracker, &[9, 9, 9, 9, 0, 0, 0, 0], t(base, 1))
@@ -1076,7 +1258,7 @@ mod tests {
         cr.extend_from_slice(&1u64.to_be_bytes());
         assert!(matches!(
             expect_reply(&mut c, tracker, &cr, t(t0, 1)),
-            Some(UdpReply::Connected)
+            Some(UdpReply::Connected(_))
         ));
         // Second frame = ANNOUNCE.
         let (_, af) = expect_frame(&mut c, &mut rng, t(t0, 1));
@@ -1169,8 +1351,15 @@ mod tests {
         assert_eq!(c.connect_waiting.len(), 1);
         // 10s after the resend -> CONNECT times out -> contagion.
         let timed_out = c.handle_timeout(t(t0, 15));
-        assert_eq!(timed_out.len(), 1, "connect timeout");
+        assert_eq!(
+            timed_out.len(),
+            2,
+            "CONNECT and its logical announce settle"
+        );
         assert_eq!(timed_out[0].action, UdpAction::Connect);
+        assert_eq!(timed_out[1].action, UdpAction::Announce);
+        assert_eq!(timed_out[1].failure(), Some(UdpError::Timeout));
+        assert!(c.take_failures().is_empty(), "completion is delivered once");
         assert!(
             c.connect_waiting.is_empty(),
             "waiting requests are cleared by the contagion"
@@ -1193,7 +1382,7 @@ mod tests {
         er.extend_from_slice(&front_tid(&cf).to_be_bytes());
         er.extend_from_slice(b"no connect");
         match expect_reply(&mut c, tracker, &er, t(t0, 1)) {
-            Some(UdpReply::Error { message }) => assert_eq!(message, "no connect"),
+            Some(UdpReply::Error { message, .. }) => assert_eq!(message, "no connect"),
             other => panic!("want error reply, got {other:?}"),
         }
         // The waiting announce is cleared by the contagion.
@@ -1219,7 +1408,7 @@ mod tests {
         cr.extend_from_slice(&0xaabb_ccdd_eeff_0011u64.to_be_bytes());
         assert!(matches!(
             expect_reply(&mut c, tracker, &cr, t(base, 1)),
-            Some(UdpReply::Connected)
+            Some(UdpReply::Connected(_))
         ));
         // Within 30s: ANNOUNCE directly.
         let (to, af) = expect_frame(&mut c, &mut rng, t(base, 30));
@@ -1267,7 +1456,7 @@ mod tests {
         cr.extend_from_slice(&1u64.to_be_bytes());
         assert!(matches!(
             expect_reply(&mut c, tracker, &cr, t(base, 1)),
-            Some(UdpReply::Connected)
+            Some(UdpReply::Connected(_))
         ));
         let (_, af) = expect_frame(&mut c, &mut rng, t(base, 2));
         c.request_sent(t(base, 2));
@@ -1376,6 +1565,227 @@ mod tests {
                 );
             }
             other => panic!("expected announce reply, got {other:?}"),
+        }
+    }
+    fn response(action: UdpAction, tid: u32, body: &[u8]) -> Vec<u8> {
+        let mut data = (action as i32).to_be_bytes().to_vec();
+        data.extend_from_slice(&tid.to_be_bytes());
+        data.extend_from_slice(body);
+        data
+    }
+
+    #[test]
+    fn malformed_and_mismatched_packets_preserve_owned_transactions() {
+        for remote in [
+            addr(1337),
+            "[::1]:1337".parse().unwrap_or_else(|e| panic!("v6: {e:?}")),
+        ] {
+            for action in [UdpAction::Announce, UdpAction::Scrape] {
+                let now = Instant::now();
+                let mut rng = XorShift(617);
+                let mut client = UdpTrackerClient::new();
+                let mut request = if action == UdpAction::Announce {
+                    UdpRequest::announce(remote, [4; 20], 3)
+                } else {
+                    UdpRequest::scrape(remote, vec![[4; 20]])
+                };
+                request.owner = 77;
+                client.add_request(request);
+                let (_, connect) = expect_frame(&mut client, &mut rng, now);
+                client.request_sent(now);
+                let reply = response(UdpAction::Connect, front_tid(&connect), &9u64.to_be_bytes());
+                assert!(matches!(
+                    expect_reply(&mut client, remote, &reply, now),
+                    Some(UdpReply::Connected(_))
+                ));
+                let (_, request) = expect_frame(&mut client, &mut rng, now);
+                let tid = front_tid(&request);
+                client.request_sent(now);
+                let wrong_action = response(UdpAction::Connect, tid, &8u64.to_be_bytes());
+                assert!(expect_reply(&mut client, remote, &wrong_action, now).is_none());
+                let valid = response(action, tid, &[0; 12]);
+                let mut other_remote = remote;
+                other_remote.set_port(1338);
+                assert!(expect_reply(&mut client, other_remote, &valid, now).is_none());
+                assert!(
+                    expect_reply(
+                        &mut client,
+                        remote,
+                        &response(action, tid.wrapping_add(1), &[0; 12]),
+                        now
+                    )
+                    .is_none()
+                );
+                for body in [&[0u8; 1][..], &[0u8; 13][..]] {
+                    assert!(
+                        client
+                            .receive_reply(remote, &response(action, tid, body), now)
+                            .is_err()
+                    );
+                    assert_eq!(client.inflight.len(), 1);
+                }
+                match expect_reply(&mut client, remote, &valid, now) {
+                    Some(UdpReply::Announce(r) | UdpReply::Scrape(r)) => assert_eq!(r.owner, 77),
+                    other => panic!("valid reply was consumed by an earlier packet: {other:?}"),
+                }
+                assert!(client.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn cancelling_shared_connect_preserves_other_owner_and_port() {
+        let now = Instant::now();
+        let mut rng = XorShift(993);
+        let remote = addr(1337);
+        let mut client = UdpTrackerClient::new();
+        for owner in [1, 2] {
+            let mut request = UdpRequest::scrape(remote, vec![[owner as u8; 20]]);
+            request.owner = owner;
+            client.add_request(request);
+        }
+        let (_, connect) = expect_frame(&mut client, &mut rng, now);
+        client.request_sent(now);
+        assert!(client.create_request(&mut rng, now).is_none());
+        client.cancel_owner(1);
+        assert_eq!(client.inflight.len(), 1, "shared CONNECT survives");
+        assert_eq!(client.connect_waiting.len(), 1);
+        let reply = response(UdpAction::Connect, front_tid(&connect), &9u64.to_be_bytes());
+        expect_reply(&mut client, remote, &reply, now);
+        let (_, scrape) = expect_frame(&mut client, &mut rng, now);
+        client.request_sent(now);
+        match expect_reply(
+            &mut client,
+            remote,
+            &response(UdpAction::Scrape, front_tid(&scrape), &[0; 12]),
+            now,
+        ) {
+            Some(UdpReply::Scrape(r)) => assert_eq!(r.owner, 2),
+            other => panic!("surviving scrape: {other:?}"),
+        }
+        assert!(client.connected(remote, now));
+        assert!(
+            !client.connected(addr(1338), now),
+            "same host ports do not share IDs"
+        );
+    }
+
+    #[test]
+    fn connect_timeout_settles_all_waiters_and_pending_once() {
+        let now = Instant::now();
+        let remote = addr(1337);
+        let mut rng = XorShift(41);
+        let mut client = UdpTrackerClient::new();
+        let mut announce = UdpRequest::announce(remote, [7; 20], 1);
+        announce.owner = 11;
+        client.add_request(announce);
+        expect_frame(&mut client, &mut rng, now);
+        client.request_sent(now);
+        assert!(client.create_request(&mut rng, now).is_none());
+        assert!(client.handle_timeout(t(now, 5)).is_empty());
+        expect_frame(&mut client, &mut rng, t(now, 5));
+        client.request_sent(t(now, 5));
+        let mut scrape = UdpRequest::scrape(remote, vec![[7; 20]]);
+        scrape.owner = 12;
+        client.add_request(scrape); // deliberately still pending when CONNECT fails
+        let failures = client.handle_timeout(t(now, 15));
+        assert_eq!(failures.len(), 3);
+        let mut owners: Vec<_> = failures
+            .iter()
+            .filter(|r| r.action != UdpAction::Connect)
+            .map(|r| r.owner)
+            .collect();
+        owners.sort_unstable();
+        assert_eq!(owners, [11, 12]);
+        assert!(
+            failures
+                .iter()
+                .all(|r| r.failure() == Some(UdpError::Timeout))
+        );
+        assert!(client.handle_timeout(t(now, 16)).is_empty());
+        assert!(client.is_empty());
+    }
+
+    #[test]
+    fn preparing_unsent_frame_does_not_start_network_timer_or_change_tid() {
+        let now = Instant::now();
+        let mut rng = XorShift(74);
+        let mut client = UdpTrackerClient::new();
+        client.add_request(UdpRequest::connect(addr(1337), 22));
+        let first = expect_frame(&mut client, &mut rng, now);
+        assert!(client.handle_timeout(t(now, 60)).is_empty());
+        let next = expect_frame(&mut client, &mut rng, t(now, 60));
+        assert_eq!(first, next);
+        assert_eq!(
+            client
+                .pending
+                .front()
+                .unwrap_or_else(|| panic!("pending request"))
+                .fail_count,
+            0
+        );
+        client.cancel_owner(22);
+        assert!(client.is_empty());
+        assert!(!client.connected(addr(1337), now));
+    }
+    #[test]
+    fn shutdown_settles_sent_waiting_and_pending_requests_once() {
+        let now = Instant::now();
+        let mut client = UdpTrackerClient::new();
+        let mut rng = XorShift(57);
+        client.add_request(UdpRequest::announce(addr(1337), [1; 20], 1));
+        expect_frame(&mut client, &mut rng, now);
+        client.request_sent(now);
+        assert!(client.create_request(&mut rng, now).is_none());
+        client.add_request(UdpRequest::scrape(addr(1338), vec![[1; 20]]));
+        client.fail_all(UdpError::Shutdown);
+        assert!(client.is_empty());
+        assert!(client.create_request(&mut rng, now).is_none());
+        let failures = client.take_failures();
+        assert_eq!(failures.len(), 3);
+        assert!(
+            failures
+                .iter()
+                .all(|r| r.failure() == Some(UdpError::Shutdown))
+        );
+        assert!(client.take_failures().is_empty());
+        assert!(!client.connected(addr(1337), now));
+    }
+    #[test]
+    fn cancelling_explicit_probe_keeps_shared_scrape_connected() {
+        for cancel_address in [false, true] {
+            let now = Instant::now();
+            let remote = addr(1337);
+            let mut rng = XorShift(44);
+            let mut client = UdpTrackerClient::new();
+            client.add_request(UdpRequest::connect(remote, 11));
+            let (_, frame) = expect_frame(&mut client, &mut rng, now);
+            client.request_sent(now);
+            let mut scrape = UdpRequest::scrape(remote, vec![[4; 20]]);
+            scrape.owner = 12;
+            client.add_request(scrape);
+            assert!(client.create_request(&mut rng, now).is_none());
+            if cancel_address {
+                client.cancel_owner_at(11, remote);
+            } else {
+                client.cancel_owner(11);
+            }
+            let reply = response(UdpAction::Connect, front_tid(&frame), &9u64.to_be_bytes());
+            match expect_reply(&mut client, remote, &reply, now) {
+                Some(UdpReply::Connected(request)) => {
+                    assert_eq!(request.owner, 0, "transferred shared CONNECT")
+                }
+                other => panic!("shared connect was lost: {other:?}"),
+            }
+            let (_, frame) = expect_frame(&mut client, &mut rng, now);
+            assert_eq!(&frame[8..12], &2i32.to_be_bytes());
+            client.request_sent(now);
+            let reply = response(UdpAction::Scrape, front_tid(&frame), &[0; 12]);
+            match expect_reply(&mut client, remote, &reply, now) {
+                Some(UdpReply::Scrape(request)) => assert_eq!(request.owner, 12),
+                other => panic!("shared scrape failed: {other:?}"),
+            }
+            assert!(client.is_empty());
         }
     }
 }

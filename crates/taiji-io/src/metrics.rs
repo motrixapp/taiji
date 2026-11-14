@@ -207,6 +207,14 @@ pub struct HistogramSnapshot {
 ///   oldest).
 #[derive(Debug)]
 pub struct DnsMetrics {
+    backend_started: Counter,
+    coalesced: Counter,
+    negative_hit: Counter,
+    capacity_rejected: Counter,
+    system_started: Counter,
+    system_coalesced: Counter,
+    system_active: AtomicU64,
+    system_queued: AtomicU64,
     lookups_hit: Counter,
     lookups_miss: Counter,
     lookups_error: Counter,
@@ -228,6 +236,14 @@ impl Default for DnsMetrics {
 impl DnsMetrics {
     fn new() -> Self {
         DnsMetrics {
+            backend_started: Counter::default(),
+            coalesced: Counter::default(),
+            negative_hit: Counter::default(),
+            capacity_rejected: Counter::default(),
+            system_started: Counter::default(),
+            system_coalesced: Counter::default(),
+            system_active: AtomicU64::new(0),
+            system_queued: AtomicU64::new(0),
             lookups_hit: Counter::default(),
             lookups_miss: Counter::default(),
             lookups_error: Counter::default(),
@@ -239,6 +255,37 @@ impl DnsMetrics {
             events_evict_capacity: Counter::default(),
             resolve_seconds: Histogram::new(DNS_RESOLVE_BUCKETS_SECONDS),
         }
+    }
+
+    pub(crate) fn note_backend_started(&self) {
+        self.backend_started.inc();
+    }
+    pub(crate) fn note_coalesced(&self) {
+        self.coalesced.inc();
+    }
+    pub(crate) fn note_negative_hit(&self) {
+        self.negative_hit.inc();
+    }
+    pub(crate) fn note_capacity_rejected(&self) {
+        self.capacity_rejected.inc();
+    }
+    pub(crate) fn note_system_started(&self) {
+        self.system_started.inc();
+    }
+    pub(crate) fn note_system_coalesced(&self) {
+        self.system_coalesced.inc();
+    }
+    pub(crate) fn system_active_inc(&self) {
+        self.system_active.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn system_active_dec(&self) {
+        self.system_active.fetch_sub(1, Ordering::Relaxed);
+    }
+    pub(crate) fn system_queued_inc(&self) {
+        self.system_queued.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn system_queued_dec(&self) {
+        self.system_queued.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Attributes a resolution lookup (cache hit / miss / failure /
@@ -283,6 +330,14 @@ impl DnsMetrics {
     /// docs).
     pub fn snapshot(&self) -> DnsMetricsSnapshot {
         DnsMetricsSnapshot {
+            backend_started: self.backend_started.get(),
+            coalesced: self.coalesced.get(),
+            negative_hit: self.negative_hit.get(),
+            capacity_rejected: self.capacity_rejected.get(),
+            system_started: self.system_started.get(),
+            system_coalesced: self.system_coalesced.get(),
+            system_active: self.system_active.load(Ordering::Relaxed),
+            system_queued: self.system_queued.load(Ordering::Relaxed),
             lookups_hit: self.lookups_hit.get(),
             lookups_miss: self.lookups_miss.get(),
             lookups_error: self.lookups_error.get(),
@@ -338,6 +393,14 @@ pub enum DnsCacheEvent {
 /// projection/rendering faces).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DnsMetricsSnapshot {
+    pub backend_started: u64,
+    pub coalesced: u64,
+    pub negative_hit: u64,
+    pub capacity_rejected: u64,
+    pub system_started: u64,
+    pub system_coalesced: u64,
+    pub system_active: u64,
+    pub system_queued: u64,
     pub lookups_hit: u64,
     pub lookups_miss: u64,
     pub lookups_error: u64,
@@ -1093,6 +1156,14 @@ mod tests {
         assert_eq!(
             b.snapshot().dns,
             DnsMetricsSnapshot {
+                backend_started: 0,
+                coalesced: 0,
+                negative_hit: 0,
+                capacity_rejected: 0,
+                system_started: 0,
+                system_coalesced: 0,
+                system_active: 0,
+                system_queued: 0,
                 lookups_hit: 0,
                 lookups_miss: 0,
                 lookups_error: 0,

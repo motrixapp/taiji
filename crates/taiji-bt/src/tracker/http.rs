@@ -657,13 +657,18 @@ impl HttpAnnounce {
     /// behavior notes in [`super::dns`]'s re-export source
     /// `taiji_io::dns`).
     pub fn new(opts: &TrackerOptions) -> Result<Self, TrackerError> {
+        Self::with_dns(opts, SharedDns::shared_default())
+    }
+
+    /// Use the same resolver service as the caller's UDP and download paths.
+    pub fn with_dns(opts: &TrackerOptions, dns: Arc<SharedDns>) -> Result<Self, TrackerError> {
         // TLS provider: reqwest's rustls-no-provider build() reads a
         // process-level default; the idempotent installer lives in
         // taiji-io (shared foundation; this and the other build sites,
         // plus the taiji-http transport, share one install).
         taiji_io::tls::install_ring_provider_default();
         let client = reqwest::Client::builder()
-            .dns_resolver(Arc::new(DnsAdapter(SharedDns::shared_default())))
+            .dns_resolver(Arc::new(DnsAdapter(dns)))
             // Redirects are not followed: this client carries both
             // announce and .torrent fetches — the default policy
             // auto-follows up to 10 hops, and a malicious 302 could

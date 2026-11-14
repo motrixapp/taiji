@@ -102,6 +102,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p taiji-store --lib
       - run: cargo test -p taiji-bt --test filetree_fixture
+      # Resolver cancellation owns real std threads and must also hold on
+      # the desktop operating systems; these tests inject DNS, not the host's.
+      - run: cargo test -p taiji-io dns --locked
+      - run: cargo test -p taiji-io --test dns_concurrency --locked
       # Windows-semantics regression for the on-disk surface (sync_dir/seek_write/rename)
       - run: cargo test -p taiji-http --lib
 

@@ -104,17 +104,18 @@ pub use command::{
 };
 pub use events::{
     EVENT_BUS_CAPACITY, EventKind, MEDIA_PHASE_EVENT_METHOD, MediaEvent, MediaWarning,
-    RecoveryEvent, RecoveryEventKind, RecoveryNotice, SessionEvent, TASK_COOKIE_EVENT_METHOD,
-    TaskCookieEvent,
+    RecoveryEvent, RecoveryEventKind, RecoveryNotice, RecoveryStatus, SessionEvent,
+    TASK_COOKIE_EVENT_METHOD, TaskCookieEvent,
 };
 pub use limits::{OverallLimits, SpeedLimits};
 pub use options::{
     ARIA2_OPTION_NAMES, DECLARED_NON_ACCEPTED_OPTION_NAMES, DECLARED_OPTION_DIFFS,
     DECLARED_UNWIRED_OPTION_NAMES, DHT_MESSAGE_TIMEOUT_DEFAULT_SECS, DHT_MESSAGE_TIMEOUT_MAX_SECS,
     DHT_MESSAGE_TIMEOUT_MIN_SECS, GlobalOptions, SUMMARY_INTERVAL_DEFAULT, SUMMARY_INTERVAL_MAX,
-    SessionOptions, crypto_level_str, merge_global_trackers, option_name_declared,
-    option_name_has_declaration, parse_crypto_level, parse_peer_connection_type, parse_select_file,
-    parse_size, peer_connection_type_str, split_bt_tracker, windows_unsafe_basename,
+    SessionOptions, crypto_level_str, global_option_echo, merge_global_trackers,
+    option_name_declared, option_name_has_declaration, parse_crypto_level,
+    parse_peer_connection_type, parse_select_file, parse_size, peer_connection_type_str,
+    split_bt_tracker, windows_unsafe_basename,
 };
 /// Targeted recheck export (the standalone `--check-integrity`
 /// consumption face — the taiji CLI rescans the disk before spawn and
@@ -129,9 +130,10 @@ pub use taiji_http::perhost::DEFAULT_MAX_PER_HOST;
 pub use view::{
     BanEntryView, BanSource, BittorrentView, DownloadResultEntry, EngineFailure, EngineFailureKind,
     FileEntryView, GidResolveError, GlobalStatView, HttpOutputPhase, HttpOutputView,
-    HttpSourceView, HttpView, MediaTrackView, MediaView, PeerCryptoKind, PeerEntryView,
-    PeerTransportKind, ServerEntryView, StatusKind, TorrentStatusView, UriEntryView, expand_unique,
-    file_piece_bases, offset_completed_length, per_file_completed, torrent_top_attrs,
+    HttpSourceState, HttpSourceView, HttpView, MediaTrackState, MediaTrackView, MediaView,
+    PeerCryptoKind, PeerEntryView, PeerTransportKind, ServerEntryView, ServerStatus, StatusKind,
+    TorrentStatusView, UriEntryView, UriStatus, expand_unique, file_piece_bases,
+    offset_completed_length, per_file_completed, torrent_top_attrs,
 };
 
 /// magnet URI -> dual torrent identity extraction (v1 btih / v2 btmh).

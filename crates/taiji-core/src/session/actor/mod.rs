@@ -76,9 +76,9 @@ use super::persist::{
 use super::queue::{Location, QueueMan, ReservedEntry, WaitingSegment};
 use super::view::{
     BanEntryView, BanSource, BittorrentView, DownloadResultEntry, FileEntryView, GidResolveError,
-    GlobalStatView, PeerCryptoKind, PeerEntryView, PeerTransportKind, ServerEntryView, StatusKind,
-    TorrentStatusView, UriEntryView, expand_unique, file_piece_bases, file_selected,
-    per_file_completed, torrent_top_attrs,
+    GlobalStatView, HttpSourceState, PeerCryptoKind, PeerEntryView, PeerTransportKind,
+    ServerEntryView, ServerStatus, StatusKind, TorrentStatusView, UriEntryView, UriStatus,
+    expand_unique, file_piece_bases, file_selected, per_file_completed, torrent_top_attrs,
 };
 /// The teardown timeout share for waiting on all running tasks to exit at
 /// SessionActor shutdown (of the 1s total budget).

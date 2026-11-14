@@ -9,6 +9,7 @@
 //!
 //! Upstream anchor mapping: docs/design/core.md
 
+use crate::engine::recovery::RecoveryStatus;
 use crate::gid::Gid;
 
 /// Task status (a subset of the aria2 `status` value domain; `removed`
@@ -57,25 +58,15 @@ pub enum StatusKind {
     Checking,
 }
 
-impl StatusKind {
-    /// The aria2 wire strings (RpcMethodImpl.cc VLB_* constants).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StatusKind::Active => "active",
-            StatusKind::Waiting => "waiting",
-            StatusKind::Paused => "paused",
-            StatusKind::Error => "error",
-            StatusKind::Complete => "complete",
-            StatusKind::Removed => "removed",
-            StatusKind::Seeding => "seeding",
-            StatusKind::Checking => "checking",
-        }
-    }
-}
+// No wire strings on StatusKind: the aria2 word table (RpcMethodImpl.cc
+// VLB_* constants) is rendered by the rpc adapter
+// (`taiji_rpc::aria2::status::status_word`) — the single render point for
+// every status-shaped field (protocol/internal split plan, rule R2).
 
 /// Ban source (the `listBans` source value domain): a peer_ban.reason
-/// prefix classification (`session::bans::ban_source`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// prefix classification (`session::bans::ban_source`). The wire words
+/// (auto/manual/client-ban) are rendered by the rpc adapter's word table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BanSource {
     /// Automatic ban (hash failure streak / protocol violation,
     /// SPEC §13).
@@ -85,16 +76,6 @@ pub enum BanSource {
     /// Client-identity ban (`client_ban_prefixes` hit,
     /// reason=client-ban:*).
     ClientBan,
-}
-
-impl BanSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            BanSource::Auto => "auto",
-            BanSource::Manual => "manual",
-            BanSource::ClientBan => "client-ban",
-        }
-    }
 }
 
 /// One `taiji.listBans` entry (core-semantics payload; an active ban =
@@ -112,13 +93,22 @@ pub struct BanEntryView {
     pub source: BanSource,
 }
 
-/// One getUris URI (createUriEntry, RpcMethodImpl.cc: status ∈
-/// "used" | "waiting").
+/// One getUris URI (createUriEntry, RpcMethodImpl.cc): the
+/// spent/pending classification — kernel enum, wire words
+/// ("used"/"waiting") rendered by the rpc adapter's word table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UriStatus {
+    /// Spent (has been requested).
+    Used,
+    /// Pending (never requested).
+    Waiting,
+}
+
+/// One getUris URI entry (createUriEntry, RpcMethodImpl.cc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UriEntryView {
     pub uri: String,
-    /// "used" (consumed) | "waiting" (pending).
-    pub status: &'static str,
+    pub status: UriStatus,
 }
 
 /// One getFiles/tellStatus.files entry (createFileEntry in
@@ -159,13 +149,14 @@ pub struct FileEntryView {
     pub padding: bool,
     /// Hash-recovery projection (present only for files with a
     /// missing layer participating; None = key omitted). Value
-    /// domain = `layer_missing` (layer missing, waiting for
-    /// recovery) | `recovering` (hash fetch in progress) | `ready`
-    /// (recovery upgrade completed). Sourced from the engine
-    /// QueryStatus snapshot `recovery_files` (the live single
-    /// source); waiting/terminal views have no engine snapshot →
-    /// None (truthful: no recovery is in progress).
-    pub recovery: Option<&'static str>,
+    /// domain = [`RecoveryStatus`] (layer missing, waiting for
+    /// recovery / hash fetch in progress / recovery upgrade
+    /// completed; the wire words are rendered by the rpc adapter).
+    /// Sourced from the engine QueryStatus snapshot
+    /// `recovery_files` (the live single source); waiting/terminal
+    /// views have no engine snapshot → None (truthful: no recovery
+    /// is in progress).
+    pub recovery: Option<RecoveryStatus>,
 }
 
 /// The tellStatus.bittorrent sub-dict payload (the full
@@ -270,6 +261,24 @@ impl PeerCryptoKind {
     }
 }
 
+/// getServers server state (the aria2 server domain; kernel enum, wire
+/// words working/error/waiting/disabled rendered by the rpc adapter's
+/// word table). BT trackers synthesize it from the tracker row
+/// (enabled=false / last_error / last_ok_at / otherwise); HTTP sources
+/// fold [`HttpSourceState`] into it (the fold lives in the session
+/// projection, the words in the adapter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerStatus {
+    /// Last interaction succeeded / a worker is in flight.
+    Working,
+    /// Last interaction failed (tracker error; demoted or failed source).
+    Error,
+    /// No interaction yet / unscheduled.
+    Waiting,
+    /// Disabled tracker / a source removed from the ledger.
+    Disabled,
+}
+
 /// One getServers tracker (SPEC §8.2: the tracker view of
 /// url/tier/state; the outer JSON keeps the aria2 `{index, servers}`
 /// nesting at the RPC layer).
@@ -277,10 +286,8 @@ impl PeerCryptoKind {
 pub struct ServerEntryView {
     pub url: String,
     pub tier: i64,
-    /// Synthesized state: "disabled" | "error" | "working" |
-    /// "waiting" (enabled=false / last_error / last_ok_at /
-    /// otherwise).
-    pub status: &'static str,
+    /// Synthesized state ([`ServerStatus`]).
+    pub status: ServerStatus,
     /// Scrape cache (unknown = None → key omitted).
     pub seeds: Option<i64>,
     pub leechers: Option<i64>,
@@ -355,6 +362,27 @@ impl EngineFailure {
     }
 }
 
+/// One HTTP source's state in the `http.sources` face (kernel enum;
+/// the wire words active/waiting/demoted/removed/failed are rendered
+/// by the rpc adapter's word table). Active/Waiting are driven by the
+/// worker's live state; Demoted/Removed are the coordinator
+/// source-ledger projections; Failed = dropped at probe failure or
+/// removed from the merge table — takes no part in this task's extent
+/// scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpSourceState {
+    /// A worker of this source is in flight.
+    Active,
+    /// Unscheduled (no failure semantics).
+    Waiting,
+    /// Demoted by the source ledger (halved share).
+    Demoted,
+    /// Removed by the source ledger (terminal).
+    Removed,
+    /// Dropped at probe / merge-table eviction (terminal for the task).
+    Failed,
+}
+
 /// One tellStatus `http` sub-dictionary source entry
 /// (sources[{url,rate,state}]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,13 +392,8 @@ pub struct HttpSourceView {
     /// This source's rate (bytes/s; measured attribution at the sink
     /// write point; no established reading = 0).
     pub rate: u64,
-    /// Source state: active | waiting | demoted | removed | failed
-    /// (active/waiting are driven by the worker's live state;
-    /// demoted/removed are the coordinator source-ledger terminal
-    /// projections; failed = dropped at probe failure or removed from
-    /// the merge table — takes no part in this task's extent
-    /// scheduling).
-    pub state: String,
+    /// Source state ([`HttpSourceState`]).
+    pub state: HttpSourceState,
 }
 
 /// Closed-output lifecycle, independent of the compatibility task status.
@@ -453,6 +476,22 @@ pub struct MediaView {
     pub manifest_url: String,
 }
 
+/// One media track's liveness state (kernel enum; the wire words
+/// active/degraded/failed/done are rendered by the rpc adapter's word
+/// table). A per-track concept — unrelated to the task-phase domain
+/// even where a word shape coincides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaTrackState {
+    /// Segments are being fetched.
+    Active,
+    /// The track continues on a degraded path.
+    Degraded,
+    /// The track failed.
+    Failed,
+    /// Every segment is delivered.
+    Done,
+}
+
 /// One track's state inside the media sub-dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaTrackView {
@@ -460,8 +499,8 @@ pub struct MediaTrackView {
     pub label: String,
     /// video|audio|subtitle.
     pub kind: String,
-    /// active|degraded|failed|done.
-    pub state: String,
+    /// Track liveness ([`MediaTrackState`]).
+    pub state: MediaTrackState,
     /// Segments done of total (`done/total` accounting basis: the
     /// persisted bitmap prefix).
     pub segments_done: usize,
@@ -892,40 +931,9 @@ mod tests {
         Gid::from_u64(n)
     }
 
-    /// The StatusKind value-domain anchor:
-    /// exactly eight variants — the aria2 six (active/waiting/paused/
-    /// error/complete/removed) plus the one extension
-    /// ('seeding') and the row-state shared 'checking'
-    /// (both existing row-state values, zero new row-state
-    /// extension). A new variant or a drifted wire string turns this
-    /// red.
-    #[test]
-    fn status_kind_variant_set_and_wire_strings_anchor() {
-        let all: [(StatusKind, &str); 8] = [
-            (StatusKind::Active, "active"),
-            (StatusKind::Waiting, "waiting"),
-            (StatusKind::Paused, "paused"),
-            (StatusKind::Error, "error"),
-            (StatusKind::Complete, "complete"),
-            (StatusKind::Removed, "removed"),
-            (StatusKind::Seeding, "seeding"),
-            (StatusKind::Checking, "checking"),
-        ];
-        for (kind, wire) in all {
-            assert_eq!(kind.as_str(), wire, "wire-string drift: {wire}");
-        }
-        // Distinctness (a copy-paste variant pair would silently
-        // collapse the domain).
-        let mut wire_strings: Vec<&str> = all.iter().map(|(_, w)| *w).collect();
-        wire_strings.sort();
-        let total = wire_strings.len();
-        wire_strings.dedup();
-        assert_eq!(
-            wire_strings.len(),
-            total,
-            "the value domain has duplicate wire strings"
-        );
-    }
+    // The StatusKind value-domain anchor (eight variants, wire strings)
+    // moved to the rpc adapter (`taiji_rpc::aria2::status`) together
+    // with the word table — the frozen test there pins the wire face.
 
     // ---- expandUnique's three branches (GroupId.cc) ----
     // This engine's GIDs always set the top bit → prefix

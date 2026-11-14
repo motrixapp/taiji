@@ -14,8 +14,11 @@
 //!   `rpc_base64`);
 //! - [`dispatch`]: method dispatch, real method semantics,
 //!   system.multicall RPC-layer expansion;
-//! - [`error`]: error mapping table — aria2 numeric codes + `taiji.*`
-//!   string codes + HTTP status mapping, the repo-wide single source;
+//! - [`aria2`]: the aria2 v1 adapter layer — the four mapping tables
+//!   (`status` words, `error` codes/messages — the repo-wide single
+//!   error-mapping source, `event` names, `option` names); the only
+//!   place wire strings are produced, and removable without touching
+//!   the kernel (the excision check);
 //! - [`guards`] (crate-internal): exposure guards — connection
 //!   concurrency ledger (total 256 / per-IP 32) + auth-failure
 //!   exponential backoff (1s..60s); caps/thresholds are injectable
@@ -31,15 +34,15 @@
 //! as `aria2.onXxx`, and listMethods/listNotifications present the
 //! aria2 face. Alias normalization and face gating have a single
 //! source: [`dispatch::canonical_method`] /
-//! [`dispatch::method_face_names`] / [`dispatch::notification_face`].
+//! [`dispatch::method_face_names`] / [`aria2::event::notification_face`].
 //! Details: Upstream anchor mapping: docs/design/rpc.md
 //!
 //! Dependency direction: depends only on `taiji-core`.
 
+pub mod aria2;
 pub mod auth;
 pub mod base64;
 pub mod dispatch;
-pub mod error;
 /// RPC exposure guards (crate-internal): connection concurrency caps +
 /// auth-failure backoff.
 pub(crate) mod guards;

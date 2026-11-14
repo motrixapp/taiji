@@ -1584,7 +1584,7 @@ impl SessionActor {
                 }
             }
         }
-        out.sort_by(|a, b| (a.source.as_str(), &a.target).cmp(&(b.source.as_str(), &b.target)));
+        out.sort_by(|a, b| (&a.source, &a.target).cmp(&(&b.source, &b.target)));
         Ok(CommandReply::Bans(out))
     }
 
@@ -2179,7 +2179,7 @@ impl SessionActor {
                         .map(|s| ServerEntryView {
                             url: s.url.clone(),
                             tier: 1,
-                            status: http_source_server_status(&s.state),
+                            status: http_source_server_status(s.state),
                             seeds: None,
                             leechers: None,
                             download_speed: s.rate,
@@ -2201,13 +2201,13 @@ impl SessionActor {
             .into_iter()
             .map(|row| {
                 let status = if !row.enabled {
-                    "disabled"
+                    ServerStatus::Disabled
                 } else if row.last_error.is_some() {
-                    "error"
+                    ServerStatus::Error
                 } else if row.last_ok_at.is_some() {
-                    "working"
+                    ServerStatus::Working
                 } else {
-                    "waiting"
+                    ServerStatus::Waiting
                 };
                 ServerEntryView {
                     url: row.url,
@@ -2243,11 +2243,11 @@ impl SessionActor {
         match self.jobs.get(&gid) {
             Some(Job::Magnet(mj)) => Ok(CommandReply::Uris(vec![UriEntryView {
                 uri: mj.magnet_uri.clone(),
-                status: "used",
+                status: UriStatus::Used,
             }])),
             Some(Job::TorrentUrl { url, .. }) => Ok(CommandReply::Uris(vec![UriEntryView {
                 uri: url.clone(),
-                status: "used",
+                status: UriStatus::Used,
             }])),
             // HTTP task: the source list is the URI face (one item per
             // source, user order). status follows spent/remaining:
@@ -2263,7 +2263,11 @@ impl SessionActor {
                         .iter()
                         .map(|u| UriEntryView {
                             uri: u.clone(),
-                            status: if activated { "used" } else { "waiting" },
+                            status: if activated {
+                                UriStatus::Used
+                            } else {
+                                UriStatus::Waiting
+                            },
                         })
                         .collect(),
                 ))
@@ -2277,7 +2281,11 @@ impl SessionActor {
                 let activated = self.running.contains_key(&gid);
                 Ok(CommandReply::Uris(vec![UriEntryView {
                     uri: mj.cfg.url.clone(),
-                    status: if activated { "used" } else { "waiting" },
+                    status: if activated {
+                        UriStatus::Used
+                    } else {
+                        UriStatus::Waiting
+                    },
                 }]))
             }
             None => Err(SessionError::failed(format!(
@@ -3436,23 +3444,25 @@ fn tracker_edit_reject_message(method: &str, gid: Gid, job: Option<&Job>) -> Opt
 }
 
 /// HTTP source state (`http.sources` state domain) -> getServers
-/// status (the aria2 server domain working|waiting|error|disabled).
-/// This shares the source ledger with the `http.sources` sub-dictionary:
-/// ledger terminal states never collapse back to waiting (waiting
-/// means merely unscheduled with no failure semantics; rendering
-/// demoted/removed/failed as waiting would tell the client the source
-/// is fresh). Mapping: `active` -> working (worker in flight);
-/// `waiting` -> waiting (unscheduled); `demoted` -> error (repeated
-/// extent failures demoted the source — it still participates at a
-/// halved share; the nearest aria2 semantics is a tracker's last
-/// failed interaction); `failed` -> error (dropped at probe or merge);
-/// `removed` -> disabled (a ledger terminal, no longer scheduled).
-pub(super) fn http_source_server_status(state: &str) -> &'static str {
+/// status fold (the L2 projection: enum -> enum; the aria2 server
+/// words working|waiting|error|disabled are rendered by the rpc
+/// adapter's word table). This shares the source ledger with the
+/// `http.sources` sub-dictionary: ledger terminal states never
+/// collapse back to waiting (waiting means merely unscheduled with no
+/// failure semantics; rendering demoted/removed/failed as waiting
+/// would tell the client the source is fresh). Mapping: `Active` ->
+/// working (worker in flight); `Waiting` -> waiting (unscheduled);
+/// `Demoted` -> error (repeated extent failures demoted the source —
+/// it still participates at a halved share; the nearest aria2
+/// semantics is a tracker's last failed interaction); `Failed` ->
+/// error (dropped at probe or merge); `Removed` -> disabled (a ledger
+/// terminal, no longer scheduled).
+pub(super) fn http_source_server_status(state: HttpSourceState) -> ServerStatus {
     match state {
-        "active" => "working",
-        "demoted" | "failed" => "error",
-        "removed" => "disabled",
-        _ => "waiting",
+        HttpSourceState::Active => ServerStatus::Working,
+        HttpSourceState::Demoted | HttpSourceState::Failed => ServerStatus::Error,
+        HttpSourceState::Removed => ServerStatus::Disabled,
+        HttpSourceState::Waiting => ServerStatus::Waiting,
     }
 }
 
@@ -3908,32 +3918,37 @@ pub(super) fn not_yet(
 #[cfg(test)]
 mod tests {
     use super::http_source_server_status;
+    use crate::session::view::{HttpSourceState, ServerStatus};
 
     /// The getServers source-state projection covers the full domain:
     /// demoted/removed/failed never collapse back to waiting (matching
     /// the `http.sources` terminal projection) and the value stays
-    /// within the four aria2 server states.
+    /// within the four server states (the wire words are rendered by
+    /// the rpc adapter's word table).
     #[test]
     fn http_source_server_status_projects_ledger_terminal_states() {
-        assert_eq!(http_source_server_status("active"), "working");
-        assert_eq!(http_source_server_status("waiting"), "waiting");
         assert_eq!(
-            http_source_server_status("demoted"),
-            "error",
+            http_source_server_status(HttpSourceState::Active),
+            ServerStatus::Working
+        );
+        assert_eq!(
+            http_source_server_status(HttpSourceState::Waiting),
+            ServerStatus::Waiting
+        );
+        assert_eq!(
+            http_source_server_status(HttpSourceState::Demoted),
+            ServerStatus::Error,
             "demoted != waiting"
         );
         assert_eq!(
-            http_source_server_status("failed"),
-            "error",
+            http_source_server_status(HttpSourceState::Failed),
+            ServerStatus::Error,
             "probe-eliminated != waiting"
         );
         assert_eq!(
-            http_source_server_status("removed"),
-            "disabled",
+            http_source_server_status(HttpSourceState::Removed),
+            ServerStatus::Disabled,
             "ledger removal = out of the source set (terminal)"
         );
-        // Unknown values fall back to waiting (the ledger domain is
-        // closed; defensive projection).
-        assert_eq!(http_source_server_status("no-such-state"), "waiting");
     }
 }

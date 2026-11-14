@@ -432,8 +432,8 @@ Declared differences:
 
 ## error.rs
 
-HTTP failure -> aria2 numeric error code mapping for
-`crates/taiji-rpc/src/error.rs` (the doc table in the code; its
+HTTP failure -> aria2 numeric error code mapping in
+`crates/taiji-rpc/src/aria2/error.rs` (the doc table in the code; its
 executable mirror is `try_http_numeric_code`, pinned row by row by
 tests). The full numeric-code source (read-only reference):
 `error_code.h` `error_code::Value` (0=FINISHED .. 32=CHECKSUM_ERROR).

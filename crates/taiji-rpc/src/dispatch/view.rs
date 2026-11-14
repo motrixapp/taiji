@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use taiji_core::session::{CommandReply, TorrentStatusView};
 
-use crate::error::RpcError;
+use crate::aria2::error::RpcError;
 use crate::jsonrpc::RpcResponse;
 
 /// getVersion.enabledFeatures (shape cross-checked against aria2
@@ -72,7 +72,9 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
         )),
         CommandReply::Uris(uris) => Ok(Value::Array(
             uris.iter()
-                .map(|u| json!({"uri": u.uri, "status": u.status}))
+                .map(|u| {
+                    json!({"uri": u.uri, "status": crate::aria2::status::uri_status_word(u.status)})
+                })
                 .collect(),
         )),
         CommandReply::GlobalStat(g) => Ok(json!({
@@ -92,15 +94,12 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
             "numChecking": g.num_checking.to_string(),
             "numSynthesizing": g.num_synthesizing.to_string(),
         })),
-        CommandReply::Options(map) => Ok(json!(map)),
+        // The echo serialization gate (crate::aria2::option): every
+        // getOption/getGlobalOption body renders through it (unknown
+        // keys warn + count — never dropped, wire bytes unchanged).
+        CommandReply::Options(map) => Ok(crate::aria2::option::serialize_options(&map)),
         CommandReply::HttpOutput(output) => {
-            use taiji_core::session::HttpOutputPhase;
-            let state = match output.phase {
-                HttpOutputPhase::Downloading => "downloading",
-                HttpOutputPhase::Ready => "ready",
-                HttpOutputPhase::Publishing => "publishing",
-                HttpOutputPhase::Published => "published",
-            };
+            let state = crate::aria2::status::http_output_phase_word(output.phase);
             let mut value = json!({ "state": state, "hostControlled": output.host_controlled.to_string(), "paused": output.paused.to_string() });
             if let Some(path) = output.source_path {
                 value["sourcePath"] = json!(path);
@@ -169,7 +168,7 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
                         } else {
                             b.until.to_string()
                         },
-                        "source": b.source.as_str(),
+                        "source": crate::aria2::status::ban_source_word(b.source),
                     })
                 })
                 .collect(),
@@ -262,10 +261,7 @@ pub(crate) fn created_torrent_json(info: &taiji_core::create::CreatedTorrentInfo
 /// Defense for query methods receiving an unexpected reply (a broken
 /// structural invariant -> explicit error, never faked).
 pub(crate) fn unexpected_reply(method: &str, other: CommandReply, id: Value) -> RpcResponse {
-    RpcResponse::error(
-        &RpcError::generic(format!("unexpected {method} reply: {other:?}")),
-        id,
-    )
+    RpcResponse::error(&RpcError::unexpected_reply(method, &other), id)
 }
 
 // ---- aria2 JSON value surface (numbers -> strings, booleans -> "true"/"false") ----
@@ -322,11 +318,11 @@ pub(crate) fn status_entry_json(v: &TorrentStatusView) -> Value {
         // flows through with the subkind (404 -> 3, read-idle -> 2,
         // etc.); without a structured code the core merged surface holds
         // (0/31/1). The mapping's single source is
-        // [`crate::error::http_numeric_code`].
+        // [`crate::aria2::error::http_numeric_code`].
         let numeric = match &v.error_engine {
             Some(f) => {
                 let kind = engine_kind(f.kind);
-                let n = crate::error::http_numeric_code(&f.code, kind);
+                let n = crate::aria2::error::http_numeric_code(&f.code, kind);
                 if n < 0 { 0 } else { n as u64 }
             }
             None => v.error_code.unwrap_or(0),
@@ -337,7 +333,10 @@ pub(crate) fn status_entry_json(v: &TorrentStatusView) -> Value {
             json!(v.error_message.clone().unwrap_or_default()),
         );
     }
-    d.insert("status".into(), json!(v.status.as_str()));
+    d.insert(
+        "status".into(),
+        json!(crate::aria2::status::status_word(v.status)),
+    );
     if !v.followed_by.is_empty() {
         d.insert(
             "followedBy".into(),
@@ -445,7 +444,7 @@ pub(crate) fn media_json(m: &taiji_core::session::MediaView) -> Value {
                     json!({
                         "label": t.label,
                         "kind": t.kind,
-                        "state": t.state,
+                        "state": crate::aria2::status::track_state_word(t.state),
                         "segmentsDone": t.segments_done,
                         "segmentsTotal": t.segments_total,
                     })
@@ -476,12 +475,12 @@ pub(crate) fn media_json(m: &taiji_core::session::MediaView) -> Value {
 /// the check red).
 pub(crate) fn engine_kind(
     k: taiji_core::session::EngineFailureKind,
-) -> crate::error::HttpFailureKind {
+) -> crate::aria2::error::HttpFailureKind {
     use taiji_core::session::EngineFailureKind as K;
     match k {
-        K::Bare => crate::error::HttpFailureKind::Bare,
-        K::Status(s) => crate::error::HttpFailureKind::Status(s),
-        K::TransportTimeout => crate::error::HttpFailureKind::TransportTimeout,
+        K::Bare => crate::aria2::error::HttpFailureKind::Bare,
+        K::Status(s) => crate::aria2::error::HttpFailureKind::Status(s),
+        K::TransportTimeout => crate::aria2::error::HttpFailureKind::TransportTimeout,
     }
 }
 
@@ -512,13 +511,7 @@ fn http_json(h: &taiji_core::session::HttpView) -> Value {
         Value::Array(
             h.sources
                 .iter()
-                .map(|s| {
-                    json!({
-                        "url": s.url,
-                        "rate": s.rate.to_string(),
-                        "state": s.state,
-                    })
-                })
+                .map(crate::aria2::status::http_source_json)
                 .collect(),
         ),
     );
@@ -585,7 +578,9 @@ pub(crate) fn file_entry_json(f: &taiji_core::session::FileEntryView) -> Value {
         Value::Array(
             f.uris
                 .iter()
-                .map(|u| json!({"uri": u.uri, "status": u.status}))
+                .map(|u| {
+                    json!({"uri": u.uri, "status": crate::aria2::status::uri_status_word(u.status)})
+                })
                 .collect(),
         ),
     );
@@ -600,7 +595,10 @@ pub(crate) fn file_entry_json(f: &taiji_core::session::FileEntryView) -> Value {
     // for hash recovery"); camelCase key names follow the taiji.*
     // surface decision.
     if let Some(st) = f.recovery {
-        d.insert("recoveryStatus".into(), json!(st));
+        d.insert(
+            "recoveryStatus".into(),
+            json!(crate::aria2::status::recovery_status_word(st)),
+        );
     }
     Value::Object(d)
 }
@@ -637,7 +635,10 @@ pub(crate) fn server_entry_json(s: &taiji_core::session::ServerEntryView) -> Val
     d.insert("currentUri".into(), json!(s.url));
     d.insert("downloadSpeed".into(), json!(s.download_speed.to_string()));
     d.insert("tier".into(), jnum(u64::try_from(s.tier).unwrap_or(0)));
-    d.insert("status".into(), json!(s.status));
+    d.insert(
+        "status".into(),
+        json!(crate::aria2::status::server_status_word(s.status)),
+    );
     if let Some(n) = s.seeds {
         d.insert("seeds".into(), jnum(n.unsigned_abs()));
     }

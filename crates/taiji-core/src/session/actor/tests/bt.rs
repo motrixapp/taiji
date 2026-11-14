@@ -737,7 +737,11 @@ async fn tell_status_snapshot_on_local_seeder_closed_loop() {
         Ok(CommandReply::Servers(servers)) => {
             assert_eq!(servers.len(), 1, "single tier");
             assert_eq!(servers[0].tier, 0);
-            assert_eq!(servers[0].status, "working", "announce succeeded");
+            assert_eq!(
+                servers[0].status,
+                crate::session::ServerStatus::Working,
+                "announce succeeded"
+            );
         }
         other => panic!("getServers must succeed, got {other:?}"),
     }

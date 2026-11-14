@@ -1900,7 +1900,7 @@ async fn num_active_counts_http_tasks_and_decouples_from_slots() {
     match call(&handle, SessionCommand::GetUris { gid: paused_hex }).await {
         Ok(CommandReply::Uris(uris)) => {
             assert_eq!(uris.len(), 1);
-            assert_eq!(uris[0].status, "waiting");
+            assert_eq!(uris[0].status, UriStatus::Waiting);
         }
         other => panic!("getUris: {other:?}"),
     }
@@ -2872,7 +2872,7 @@ async fn degraded_download_reports_live_state_rate_and_total() {
         let active = status_list(&call(&handle, SessionCommand::TellActive { keys: vec![] }).await);
         if let Some(v) = active.iter().find(|v| v.gid == gid) {
             if let Some(http) = &v.http {
-                if http.sources[0].state == "active" {
+                if http.sources[0].state == HttpSourceState::Active {
                     saw_active = true;
                 }
                 if http.sources[0].rate > 0 {
@@ -2934,7 +2934,8 @@ async fn degraded_download_reports_live_state_rate_and_total() {
         .unwrap_or_else(|| panic!("entry"));
     let http = entry.http.as_ref().unwrap_or_else(|| panic!("http dict"));
     assert_eq!(
-        http.sources[0].state, "waiting",
+        http.sources[0].state,
+        HttpSourceState::Waiting,
         "after close-out the source returns to waiting"
     );
     handle.shutdown().await;
@@ -4444,7 +4445,7 @@ async fn http_multi_uri_array_allocates_across_sources_with_sources_face() {
         {
             Ok(CommandReply::Uris(uris_view)) => {
                 let seen: Vec<&str> = uris_view.iter().map(|u| u.uri.as_str()).collect();
-                seen == uris.as_slice() && uris_view.iter().all(|u| u.status == "used")
+                seen == uris.as_slice() && uris_view.iter().all(|u| u.status == UriStatus::Used)
             }
             other => panic!("expected Uris reply, got {other:?}"),
         }
@@ -4465,7 +4466,7 @@ async fn http_multi_uri_array_allocates_across_sources_with_sources_face() {
                 uris.as_slice(),
                 "the multi-URI array enqueues one entry per source"
             );
-            assert!(uris_view.iter().all(|u| u.status == "used"));
+            assert!(uris_view.iter().all(|u| u.status == UriStatus::Used));
         }
         other => panic!("expected Uris reply, got {other:?}"),
     }
@@ -4587,7 +4588,8 @@ async fn http_dead_ftp_source_dropped_http_mirror_completes() {
         .find(|s| s.url == ftp_dead)
         .unwrap_or_else(|| panic!("ftp slot"));
     assert_eq!(
-        ftp_slot.state, "failed",
+        ftp_slot.state,
+        HttpSourceState::Failed,
         "a dead FTP source = the failed terminal state"
     );
     let http_slot = http
@@ -4595,7 +4597,9 @@ async fn http_dead_ftp_source_dropped_http_mirror_completes() {
         .iter()
         .find(|s| s.url == http_uri)
         .unwrap_or_else(|| panic!("http slot"));
-    assert!(http_slot.state == "waiting" || http_slot.state == "active");
+    assert!(
+        http_slot.state == HttpSourceState::Waiting || http_slot.state == HttpSourceState::Active
+    );
     assert_eq!(entry.total_length, body.len() as u64);
     let got = std::fs::read(&entry.files[0].path).unwrap_or_else(|e| panic!("read: {e}"));
     assert_eq!(got, body, "the http mirror completes with matching bytes");

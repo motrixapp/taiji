@@ -225,27 +225,8 @@ async fn list_methods_is_frozen_surface_and_list_notifications_is_six_names() {
     assert!(names.contains(&"aria2.onBtDownloadComplete"));
 }
 
-/// The six notification names match core EventKind in both faces: the
-/// `system.listNotifications` table and the WS push event names share one
-/// source — canonical table vs `EventKind::notification_method`, compat
-/// table vs `aria2_notification_method` (WebSocketSessionMan.cc dual
-/// outlets, kept drift-free).
-#[test]
-fn notifications_match_core_event_kinds() {
-    let canonical: Vec<&str> = taiji_core::session::EventKind::ALL
-        .iter()
-        .map(|k| k.notification_method())
-        .collect();
-    assert_eq!(canonical, RPC_NOTIFICATIONS.to_vec());
-    let compat: Vec<&str> = taiji_core::session::EventKind::ALL
-        .iter()
-        .map(|k| k.aria2_notification_method())
-        .collect();
-    assert_eq!(compat, RPC_NOTIFICATIONS_ARIA2.to_vec());
-    // The face selector agrees with both tables (one face at a time).
-    assert_eq!(notification_face(false), RPC_NOTIFICATIONS);
-    assert_eq!(notification_face(true), RPC_NOTIFICATIONS_ARIA2);
-}
+// The six-notification consistency lock moved to the adapter layer
+// (`crate::aria2::event::tests::notifications_match_core_event_kinds`).
 
 // ---- Promised method surface: full promise-table pinning + declared differences ----
 
@@ -531,7 +512,7 @@ fn query_family_table_matches_core_descriptors_exactly() {
 /// Declared-difference registry: the in-repo baseline of all known
 /// deviations from the aria2 reference. Execution anchors: option stances
 /// in core `session::options` (accepted / not accepted / unwired), error
-/// codes in the `crate::error` mapping table, metalink expansion
+/// codes in the `crate::aria2::error` mapping table, metalink expansion
 /// semantics in the `crate::metalink` module docs.
 #[cfg(test)]
 const DECLARED_DIFFERENCE_REGISTRY: &[(&str, &[&str])] = &[
@@ -681,7 +662,7 @@ const DECLARED_DIFFERENCE_REGISTRY: &[(&str, &[&str])] = &[
 /// registered in the declared-option table.
 #[test]
 fn declared_difference_registry_anchors_are_live() {
-    use crate::error::{STR_METALINK_PARSE_FAILED, STR_METALINK_UNSUPPORTED_VERSION};
+    use crate::aria2::error::{STR_METALINK_PARSE_FAILED, STR_METALINK_UNSUPPORTED_VERSION};
     use taiji_core::session::option_name_declared;
 
     // The category set is exactly this list; new categories must update
@@ -3011,7 +2992,7 @@ async fn taiji_streaming_playhead_zero_bps_rejected() {
         assert_eq!(
             r.payload["message"],
             "The integer parameter at 3 has invalid value: bytes_per_sec \
-             must be greater than 0 (omit the parameter for the default rate)."
+             must be greater than 0 (omit the parameter for the default rate)"
         );
     }
     // Default-rate continuity: omitted / explicit Null = default (the
@@ -3984,14 +3965,19 @@ fn file_entry_json_projects_recovery_status() {
         padding: false,
         recovery: None,
     };
-    for st in ["layer_missing", "recovering", "ready"] {
+    use taiji_core::session::RecoveryStatus;
+    for (st, word) in [
+        (RecoveryStatus::LayerMissing, "layer_missing"),
+        (RecoveryStatus::Recovering, "recovering"),
+        (RecoveryStatus::Ready, "ready"),
+    ] {
         let mut f = base();
         f.recovery = Some(st);
         let d = super::view::file_entry_json(&f);
         assert_eq!(
             d["recoveryStatus"],
-            json!(st),
-            "value domain maps directly: {st}"
+            json!(word),
+            "value domain maps directly: {word}"
         );
     }
     let d = super::view::file_entry_json(&base());
@@ -4098,7 +4084,7 @@ async fn aria2_alias_mode_is_gated_both_ways() {
 #[test]
 fn http_subdict_renders_promised_fields() {
     use taiji_core::gid::Gid as GidAlias;
-    use taiji_core::session::{HttpSourceView, HttpView, StatusKind};
+    use taiji_core::session::{HttpSourceState, HttpSourceView, HttpView, StatusKind};
 
     use crate::dispatch::view::status_entry_json;
     let view = TorrentStatusView {
@@ -4140,7 +4126,7 @@ fn http_subdict_renders_promised_fields() {
             sources: vec![HttpSourceView {
                 url: "http://mirror/f.bin".into(),
                 rate: 4096,
-                state: "active".into(),
+                state: HttpSourceState::Active,
             }],
         }),
     };
@@ -4385,11 +4371,11 @@ async fn http_method_surface_sftp_deferred_and_query_shapes() {
 /// not always zero).
 #[test]
 fn server_entry_json_carries_download_speed() {
-    use taiji_core::session::ServerEntryView;
+    use taiji_core::session::{ServerEntryView, ServerStatus};
     let s = ServerEntryView {
         url: "http://mirror/f.bin".into(),
         tier: 1,
-        status: "working",
+        status: ServerStatus::Working,
         seeds: None,
         leechers: None,
         download_speed: 4096,
@@ -4741,7 +4727,7 @@ async fn list_notifications_stays_six_events_with_media_line() {
 #[test]
 fn media_subdict_renders_promised_fields() {
     use taiji_core::gid::Gid as GidAlias;
-    use taiji_core::session::{MediaTrackView, MediaView};
+    use taiji_core::session::{MediaTrackState, MediaTrackView, MediaView};
     let base_view = || {
         use taiji_core::session::StatusKind;
         TorrentStatusView {
@@ -4782,7 +4768,7 @@ fn media_subdict_renders_promised_fields() {
         tracks: vec![MediaTrackView {
             label: "v".into(),
             kind: "video".into(),
-            state: "done".into(),
+            state: MediaTrackState::Done,
             segments_done: 6,
             segments_total: 6,
         }],

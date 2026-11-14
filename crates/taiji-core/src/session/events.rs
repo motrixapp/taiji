@@ -1,5 +1,6 @@
-//! SessionEvent event bus (SPEC §7.4/§8.1; for the dual method-name
-//! faces see the `EventKind::notification_method` note).
+//! SessionEvent event bus (SPEC §7.4/§8.1; the event *kinds* only —
+//! their WS method-name faces are rendered by the rpc adapter
+//! `taiji_rpc::aria2::event`).
 //!
 //! Topology, backpressure, and publish-point anchors:
 //! docs/design/core.md
@@ -49,44 +50,12 @@ impl EventKind {
         EventKind::Error,
         EventKind::BtComplete,
     ];
-
-    /// WS notification method name (canonical face). The only
-    /// event-name face while `--rpc-aria2-compat` is off (default):
-    /// `taiji.onDownloadStart/Pause/Stop/Complete/Error/
-    /// BtDownloadComplete`, payload `[{gid}]` unchanged. For the compat
-    /// face see [`EventKind::aria2_notification_method`]; only one face
-    /// is pushed at a time (double-publish forbidden), and taiji-rpc
-    /// picks the presentation face uniformly behind the compat gate.
-    pub fn notification_method(self) -> &'static str {
-        match self {
-            EventKind::HttpReady => "taiji.onHttpOutputReady",
-            EventKind::Start => "taiji.onDownloadStart",
-            EventKind::Pause => "taiji.onDownloadPause",
-            EventKind::Stop => "taiji.onDownloadStop",
-            EventKind::Complete => "taiji.onDownloadComplete",
-            EventKind::Error => "taiji.onDownloadError",
-            EventKind::BtComplete => "taiji.onBtDownloadComplete",
-        }
-    }
-
-    /// WS notification method name (the `--rpc-aria2-compat` alias
-    /// face). The six names are verbatim against WebSocketSessionMan.cc
-    /// (drop-in face for external aria2 frontends); the
-    /// `system.listNotifications` compat presentation uses the same
-    /// table (RpcMethodFactory.cc; a consistency test in taiji-rpc
-    /// locks the two tables).
-    pub fn aria2_notification_method(self) -> &'static str {
-        match self {
-            EventKind::HttpReady => "taiji.onHttpOutputReady",
-            EventKind::Start => "aria2.onDownloadStart",
-            EventKind::Pause => "aria2.onDownloadPause",
-            EventKind::Stop => "aria2.onDownloadStop",
-            EventKind::Complete => "aria2.onDownloadComplete",
-            EventKind::Error => "aria2.onDownloadError",
-            EventKind::BtComplete => "aria2.onBtDownloadComplete",
-        }
-    }
 }
+
+// The WS notification method-name tables moved to the rpc adapter
+// (`taiji_rpc::aria2::event` — both faces plus the frozen-name tests;
+// the six event *kinds* stay here). No event-name strings below the
+// rpc crate (protocol/internal split plan, rule R2).
 
 /// Session event payload (core semantics, no JSON — the aria2
 /// notification envelope is serialized by taiji-rpc; the GID hex16
@@ -101,8 +70,9 @@ pub struct SessionEvent {
 // engine subtree (`engine::recovery` — the producers are the
 // engine-side HookRunner notification slot and the admission arm);
 // re-exported here so the existing `session::events` public path is
-// unchanged.
-pub use crate::engine::recovery::{RecoveryEventKind, RecoveryNotice};
+// unchanged. The per-file recovery projection enum rides along (the
+// getFiles `recoveryStatus` payload; wire words = the rpc adapter).
+pub use crate::engine::recovery::{RecoveryEventKind, RecoveryNotice, RecoveryStatus};
 
 /// Session recovery event bus payload (the params[0] semantics source
 /// of `taiji.recoveryStarted/Completed`). The bus topology and
@@ -198,57 +168,28 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::broadcast;
 
-    /// Cross-validate the dual notification name sets. Canonical face =
-    /// `taiji.onXxx`; compat face = the six frozen aria2
-    /// names (reference = WebSocketSessionMan.cc literals). The two
-    /// faces map one-to-one with zero additions or removals, and the
-    /// `system.listNotifications` dual table shares one source with WS
-    /// pushes (locked by a taiji-rpc consistency test).
+    /// Structural anchor: ALL enumerates exactly the seven kinds (the
+    /// name-face freeze test moved to the rpc adapter together with the
+    /// word tables — this side pins only the kind set).
     #[test]
-    fn notification_method_names_are_frozen() {
-        let canonical = [
-            (EventKind::Start, "taiji.onDownloadStart"),
-            (EventKind::Pause, "taiji.onDownloadPause"),
-            (EventKind::Stop, "taiji.onDownloadStop"),
-            (EventKind::Complete, "taiji.onDownloadComplete"),
-            (EventKind::Error, "taiji.onDownloadError"),
-            (EventKind::BtComplete, "taiji.onBtDownloadComplete"),
-        ];
-        let compat = [
-            (EventKind::Start, "aria2.onDownloadStart"),
-            (EventKind::Pause, "aria2.onDownloadPause"),
-            (EventKind::Stop, "aria2.onDownloadStop"),
-            (EventKind::Complete, "aria2.onDownloadComplete"),
-            (EventKind::Error, "aria2.onDownloadError"),
-            (EventKind::BtComplete, "aria2.onBtDownloadComplete"),
-        ];
-        for ((k1, c), (k2, a)) in canonical.into_iter().zip(compat) {
-            assert_eq!(k1, k2, "face tables must enumerate the same order");
-            assert_eq!(k1.notification_method(), c);
-            assert_eq!(k1.aria2_notification_method(), a);
-        }
-        assert_eq!(
-            EventKind::ALL.len(),
-            7,
-            "HTTP output-ready extends the notification surface"
-        );
+    fn event_kind_all_enumerates_the_seven_kinds() {
+        assert_eq!(EventKind::ALL.len(), 7);
+        // Exhaustive match over ALL: adding a variant without extending
+        // ALL turns the count red; adding a variant at all breaks this
+        // match at compile time.
+        let mut http_ready = 0;
         for kind in EventKind::ALL {
-            if kind == EventKind::HttpReady {
-                assert_eq!(kind.aria2_notification_method(), "taiji.onHttpOutputReady");
-                continue;
+            match kind {
+                EventKind::HttpReady => http_ready += 1,
+                EventKind::Start
+                | EventKind::Pause
+                | EventKind::Stop
+                | EventKind::Complete
+                | EventKind::Error
+                | EventKind::BtComplete => {}
             }
-            // One-to-one: the compat name = the canonical name with the
-            // taiji. prefix replaced by aria2..
-            assert_eq!(
-                kind.aria2_notification_method(),
-                kind.notification_method()
-                    .strip_prefix("taiji.")
-                    .map(|rest| format!("aria2.{rest}"))
-                    .unwrap_or_default(),
-                "faces must stay one-to-one: {}",
-                kind.notification_method()
-            );
         }
+        assert_eq!(http_ready, 1, "HTTP output-ready extends the set once");
     }
 
     /// Multi-subscriber broadcast: every subscriber receives the full
@@ -504,52 +445,25 @@ mod tests {
     // ---- taiji.media.* extension event face ----
 
     /// The event freeze: the media extension event exists **only** as
-    /// `taiji.media.phaseChanged` — the six-event table, the compat
-    /// (aria2.*) face, and `system.listNotifications` do not grow
-    /// (pinned here at the vocabulary layer; the rpc consistency tests
-    /// pin the render side).
+    /// `taiji.media.phaseChanged` — the kernel-side constant pin (the
+    /// six-event-table / compat-face / listNotifications non-growth
+    /// halves moved to the rpc adapter's registry lock together with
+    /// the name tables).
     #[test]
-    fn media_phase_event_name_is_frozen_and_stays_out_of_the_six_events() {
+    fn media_phase_event_name_is_frozen() {
         assert_eq!(MEDIA_PHASE_EVENT_METHOD, "taiji.media.phaseChanged");
-        // Not a six-event name on either face…
-        for kind in EventKind::ALL {
-            assert_ne!(
-                kind.notification_method(),
-                MEDIA_PHASE_EVENT_METHOD,
-                "the extension event must not enter the six-event table"
-            );
-            assert_ne!(
-                kind.aria2_notification_method(),
-                MEDIA_PHASE_EVENT_METHOD,
-                "the extension event has no aria2.* compat face"
-            );
-        }
-        // …and not a recovery extension name either.
+        // Not a recovery extension name either.
         for kind in RecoveryEventKind::ALL {
             assert_ne!(kind.notification_method(), MEDIA_PHASE_EVENT_METHOD);
         }
     }
 
-    /// The task-cookie alert rides the same single-name
-    /// bypass — exactly one name, never in the six-event table (either
-    /// face), never in listNotifications (the rpc consistency tests
-    /// pin the render side), and distinct from the other extension
-    /// events.
+    /// The task-cookie alert rides the same single-name bypass — the
+    /// kernel-side constant pin (the six-event-table halves moved to
+    /// the rpc adapter's registry lock).
     #[test]
-    fn task_cookie_event_name_is_frozen_and_bypasses_the_six_events() {
+    fn task_cookie_event_name_is_frozen() {
         assert_eq!(TASK_COOKIE_EVENT_METHOD, "taiji.task.cookiesClearedOnError");
-        for kind in EventKind::ALL {
-            assert_ne!(
-                kind.notification_method(),
-                TASK_COOKIE_EVENT_METHOD,
-                "the cookie alert must not enter the six-event table"
-            );
-            assert_ne!(
-                kind.aria2_notification_method(),
-                TASK_COOKIE_EVENT_METHOD,
-                "the cookie alert has no aria2.* compat face"
-            );
-        }
         assert_ne!(TASK_COOKIE_EVENT_METHOD, MEDIA_PHASE_EVENT_METHOD);
         for kind in RecoveryEventKind::ALL {
             assert_ne!(kind.notification_method(), TASK_COOKIE_EVENT_METHOD);

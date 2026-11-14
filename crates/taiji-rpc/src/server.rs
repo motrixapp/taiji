@@ -51,12 +51,12 @@ use tracing::{info, warn};
 
 use serde_json::{Value, json};
 use taiji_core::session::{
-    MEDIA_PHASE_EVENT_METHOD, MediaEvent, RecoveryEvent, RecoveryEventKind, SessionEvent,
-    SessionHandle, TASK_COOKIE_EVENT_METHOD, TaskCookieEvent,
+    MEDIA_PHASE_EVENT_METHOD, MediaEvent, RecoveryEvent, RecoveryEventKind, RecoveryStatus,
+    SessionEvent, SessionHandle, TASK_COOKIE_EVENT_METHOD, TaskCookieEvent,
 };
 
+use crate::aria2::error::http_status;
 use crate::dispatch::{AppState, handle_payload};
-use crate::error::{STR_REQUEST_TOO_LARGE, http_status};
 use crate::guards::{AuthBackoff, ConnLeaseSlot, ConnLedger, ConnScope, RpcGuards};
 use crate::jsonrpc::parse_error_response;
 
@@ -639,13 +639,10 @@ async fn preflight(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Re
 
 /// Explicit over-limit error: HTTP 413 + `taiji.request.too_large`. The
 /// reference just drops the connection (HttpServerCommand.cc); here the
-/// error is explicit, with the string code registered in error.rs.
+/// error is explicit, with the string code registered in the adapter
+/// error table ([`RpcError::request_too_large`]).
 fn too_large_response() -> Response {
-    let err = crate::error::RpcError {
-        code: crate::error::CODE_GENERIC,
-        message: format!("{STR_REQUEST_TOO_LARGE}: see --rpc-max-request-size"),
-        unauthorized: false,
-    };
+    let err = crate::aria2::error::RpcError::request_too_large();
     let resp = crate::jsonrpc::RpcResponse::error(&err, serde_json::Value::Null).encode();
     let status = StatusCode::PAYLOAD_TOO_LARGE;
     (status, [(CONTENT_TYPE, "application/json-rpc")], Json(resp)).into_response()
@@ -982,18 +979,14 @@ async fn ws_upgrade(
 
 /// Event → WS text-frame payload. Envelope mirrors WebSocketSessionMan.cc
 /// field by field: `{jsonrpc:"2.0", method, params:[{gid}]}`. Event names
-/// have two faces — canonical `taiji.onXxx`
-/// (`EventKind::notification_method`, the core source) / compat
-/// `aria2.onXxx` (`aria2_notification_method`, frozen names) — selected by
-/// `--rpc-aria2-compat` (one face at a time; the dispatch tables have
-/// consistency tests). gid = hex16 (GroupId::toHex). No id field: a
+/// have two faces — canonical `taiji.onXxx` / compat `aria2.onXxx`
+/// (frozen names, rendered by the adapter event table
+/// `crate::aria2::event::notification_method`; the dispatch tables
+/// have consistency tests) — selected by `--rpc-aria2-compat` (one
+/// face at a time). gid = hex16 (GroupId::toHex). No id field: a
 /// JSON-RPC notification, not a response.
 fn notification_frame(aria2_compat: bool, ev: &SessionEvent) -> String {
-    let method = if aria2_compat {
-        ev.kind.aria2_notification_method()
-    } else {
-        ev.kind.notification_method()
-    };
+    let method = crate::aria2::event::notification_method(ev.kind, aria2_compat);
     serde_json::json!({
         "jsonrpc": "2.0",
         "method": method,
@@ -1018,7 +1011,12 @@ fn recovery_notification_frame(ev: &RecoveryEvent) -> String {
         Value::Array(ev.files.iter().map(|f| json!(f.to_string())).collect()),
     );
     if ev.kind == RecoveryEventKind::Completed {
-        params.insert("status".into(), json!("ready"));
+        params.insert(
+            "status".into(),
+            json!(crate::aria2::status::recovery_status_word(
+                RecoveryStatus::Ready
+            )),
+        );
     }
     serde_json::json!({
         "jsonrpc": "2.0",
@@ -3586,7 +3584,7 @@ mod tests {
         let f = &reply[0];
         assert_eq!(f.index, 1);
         assert_eq!(
-            f.recovery,
+            f.recovery.map(crate::aria2::status::recovery_status_word),
             Some("layer_missing"),
             "layer-missing projection: {f:?}"
         );

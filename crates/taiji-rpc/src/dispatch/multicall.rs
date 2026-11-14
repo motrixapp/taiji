@@ -12,7 +12,7 @@
 use serde_json::{Value, json};
 use std::net::IpAddr;
 
-use crate::error::RpcError;
+use crate::aria2::error::RpcError;
 use crate::jsonrpc::RpcResponse;
 
 use super::AppState;
@@ -31,17 +31,11 @@ pub(crate) async fn process_multicall(
     // RpcMethodImpl.h).
     let specs = match params.first() {
         None => {
-            return RpcResponse::error(
-                &RpcError::generic("The parameter at 0 is required but missing."),
-                id,
-            );
+            return RpcResponse::error(&RpcError::param_missing(0), id);
         }
         Some(Value::Array(items)) => items,
         Some(_) => {
-            return RpcResponse::error(
-                &RpcError::generic("The parameter at 0 has wrong type."),
-                id,
-            );
+            return RpcResponse::error(&RpcError::param_wrong_type(0), id);
         }
     };
     // Item cap: each spec expands into a subcall; without a cap a
@@ -55,11 +49,15 @@ pub(crate) async fn process_multicall(
     let mut any_unauthorized = false;
     for spec in specs {
         let Value::Object(dict) = spec else {
-            results.push(inline_error("system.multicall expected struct."));
+            results.push(inline_error(
+                crate::aria2::error::MSG_MULTICALL_EXPECTED_STRUCT,
+            ));
             continue;
         };
         let Some(Value::String(method_name)) = dict.get("methodName") else {
-            results.push(inline_error("Missing methodName."));
+            results.push(inline_error(
+                crate::aria2::error::MSG_MULTICALL_MISSING_METHOD_NAME,
+            ));
             continue;
         };
         // params is optional; a non-array (including null/dict) is
@@ -98,10 +96,10 @@ pub(crate) async fn process_multicall(
     resp
 }
 
-/// multicall inline error slot (shape = createErrorResponse:
-/// RpcMethod.cc).
+/// multicall inline error slot (the adapter error table's encoding
+/// face; shape = createErrorResponse, RpcMethod.cc).
 fn inline_error(message: &str) -> Value {
-    json!({ "code": crate::error::CODE_GENERIC, "message": message })
+    crate::aria2::error::multicall_inline_error(message)
 }
 
 /// list* response rendering (Item = `&str` bare names/event names or

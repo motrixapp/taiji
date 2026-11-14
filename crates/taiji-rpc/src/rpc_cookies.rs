@@ -13,8 +13,12 @@ use serde_json::Value;
 
 use taiji_core::session::TaskCookieSpec;
 
+use crate::aria2::error::{
+    MSG_COOKIE_BOOL_FIELD, MSG_COOKIE_DOMAIN, MSG_COOKIE_EXPIRY, MSG_COOKIE_NOT_OBJECT,
+    MSG_COOKIE_STRING_FIELD, MSG_COOKIE_SYNTAX, MSG_COOKIE_TOO_MANY, MSG_COOKIE_UNKNOWN_FIELD,
+    RpcError,
+};
 use crate::dispatch::params::{param_error, required};
-use crate::error::RpcError;
 
 /// `expiresAt` value-space upper bound (RpcCookie.cc
 /// `9007199254740991LL` = 2^53-1, the JSON safe-integer domain).
@@ -35,13 +39,13 @@ pub(crate) fn parse_task_cookies(
         _ => return Err(param_error(index, false)),
     };
     if items.len() > MAX_TASK_COOKIES {
-        return Err(RpcError::generic("Too many task cookies."));
+        return Err(RpcError::generic(MSG_COOKIE_TOO_MANY));
     }
     let mut out = Vec::with_capacity(items.len());
     for entry in items {
         let object = match entry {
             Value::Object(map) => map,
-            _ => return Err(RpcError::generic("Task cookie must be an object.")),
+            _ => return Err(RpcError::generic(MSG_COOKIE_NOT_OBJECT)),
         };
         // Field whitelist (unknown fields rejected explicitly — same
         // rule as the fork, never silently ignored).
@@ -57,7 +61,7 @@ pub(crate) fn parse_task_cookies(
                     | "httpOnly"
                     | "expiresAt"
             ) {
-                return Err(RpcError::generic("Unknown task cookie field."));
+                return Err(RpcError::generic(MSG_COOKIE_UNKNOWN_FIELD));
             }
         }
         // ok_or_else (not ok_or): the error is allocated lazily — the
@@ -79,7 +83,7 @@ pub(crate) fn parse_task_cookies(
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
         {
-            return Err(RpcError::generic("Invalid task cookie syntax."));
+            return Err(RpcError::generic(MSG_COOKIE_SYNTAX));
         }
         // hostOnly default = domain without a leading dot; strip the
         // leading dot and canonicalize to lowercase.
@@ -105,7 +109,7 @@ pub(crate) fn parse_task_cookies(
                     b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.'
                 }))
         {
-            return Err(RpcError::generic("Invalid task cookie domain."));
+            return Err(RpcError::generic(MSG_COOKIE_DOMAIN));
         }
         // expiresAt: optional non-negative Unix milliseconds <= 2^53-1
         // (verbatim text); the second conversion = integer-division
@@ -137,12 +141,12 @@ pub(crate) fn parse_task_cookies(
 /// "Task cookie expiry must be nonnegative Unix milliseconds."
 /// (RpcCookie.cc verbatim).
 fn expires_error() -> RpcError {
-    RpcError::generic("Task cookie expiry must be nonnegative Unix milliseconds.")
+    RpcError::generic(MSG_COOKIE_EXPIRY)
 }
 
 /// "Invalid task cookie string field." (RpcCookie.cc verbatim).
 fn string_field_error() -> RpcError {
-    RpcError::generic("Invalid task cookie string field.")
+    RpcError::generic(MSG_COOKIE_STRING_FIELD)
 }
 
 /// String field extraction (same rule as the fork `stringField`): a
@@ -170,7 +174,7 @@ fn bool_field(
     match object.get(key) {
         None | Some(Value::Null) => Ok(fallback),
         Some(Value::Bool(b)) => Ok(*b),
-        Some(_) => Err(RpcError::generic("Invalid task cookie boolean field.")),
+        Some(_) => Err(RpcError::generic(MSG_COOKIE_BOOL_FIELD)),
     }
 }
 

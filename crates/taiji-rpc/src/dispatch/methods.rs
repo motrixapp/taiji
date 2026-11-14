@@ -30,8 +30,15 @@ use taiji_core::create::{
 };
 use taiji_core::session::{CommandReply, OffsetMode, RpcMethodKind, SessionCommand};
 
+use crate::aria2::error::{
+    MSG_FILE_PATHS_NOT_PROVIDED as E_MSG_FILE_PATHS,
+    MSG_ILLEGAL_ARGUMENT as E_MSG_ILLEGAL_ARGUMENT, MSG_INTEGER_GE_ONE as E_MSG_INTEGER_GE_ONE,
+    MSG_TORRENT_NOT_BASE64 as E_MSG_TORRENT_NOT_BASE64,
+    MSG_TRACKER_URLS_NOT_PROVIDED as E_MSG_TRACKER_URLS,
+    MSG_URI_NOT_PROVIDED as E_MSG_URI_NOT_PROVIDED, MSG_URL_NOT_PROVIDED as E_MSG_URL_NOT_PROVIDED,
+    RpcError, map_create_torrent_error, map_session_error,
+};
 use crate::base64;
-use crate::error::{RpcError, map_create_torrent_error, map_session_error};
 use crate::jsonrpc::RpcResponse;
 
 use super::AppState;
@@ -94,7 +101,7 @@ async fn create_torrent_method(st: &AppState, params: &[Value], id: Value) -> Rp
     let files = try_rpc!(id, string_list(params, 0));
     if files.is_empty() {
         // Same shape as aria2 addUri's empty-set message (RpcMethodImpl.cc).
-        return RpcResponse::error(&RpcError::generic("file paths are not provided."), id);
+        return RpcResponse::error(&RpcError::generic(E_MSG_FILE_PATHS), id);
     }
     let output_dir = match required(params, 1) {
         Err(e) => return RpcResponse::error(&e, id),
@@ -127,12 +134,7 @@ async fn create_torrent_method(st: &AppState, params: &[Value], id: Value) -> Rp
             "v2" => TorrentForm::V2Only,
             "hybrid" => TorrentForm::Hybrid,
             other => {
-                return RpcResponse::error(
-                    &RpcError::generic(format!(
-                        "unknown torrent format: {other} (expected one of v1|v2|hybrid)"
-                    )),
-                    id,
-                );
+                return RpcResponse::error(&RpcError::unknown_torrent_format(other), id);
             }
         },
         Some(_) => return RpcResponse::error(&param_error(2, false), id),
@@ -333,13 +335,17 @@ pub(crate) const QUERY_METHODS: &[QueryEntry] = &[
         kind: RpcMethodKind::QueryStatus,
         shape: QueryShape::GidOnly,
         build: |p| SessionCommand::GetUris { gid: p.gid.clone() },
-        render: |reply, _| match reply {
+        render: |reply, _| {
+            match reply {
             CommandReply::Uris(uris) => Ok(Value::Array(
                 uris.iter()
-                    .map(|u| json!({ "uri": u.uri, "status": u.status }))
+                    .map(|u| {
+                        json!({ "uri": u.uri, "status": crate::aria2::status::uri_status_word(u.status) })
+                    })
                     .collect(),
             )),
             other => Err(other),
+        }
         },
     },
     QueryEntry {
@@ -496,10 +502,9 @@ pub(crate) async fn execute_session_method(
                     RpcResponse::ok(json!("OK"), id)
                 }
                 Err(e) => RpcResponse::error(&map_session_error(&e), id),
-                Ok(other) => RpcResponse::error(
-                    &RpcError::generic(format!("unexpected shutdown reply: {other:?}")),
-                    id,
-                ),
+                Ok(other) => {
+                    RpcResponse::error(&RpcError::unexpected_reply("shutdown", &other), id)
+                }
             };
         }
         "addMetalink" => {
@@ -531,9 +536,12 @@ pub(crate) async fn execute_session_method(
                 let uris = string_list(&params, 0)?;
                 if uris.is_empty() {
                     // Per RpcMethodImpl.cc.
-                    return Err(RpcError::generic("URI is not provided."));
+                    return Err(RpcError::generic(E_MSG_URI_NOT_PROVIDED));
                 }
                 let options = opt_options(&params, 1)?;
+                // The option-name gate (observation: warn + count; the
+                // wire behavior is the reference's ignore rule).
+                crate::aria2::option::note_option_intake(&options, "addUri");
                 let position = opt_position(&params, 2)?;
                 Ok(SessionCommand::AddUri {
                     uris,
@@ -546,7 +554,7 @@ pub(crate) async fn execute_session_method(
                     .as_str()
                     .ok_or_else(|| param_error(0, false))?;
                 let torrent = base64::decode(raw)
-                    .ok_or_else(|| RpcError::generic("torrent data is not valid base64."))?;
+                    .ok_or_else(|| RpcError::generic(E_MSG_TORRENT_NOT_BASE64))?;
                 // Param 1 = webseed URIs (kept in the aria2 shape; the
                 // Motrix frontend never sends it — always empty). BEP19
                 // url-list parsing is wired (the webseed set is projected
@@ -555,6 +563,7 @@ pub(crate) async fn execute_session_method(
                 // they are explicitly dropped and declared.
                 let _ = params.get(1);
                 let options = opt_options(&params, 2)?;
+                crate::aria2::option::note_option_intake(&options, "addTorrent");
                 let position = opt_position(&params, 3)?;
                 Ok(SessionCommand::AddTorrent {
                     torrent,
@@ -573,10 +582,11 @@ pub(crate) async fn execute_session_method(
                 // same-position check, RpcMethodImpl.cc).
                 let uris = string_list(&params, 0)?;
                 if uris.is_empty() {
-                    return Err(RpcError::generic("URI is not provided."));
+                    return Err(RpcError::generic(E_MSG_URI_NOT_PROVIDED));
                 }
                 let cookies = crate::rpc_cookies::parse_task_cookies(&params, 1)?;
                 let options = opt_options(&params, 2)?;
+                crate::aria2::option::note_option_intake(&options, "addUriWithCookies");
                 let position = opt_position(&params, 3)?;
                 Ok(SessionCommand::AddUriWithCookies {
                     uris,
@@ -637,9 +647,7 @@ pub(crate) async fn execute_session_method(
                     Some(Value::Number(n)) => match n.as_i64() {
                         Some(i) if i >= 1 => i as u64,
                         _ => {
-                            return Err(RpcError::generic(
-                                "Integer value must be greater than or equal to 1.",
-                            ));
+                            return Err(RpcError::generic(E_MSG_INTEGER_GE_ONE));
                         }
                     },
                     Some(_) => return Err(param_error(1, false)),
@@ -668,6 +676,7 @@ pub(crate) async fn execute_session_method(
                     return Err(param_error(1, true));
                 }
                 let options = opt_options(&params, 1)?;
+                crate::aria2::option::note_option_intake(&options, "changeOption");
                 Ok(SessionCommand::ChangeOption { gid, options })
             }
             "taiji.addTracker" | "taiji.removeTracker" => {
@@ -700,7 +709,7 @@ pub(crate) async fn execute_session_method(
                     _ => return Err(param_error(1, false)),
                 };
                 if urls.is_empty() {
-                    return Err(RpcError::generic("tracker URLs are not provided."));
+                    return Err(RpcError::generic(E_MSG_TRACKER_URLS));
                 }
                 if method == "taiji.removeTracker" {
                     return Ok(SessionCommand::RemoveTracker { gid, urls });
@@ -738,7 +747,7 @@ pub(crate) async fn execute_session_method(
                     Some("POS_SET") => OffsetMode::Set,
                     Some("POS_CUR") => OffsetMode::Cur,
                     Some("POS_END") => OffsetMode::End,
-                    Some(_) => return Err(RpcError::generic("Illegal argument.")),
+                    Some(_) => return Err(RpcError::generic(E_MSG_ILLEGAL_ARGUMENT)),
                     // A non-JSON-string = a type error (checkRequiredParam<String>).
                     None => return Err(param_error(2, false)),
                 };
@@ -749,6 +758,7 @@ pub(crate) async fn execute_session_method(
                     return Err(param_error(0, true));
                 }
                 let options = opt_options(&params, 0)?;
+                crate::aria2::option::note_option_intake(&options, "changeGlobalOption");
                 Ok(SessionCommand::ChangeGlobalOption { options })
             }
             "getGlobalOption" => Ok(SessionCommand::GetGlobalOption),
@@ -849,7 +859,11 @@ pub(crate) async fn execute_session_method(
                     .as_deref()
                     .and_then(|n| n.parse::<taiji_core::engine::SchedulerPolicy>().ok())
                     .ok_or_else(|| {
-                        RpcError::generic(format!("unknown scheduler policy: {shown}"))
+                        let shown_str = match &shown {
+                            Value::String(s) => s.as_str(),
+                            other => &other.to_string(),
+                        };
+                        RpcError::unknown_scheduler_policy(shown_str)
                     })?;
                 Ok(SessionCommand::SetSchedulerPolicy { gid, policy })
             }
@@ -875,12 +889,7 @@ pub(crate) async fn execute_session_method(
                     Some(v) => {
                         let bps = uint_value(v, 3, u64::MAX)?;
                         if bps == 0 {
-                            return Err(RpcError::generic(
-                                "The integer parameter at 3 has invalid value: \
-                                 bytes_per_sec must be greater than 0 (omit the \
-                                 parameter for the default rate)."
-                                    .to_string(),
-                            ));
+                            return Err(RpcError::playhead_bps_zero());
                         }
                         Some(bps)
                     }
@@ -911,24 +920,17 @@ pub(crate) async fn execute_session_method(
                     return Err(param_error(1, true));
                 };
                 if entries.is_empty() {
-                    return Err(RpcError::generic(
-                        "The parameter at 1 has invalid value: pairs must not be empty."
-                            .to_string(),
-                    ));
+                    return Err(RpcError::file_priority_pairs_empty());
                 }
                 let mut pairs: Vec<(u32, i8)> = Vec::with_capacity(entries.len());
                 for (n, entry) in entries.iter().enumerate() {
                     let Value::Object(map) = entry else {
-                        return Err(RpcError::generic(format!(
-                            "The parameter at 1 has invalid value: entry {n} is not an object."
-                        )));
+                        return Err(RpcError::file_priority_entry_not_object(n));
                     };
                     let index = match map.get("index") {
                         Some(v) => uint_value(v, 1, u32::MAX as u64)? as u32,
                         None => {
-                            return Err(RpcError::generic(format!(
-                                "The parameter at 1 has invalid value: entry {n} misses index."
-                            )));
+                            return Err(RpcError::file_priority_entry_misses_index(n));
                         }
                     };
                     let level = match map.get("priority") {
@@ -946,10 +948,7 @@ pub(crate) async fn execute_session_method(
                         None => None,
                     };
                     let Some(level) = level else {
-                        return Err(RpcError::generic(format!(
-                            "The parameter at 1 has invalid value: entry {n} priority must be \
-                             an integer in -1..=7."
-                        )));
+                        return Err(RpcError::file_priority_entry_bad_priority(n));
                     };
                     pairs.push((index, level as i8));
                 }
@@ -976,10 +975,7 @@ pub(crate) async fn execute_session_method(
                 let tier = name
                     .parse::<taiji_core::engine::DiskTier>()
                     .map_err(|_| {
-                        RpcError::generic(format!(
-                            "unknown disk tier: {name} (expected one of {:?})",
-                            taiji_core::engine::DiskTier::NAMES
-                        ))
+                        RpcError::unknown_disk_tier(&name, taiji_core::engine::DiskTier::NAMES)
                     })?;
                 Ok(SessionCommand::SetDiskTier { gid, tier })
             }
@@ -997,9 +993,10 @@ pub(crate) async fn execute_session_method(
                     _ => return Err(param_error(0, false)),
                 };
                 if url.trim().is_empty() {
-                    return Err(RpcError::generic("URL is not provided."));
+                    return Err(RpcError::generic(E_MSG_URL_NOT_PROVIDED));
                 }
                 let options = opt_options(&params, 1)?;
+                crate::aria2::option::note_option_intake(&options, "addMedia");
                 let cookies = match params.get(1) {
                     Some(Value::Object(m)) if m.contains_key("cookies") => {
                         let cookie_value = m.get("cookies").cloned().unwrap_or(Value::Null);
@@ -1026,7 +1023,7 @@ pub(crate) async fn execute_session_method(
                     _ => return Err(param_error(0, false)),
                 };
                 if url.trim().is_empty() {
-                    return Err(RpcError::generic("URL is not provided."));
+                    return Err(RpcError::generic(E_MSG_URL_NOT_PROVIDED));
                 }
                 Ok(SessionCommand::ProbeMedia { url })
             }

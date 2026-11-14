@@ -13,7 +13,7 @@
 use serde_json::Value;
 use std::net::IpAddr;
 
-use crate::error::{RpcError, STR_TOO_MANY_ITEMS};
+use crate::aria2::error::RpcError;
 use crate::jsonrpc::{ParsedCall, RpcResponse, parse_request};
 
 use super::{AppState, process_call};
@@ -30,8 +30,8 @@ pub(crate) struct RpcOutcome {
 /// Item cap for batch arrays and system.multicall specs (security
 /// fix): inside a 10MiB request, ~3.5×10⁶ `{}` items amplify to a
 /// ~300MB response (26×); the 1000-item cap bounds the amplification
-/// ratio; beyond it, answer [`STR_TOO_MANY_ITEMS`] as an explicit
-/// error.
+/// ratio; beyond it, answer the `taiji.request.too_many_items` string
+/// code as an explicit error.
 pub(crate) const MAX_BATCH_ITEMS: usize = 1000;
 
 /// **Request-level total subcall cap** — a `system.multicall` inside
@@ -64,14 +64,10 @@ fn item_subcall_count(item: &Value) -> usize {
     }
 }
 
-/// Over-cap items error (shared text surface for batch and multicall).
+/// Over-cap items error (shared receipt for batch and multicall; the
+/// message constructor lives in the adapter error table).
 pub(crate) fn too_many_items(id: Value) -> RpcResponse {
-    RpcResponse::error(
-        &RpcError::generic(format!(
-            "{STR_TOO_MANY_ITEMS}: batch/multicall capped at {MAX_BATCH_ITEMS} calls"
-        )),
-        id,
-    )
+    RpcResponse::error(&RpcError::too_many_items(MAX_BATCH_ITEMS), id)
 }
 
 pub(crate) async fn handle_payload(st: &AppState, v: &Value, ip: Option<IpAddr>) -> RpcOutcome {
@@ -103,10 +99,7 @@ pub(crate) async fn handle_payload(st: &AppState, v: &Value, ip: Option<IpAddr>)
             let total_subcalls: usize = items.iter().map(item_subcall_count).sum();
             if total_subcalls > MAX_REQUEST_SUBCALLS {
                 let resp = RpcResponse::error(
-                    &RpcError::generic(format!(
-                        "{STR_TOO_MANY_ITEMS}: batch subcall budget exceeded ({} > {})",
-                        total_subcalls, MAX_REQUEST_SUBCALLS
-                    )),
+                    &RpcError::subcall_budget_exceeded(total_subcalls, MAX_REQUEST_SUBCALLS),
                     Value::Null,
                 );
                 return RpcOutcome {

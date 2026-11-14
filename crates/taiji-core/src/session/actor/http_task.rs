@@ -64,7 +64,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 // actor module face: Job/TaskNotice/now_epoch/Gid etc. arrive via `super`.
-use super::super::view::{EngineFailure, EngineFailureKind};
+use super::super::{EngineFailure, EngineFailureKind};
 use super::*;
 use taiji_http::aimd::AimdConfig;
 use taiji_http::client::{ClientConfig, HttpClient};
@@ -914,7 +914,7 @@ pub(super) struct HttpLive {
     pub host_controlled: AtomicBool,
     final_url: StdMutex<String>,
     encoding: StdMutex<Option<String>>,
-    sources: StdMutex<Vec<super::super::view::HttpSourceView>>,
+    sources: StdMutex<Vec<super::super::HttpSourceView>>,
     /// Per-source in-flight worker count (workers report real state when
     /// claiming/finishing an extent: >0 = "active", zero = "waiting";
     /// counted so overlapping workers do not stomp each other).
@@ -955,10 +955,10 @@ impl HttpLive {
             encoding: StdMutex::new(None),
             sources: StdMutex::new(
                 uris.iter()
-                    .map(|u| super::super::view::HttpSourceView {
+                    .map(|u| super::super::HttpSourceView {
                         url: u.clone(),
                         rate: 0,
-                        state: "waiting".into(),
+                        state: super::super::HttpSourceState::Waiting,
                     })
                     .collect(),
             ),
@@ -1014,19 +1014,25 @@ impl HttpLive {
             // failed are ledger-level terminal states (coordinator
             // snapshot / probe verdicts) — busy churn never rewrites
             // them.
-            if slot.state != "waiting" && slot.state != "active" {
+            if slot.state != super::super::HttpSourceState::Waiting
+                && slot.state != super::super::HttpSourceState::Active
+            {
                 return;
             }
-            slot.state = if active { "active" } else { "waiting" }.into();
+            slot.state = if active {
+                super::super::HttpSourceState::Active
+            } else {
+                super::super::HttpSourceState::Waiting
+            };
         }
     }
 
     /// Source terminal-state write-back (probe failure / merge-table eviction
     /// / coordinator demotion-removal snapshot).
-    fn set_source_state(&self, idx: usize, state: &str) {
+    fn set_source_state(&self, idx: usize, state: super::super::HttpSourceState) {
         let mut s = crate::lock(&self.sources);
         if let Some(slot) = s.get_mut(idx) {
-            slot.state = state.to_string();
+            slot.state = state;
         }
     }
 
@@ -1056,6 +1062,7 @@ impl HttpLive {
     /// non-waiting/active slots, so without this reset the RPC view would
     /// stay demoted forever.
     fn apply_source_book_states(&self, states: &[(u32, taiji_http::sources::SourceState)]) {
+        use super::super::HttpSourceState;
         use taiji_http::sources::SourceState;
         let mut s = crate::lock(&self.sources);
         for (source, st) in states {
@@ -1063,10 +1070,10 @@ impl HttpLive {
                 continue;
             };
             match st {
-                SourceState::Demoted => slot.state = "demoted".into(),
-                SourceState::Removed => slot.state = "removed".into(),
+                SourceState::Demoted => slot.state = HttpSourceState::Demoted,
+                SourceState::Removed => slot.state = HttpSourceState::Removed,
                 SourceState::Active => {
-                    if slot.state == "demoted" {
+                    if slot.state == HttpSourceState::Demoted {
                         // Lock order: source_busy is taken and
                         // released first (no nested inversion —
                         // note_source_busy only takes the sources lock
@@ -1075,7 +1082,11 @@ impl HttpLive {
                             .get(*source as usize)
                             .copied()
                             .unwrap_or(0);
-                        slot.state = if busy > 0 { "active" } else { "waiting" }.into();
+                        slot.state = if busy > 0 {
+                            HttpSourceState::Active
+                        } else {
+                            HttpSourceState::Waiting
+                        };
                     }
                 }
             }
@@ -1146,12 +1157,12 @@ impl HttpLive {
     /// sources with no readings yet are honestly 0). Source state values =
     /// waiting | active | demoted | removed | failed (probe failure /
     /// merge-table eviction / ledger terminal states).
-    pub(super) fn http_view(&self) -> super::super::view::HttpView {
+    pub(super) fn http_view(&self) -> super::super::HttpView {
         let mut sources = crate::lock(&self.sources).clone();
         for (slot, r) in sources.iter_mut().zip(self.source_rates.iter()) {
             slot.rate = r.load(Ordering::Relaxed);
         }
-        super::super::view::HttpView {
+        super::super::HttpView {
             host_controlled: self.host_controlled.load(Ordering::Relaxed),
             final_url: crate::lock(&self.final_url).clone(),
             connections: self.connections.load(Ordering::Relaxed),
@@ -1217,7 +1228,7 @@ pub(super) struct HttpEnd {
     pub total_len: u64,
     pub completed_len: u64,
     pub note: Option<String>,
-    pub error_engine: Option<super::super::view::EngineFailure>,
+    pub error_engine: Option<super::super::EngineFailure>,
 }
 
 /// The store half of RenameJournal (the "DB as journal" injection face):
@@ -1496,7 +1507,7 @@ pub(super) enum DriveStop {
     /// face (numeric refinement flows through HttpEnd.error_engine into
     /// the taiji-rpc map, per code and per dimension).
     Failed {
-        failure: super::super::view::EngineFailure,
+        failure: super::super::EngineFailure,
         message: String,
     },
     /// If-Match conditional resume hit a 412 (server content changed) —
@@ -1676,7 +1687,7 @@ pub(super) fn spawn_http_task(
 enum HttpDriveError {
     Cancelled,
     Failed {
-        failure: super::super::view::EngineFailure,
+        failure: super::super::EngineFailure,
         message: String,
     },
 }
@@ -1913,7 +1924,7 @@ async fn drive_attempt(
         if let Err(e) = &outcome {
             warn!(target: "taiji::core::http", gid = %gid_hex, code = e.code(),
                 uri = %redact_uri(uri), "probe failed; source dropped");
-            live.set_source_state(probed.len(), "failed");
+            live.set_source_state(probed.len(), super::super::HttpSourceState::Failed);
         }
         probed.push(ProbedSource {
             uri: uri.clone(),
@@ -2782,7 +2793,7 @@ async fn drive_segmented(
             if sources.iter().any(|s| s.uri == slot.url) {
                 continue;
             }
-            slot.state = "failed".into();
+            slot.state = super::super::HttpSourceState::Failed;
         }
     }
 
@@ -5340,7 +5351,7 @@ pub(super) async fn cancelled_row(
 pub(super) async fn fail(
     p: Option<&PersistHandle>,
     mirror: &Arc<StdMutex<HttpTaskRow>>,
-    failure: super::super::view::EngineFailure,
+    failure: super::super::EngineFailure,
     msg: String,
 ) -> DriveStop {
     set_state(mirror, TaskPhase::Error);
@@ -8364,7 +8375,7 @@ mod tests {
         live.apply_source_book_states(&[(1, SourceState::Demoted)]);
         assert_eq!(
             live.sources.lock().unwrap_or_else(|e| e.into_inner())[1].state,
-            "demoted"
+            super::super::HttpSourceState::Demoted
         );
 
         // Ledger back to Active: the busy driver resets it (busy=1 -> active,
@@ -8372,7 +8383,7 @@ mod tests {
         live.apply_source_book_states(&[(1, SourceState::Active)]);
         assert_eq!(
             live.sources.lock().unwrap_or_else(|e| e.into_inner())[1].state,
-            "active",
+            super::super::HttpSourceState::Active,
             "after demotion recovery the view hands back to the busy driver (in-flight = active)"
         );
 
@@ -8382,18 +8393,18 @@ mod tests {
         live.apply_source_book_states(&[(1, SourceState::Active)]);
         assert_eq!(
             live.sources.lock().unwrap_or_else(|e| e.into_inner())[1].state,
-            "waiting",
+            super::super::HttpSourceState::Waiting,
             "after demotion recovery the view hands back to the busy driver (no in-flight = waiting)"
         );
 
         // A one-shot view (failed -> the slot never stuck) is untouched: the
         // Active arm only resets "demoted"; "failed" (the probe-eviction terminal)
         // is never overwritten by the ledger snapshot.
-        live.set_source_state(0, "failed");
+        live.set_source_state(0, super::super::HttpSourceState::Failed);
         live.apply_source_book_states(&[(0, SourceState::Active)]);
         assert_eq!(
             live.sources.lock().unwrap_or_else(|e| e.into_inner())[0].state,
-            "failed",
+            super::super::HttpSourceState::Failed,
             "the probe-eviction terminal is never overwritten by the ledger's Active snapshot"
         );
     }

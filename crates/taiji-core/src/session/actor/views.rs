@@ -155,7 +155,7 @@ impl SessionActor {
                 .map(|u| super::super::view::HttpSourceView {
                     url: u.clone(),
                     rate: 0,
-                    state: "waiting".into(),
+                    state: super::super::view::HttpSourceState::Waiting,
                 })
                 .collect(),
         }
@@ -185,7 +185,7 @@ impl SessionActor {
                     .map(|t| super::super::view::MediaTrackView {
                         label: t.label.clone(),
                         kind: t.kind.to_string(),
-                        state: t.state.to_string(),
+                        state: t.state,
                         segments_done: t.segments_done,
                         segments_total: t.segments_total,
                     })
@@ -264,7 +264,7 @@ impl SessionActor {
                 .iter()
                 .map(|u| UriEntryView {
                     uri: u.clone(),
-                    status: "used",
+                    status: UriStatus::Used,
                 })
                 .collect(),
             pieces_root: None,
@@ -357,7 +357,7 @@ impl SessionActor {
                             completed_length: st.bytes_done,
                             uris: vec![super::super::view::UriEntryView {
                                 uri: mj.cfg.url.clone(),
-                                status: "used",
+                                status: super::super::view::UriStatus::Used,
                             }],
                             pieces_root: None,
                             piece_size: 0,
@@ -611,7 +611,7 @@ impl SessionActor {
                     completed_length: completed,
                     uris: vec![super::super::view::UriEntryView {
                         uri: mj.cfg.url.clone(),
-                        status: "used",
+                        status: super::super::view::UriStatus::Used,
                     }],
                     pieces_root: None,
                     piece_size: 0,

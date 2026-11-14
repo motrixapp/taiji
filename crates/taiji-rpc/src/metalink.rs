@@ -14,8 +14,8 @@
 //! absent from the registry (`tests/feature_gate.rs` pins both states).
 //!
 //! Error-code discipline: the `taiji.metalink.*` string codes are owned
-//! by the [`crate::error`] mapping table (the repo-wide single source);
-//! [`crate::error::map_metalink_error`] takes
+//! by the [`crate::aria2::error`] mapping table (the repo-wide single source);
+//! [`crate::aria2::error::map_metalink_error`] takes
 //! [`taiji_metalink::MetalinkError`].
 //!
 //! Expansion semantics (document order; the produced order is the
@@ -34,9 +34,9 @@ use tracing::warn;
 use taiji_core::metainfo::TorrentIdentity;
 use taiji_core::session::{CommandReply, SessionCommand, magnet_identity, windows_unsafe_basename};
 
+use crate::aria2::error::{RpcError, STR_METALINK_TIMEOUT, map_metalink_error, map_session_error};
 use crate::base64;
 use crate::dispatch::params::{opt_options, opt_position, param_error, try_rpc};
-use crate::error::{RpcError, STR_METALINK_TIMEOUT, map_metalink_error, map_session_error};
 use crate::jsonrpc::RpcResponse;
 
 /// Parse budget ceiling (600s): the same discipline as
@@ -52,24 +52,9 @@ pub use taiji_metalink::{
     VerifyError, WarningKind, parse,
 };
 
-/// The legacy aria2 metalink option family (the metalink group:
-/// unsupported, ignored with a warning; listed in the declared
-/// differences).
-const UNSUPPORTED_METALINK_OPTIONS: &[&str] = &[
-    "metalink-language",
-    "metalink-location",
-    "metalink-os",
-    "metalink-version",
-    "metalink-preferred-protocol",
-    "metalink-force-protocol",
-    "metalink-enable-unique-protocol",
-];
-
-/// The HTTP header auto-discovery option (default off; metalink group).
-/// true is accepted but treated as invalid with a warning —
-/// content-sniffing auto-conversion is not in this build (module-doc
-/// declared difference).
-const AUTO_DISCOVER_OPTION: &str = "metalink-enable-auto-discover";
+// The metalink seam name tables live in the adapter option table
+// (`crate::aria2::option`) — rpc-owned names, one home.
+use crate::aria2::option::{AUTO_DISCOVER_OPTION, UNSUPPORTED_METALINK_OPTIONS};
 
 /// One expansion product: (uris, options) ready for [`SessionCommand::AddUri`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,9 +350,8 @@ pub(crate) fn sanitize_base_options(
                 ),
                 "false" => {}
                 _ => {
-                    return Err(RpcError::generic(format!(
-                        "taiji.option.invalid: --metalink-enable-auto-discover {v:?} \
-                         (want true|false)"
+                    return Err(RpcError::option_invalid(format!(
+                        "--metalink-enable-auto-discover {v:?} (want true|false)"
                     )));
                 }
             }
@@ -449,7 +433,7 @@ pub(crate) async fn add_metalink_method(
         Ok(Ok(Some(Err(e)))) => return RpcResponse::error(&map_metalink_error(&e), id),
         Ok(Ok(None)) => {
             return RpcResponse::error(
-                &RpcError::generic("metalink data is not valid base64."),
+                &RpcError::generic(crate::aria2::error::MSG_METALINK_NOT_BASE64),
                 id,
             );
         }
@@ -495,7 +479,7 @@ pub(crate) async fn add_metalink_method(
             Ok(other) => {
                 return fail_with_partial(
                     &gids,
-                    RpcError::generic(format!("unexpected addMetalink reply: {other:?}")),
+                    RpcError::unexpected_reply("addMetalink", &other),
                     id,
                 );
             }
@@ -1035,7 +1019,7 @@ mod tests {
     /// = the original message.
     #[test]
     fn partial_failure_receipt_carries_created_gids() {
-        use crate::error::map_metalink_error;
+        use crate::aria2::error::map_metalink_error;
         let gids = [json!("8000000000000001"), json!("8000000000000002")];
         let r = fail_with_partial(
             &gids,
@@ -1053,7 +1037,11 @@ mod tests {
             r.payload["message"]
         );
         // Zero created = the original message (no tail appended).
-        let r = fail_with_partial(&[], crate::error::RpcError::generic("boom"), json!("t"));
+        let r = fail_with_partial(
+            &[],
+            crate::aria2::error::RpcError::generic("boom"),
+            json!("t"),
+        );
         assert_eq!(r.payload["message"], json!("boom"));
     }
 

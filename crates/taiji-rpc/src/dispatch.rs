@@ -31,8 +31,8 @@ use tracing::warn;
 
 use taiji_core::session::{RPC_METHOD_INFO, RPC_METHOD_SLOT_UNKNOWN, RPC_METHODS, SessionHandle};
 
+use crate::aria2::error::{RpcError, STR_UNAUTH_WRITE};
 use crate::auth;
-use crate::error::{RpcError, STR_UNAUTH_WRITE};
 use crate::guards::{AuthBackoff, ConnLedger};
 use crate::jsonrpc::RpcResponse;
 
@@ -65,45 +65,11 @@ pub(crate) use view::engine_kind;
 #[cfg(test)]
 use view::{pagination_range, render_status_list};
 
-/// The six event notification names (the canonical face:
-/// `taiji.onXxx`, the payload `[{gid}]` unchanged). Same source as the
-/// core `EventKind::notification_method` (locked by a consistency
-/// test); `system.listNotifications` emits this table directly in the
-/// default (compat off) state.
-pub const RPC_NOTIFICATIONS: &[&str] = &[
-    "taiji.onHttpOutputReady",
-    "taiji.onDownloadStart",
-    "taiji.onDownloadPause",
-    "taiji.onDownloadStop",
-    "taiji.onDownloadComplete",
-    "taiji.onDownloadError",
-    "taiji.onBtDownloadComplete",
-];
-
-/// The six event notification names (the `--rpc-aria2-compat` alias
-/// face). Verbatim cross-validation: `RpcMethodFactory.cc` (the
-/// system.listNotifications table) and `WebSocketSessionMan.cc` (the
-/// WS push method names) — one-to-one with the canonical table
-/// (`taiji.X` <-> `aria2.X`); the extension events (`taiji.recovery*`)
-/// are not in this table (the compat face covers only the six events).
-pub const RPC_NOTIFICATIONS_ARIA2: &[&str] = &[
-    "taiji.onHttpOutputReady",
-    "aria2.onDownloadStart",
-    "aria2.onDownloadPause",
-    "aria2.onDownloadStop",
-    "aria2.onDownloadComplete",
-    "aria2.onDownloadError",
-    "aria2.onBtDownloadComplete",
-];
-
-/// The listNotifications presentation-face selector (one API face at a time).
-pub(crate) fn notification_face(aria2_compat: bool) -> &'static [&'static str] {
-    if aria2_compat {
-        RPC_NOTIFICATIONS_ARIA2
-    } else {
-        RPC_NOTIFICATIONS
-    }
-}
+// The notification name tables + the presentation-face selector live
+// in the adapter layer (`crate::aria2::event`); re-exported here so
+// the `crate::dispatch::*` facade paths stay unchanged.
+pub(crate) use crate::aria2::event::notification_face;
+pub use crate::aria2::event::{RPC_NOTIFICATIONS, RPC_NOTIFICATIONS_ARIA2};
 
 /// The dispatch context (assembled in server.rs; unit tests construct it directly).
 pub(crate) struct AppState {
@@ -326,10 +292,7 @@ async fn process_call_inner(
         if !token_gate(st, ip, &mut params).await {
             return RpcResponse::error(&RpcError::unauthorized(), id);
         }
-        return RpcResponse::error(
-            &RpcError::generic(format!("No such method: {raw_method}")),
-            id,
-        );
+        return RpcResponse::error(&RpcError::no_such_method(raw_method), id);
     };
     match method {
         "system.multicall" => {
@@ -338,7 +301,7 @@ async fn process_call_inner(
                 // comes before auth (the reference compares method names
                 // inside the multicall loop, not via execute).
                 return RpcResponse::error(
-                    &RpcError::generic("Recursive system.multicall forbidden."),
+                    &RpcError::generic(crate::aria2::error::MSG_RECURSIVE_MULTICALL),
                     id,
                 );
             }

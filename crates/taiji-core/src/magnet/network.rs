@@ -30,9 +30,17 @@ pub(super) struct Dialer {
     pub nat: Option<NatEngine>,
     v4: UtpConnectHalf,
     v6: Option<UtpConnectHalf>,
+    scheduler: Arc<super::scheduler::DialScheduler>,
+    urgent: Arc<Semaphore>,
+    pub self_v4: Option<IpAddr>,
+    pub self_v6: Option<IpAddr>,
+    pub announces: Arc<taiji_bt::tracker::budget::AnnounceBudget>,
 }
 
 impl Dialer {
+    pub fn retire_stalled(&self, owner: u64) {
+        self.scheduler.retire_stalled(owner);
+    }
     pub fn advertised(&self, transport: Transport, address: SocketAddr) -> u16 {
         if address.is_ipv6() {
             return self.port;
@@ -91,6 +99,8 @@ impl Dialer {
     )]
     pub async fn connect(
         &self,
+        owner: u64,
+        foreground: bool,
         address: SocketAddr,
         hash: &[u8; 20],
         peer_id: &[u8; 20],
@@ -99,18 +109,21 @@ impl Dialer {
         punch: bool,
         urgent: bool,
         token: &CancellationToken,
+        admitted: impl FnOnce(),
     ) -> Option<(Stream, Handshake, Transport)> {
-        // Bound process-wide half-open pressure independently of live peers.
-        // Match one task's 128-attempt metadata budget: a lower shared limit
-        // would serialize healthy candidates behind silent handshake timeouts.
-        static DIALS: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
-        static URGENT: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
-        let permits = if urgent {
-            URGENT.get_or_init(|| Arc::new(Semaphore::new(8)))
+        let (ordinary_permit, _urgent_permit) = if urgent {
+            let permit = tokio::select! { _ = token.cancelled() => return None, permit = self.urgent.clone().acquire_owned() => permit.ok()? };
+            (None, Some(permit))
         } else {
-            DIALS.get_or_init(|| Arc::new(Semaphore::new(128)))
+            (
+                Some(self.scheduler.acquire(owner, foreground, token).await?),
+                None,
+            )
         };
-        let _permit = tokio::select! { _ = token.cancelled() => return None, permit = permits.acquire() => permit.ok()? };
+        admitted();
+        let admission = ordinary_permit
+            .as_ref()
+            .map_or_else(|| token.clone(), |permit| permit.cancel.clone());
         let run = async {
             if punch {
                 for _ in 0..3 {
@@ -144,7 +157,7 @@ impl Dialer {
                 preferred.await
             }
         };
-        tokio::select! { _ = token.cancelled() => None, result = run => result }
+        tokio::select! { _ = admission.cancelled() => None, result = run => result }
     }
 }
 
@@ -324,8 +337,20 @@ impl Network {
                 );
             }
         }
+        let self_v4 = taiji_bt::dht::security::probe_source_ip(false).await;
+        let self_v6 = None;
         Ok(Self {
-            dialer: Arc::new(Dialer { port, nat, v4, v6 }),
+            dialer: Arc::new(Dialer {
+                port,
+                nat,
+                v4,
+                v6,
+                scheduler: super::scheduler::DialScheduler::new(),
+                urgent: Arc::new(Semaphore::new(8)),
+                self_v4,
+                self_v6,
+                announces: Arc::new(taiji_bt::tracker::budget::AnnounceBudget::default()),
+            }),
             incoming,
             dht: Some((dht, demux)),
             dht6,

@@ -192,7 +192,13 @@ pub(super) fn handle_slow_tick(
         let Some(face) = state.faces.get_mut(fi) else {
             continue;
         };
-        drive_recovery(face, fi, book, &state.recovery_deliver);
+        drive_recovery(
+            face,
+            fi,
+            book,
+            &state.recovery_deliver,
+            state.selected_mask.as_deref(),
+        );
     }
     // Push PEX candidate snapshots for dirty faces: project after the
     // 60s window prune and overwrite per peer (the peer-side

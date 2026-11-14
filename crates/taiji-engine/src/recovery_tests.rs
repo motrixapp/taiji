@@ -240,7 +240,16 @@ async fn pump_event(
         .await
         .unwrap_or_else(|| panic!("fetch channel closed"));
     if let HashFetchEvent::Recovery { block, reply } = &evt {
-        handle_recovery_reply_and_drive(fi, face, book, deliver, file_idx, *block, reply.clone());
+        handle_recovery_reply_and_drive(
+            fi,
+            face,
+            book,
+            deliver,
+            file_idx,
+            *block,
+            reply.clone(),
+            None,
+        );
         return evt;
     }
     panic!("unexpected lazy-fetch event: {evt:?}");
@@ -430,9 +439,18 @@ async fn duplex_recovery_fetch_delivers_complete_layer() {
     );
     let (deliver, mut deliver_rx) = mpsc::channel::<RecoveredPieceLayer>(RECOVERY_DELIVER_CAPACITY);
 
+    drive_recovery(&mut face, 0, &mut book, &deliver, Some(&[false; 3]));
+    assert!(matches!(book.files[&0].state, RecoveryFetchState::Missing));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), next_request(&mut remote_r))
+            .await
+            .is_err(),
+        "unselected files must not request proof data"
+    );
+
     // Drive round 1: coverage-first peer choice -> block 0 on the wire
     // (base = the piece level = 1).
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(
         book.files[&0].state,
         RecoveryFetchState::Requesting { block: 0, cuid: 1 }
@@ -561,7 +579,7 @@ async fn recovery_bounded_one_inflight_per_peer_across_files() {
     // Drive round: the only peer is occupied by file 0 (BTreeMap order
     // picks file 0 first) — file 1 must wait (the busy exclusion = the
     // bookkeeping guarantee of <=1 in-flight per peer).
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(
         book.files[&0].state,
         RecoveryFetchState::Requesting { block: 0, .. }
@@ -618,7 +636,7 @@ async fn recovery_bounded_one_inflight_per_peer_across_files() {
     );
     // After file 0 settles, the same peer can serve file 1
     // (serialization = <=1 in-flight per peer).
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(
         book.files[&1].state,
         RecoveryFetchState::Requesting { block: 0, .. }
@@ -660,7 +678,7 @@ async fn recovery_reject_retries_then_holds_for_fresh_peer() {
     // Reject rounds: while attempts < MAX the reply arm auto-sends the
     // next request; after the last round is exhausted it stops.
     for round in 0..HASH_FETCH_MAX_ATTEMPTS {
-        drive_recovery(&mut face, 0, &mut book, &deliver);
+        drive_recovery(&mut face, 0, &mut book, &deliver, None);
         assert!(
             matches!(book.files[&0].state, RecoveryFetchState::Requesting { .. }),
             "round {round}: should issue the request"
@@ -698,7 +716,7 @@ async fn recovery_reject_retries_then_holds_for_fresh_peer() {
     // Exhausted (attempts == MAX): no fresh peer -> no more resends (no
     // retry storm); the file stays Missing (the recovering gated state —
     // no terminal failure).
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(book.files[&0].state, RecoveryFetchState::Missing));
     // A fresh peer connects (tried memory passes the new cuid) ->
     // immediate retry.
@@ -706,7 +724,7 @@ async fn recovery_reject_retries_then_holds_for_fresh_peer() {
     face.peers.push(handle2);
     face.peer_cuids.push(2);
     face.peer_avail.insert(2, PieceBitmap::ones(3));
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(
         book.files[&0].state,
         RecoveryFetchState::Requesting { cuid: 2, .. }
@@ -774,7 +792,7 @@ async fn recovery_timeout_retries() {
     );
     let (deliver, _deliver_rx) = mpsc::channel::<RecoveredPieceLayer>(RECOVERY_DELIVER_CAPACITY);
 
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(
         book.files[&0].state,
         RecoveryFetchState::Requesting { .. }
@@ -827,7 +845,7 @@ async fn recovery_disconnect_retries_and_skips_dead_peer() {
     );
     let (deliver, _deliver_rx) = mpsc::channel::<RecoveredPieceLayer>(RECOVERY_DELIVER_CAPACITY);
 
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(
         book.files[&0].state,
         RecoveryFetchState::Requesting { .. }
@@ -855,7 +873,7 @@ async fn recovery_disconnect_retries_and_skips_dead_peer() {
     // No dispatch to a dead connection: the drive round picks it -> the
     // command channel is closed -> the send fails -> Requesting is not
     // set, no retry storm.
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(book.files[&0].state, RecoveryFetchState::Missing));
     root_token.cancel();
 }
@@ -1333,7 +1351,7 @@ async fn rec2_cooldown_gates_expires_and_resets_in_drive() {
     }
     // Refuse-in-window: cooling cuid 1 is excluded (not re-probed even
     // with the budget exhausted); fresh cuid 2 is chosen.
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(
         matches!(
             book.files[&0].state,
@@ -1348,7 +1366,7 @@ async fn rec2_cooldown_gates_expires_and_resets_in_drive() {
         .unwrap_or_else(|| panic!("booked"))
         .note_failure_at(2, now);
     assert!(matches!(book.files[&0].state, RecoveryFetchState::Missing));
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(
         matches!(book.files[&0].state, RecoveryFetchState::Missing),
         "all cooling + budget spent: the drive round idles (no retry storm)"
@@ -1361,7 +1379,7 @@ async fn rec2_cooldown_gates_expires_and_resets_in_drive() {
         .unwrap_or_else(|| panic!("booked"))
         .tried
         .insert(1, now - RECOVERY_TRIED_COOLDOWN);
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(
         matches!(
             book.files[&0].state,
@@ -1376,10 +1394,10 @@ async fn rec2_cooldown_gates_expires_and_resets_in_drive() {
         .get_mut(&0)
         .unwrap_or_else(|| panic!("booked"))
         .note_failure_at(1, now);
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(matches!(book.files[&0].state, RecoveryFetchState::Missing));
     note_recovery_evidence(&mut book, 1);
-    drive_recovery(&mut face, 0, &mut book, &deliver);
+    drive_recovery(&mut face, 0, &mut book, &deliver, None);
     assert!(
         matches!(
             book.files[&0].state,

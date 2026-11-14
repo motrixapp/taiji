@@ -606,7 +606,10 @@ impl SessionActor {
                     // serves both faces; the upgraded engine regenerates
                     // from the same option on the activation path).
                     peer_id: generate_peer_id(self.global.peer_id_prefix.as_bytes(), rand::random),
-                    options: mj.options.clone(),
+                    options: MagnetOptions {
+                        task_trackers: Some(mj.tiers.iter().map(|(_, url)| url.clone()).collect()),
+                        ..mj.options.clone()
+                    },
                     // Metadata-phase lease faces: LSD lease as above; DHT
                     // lease = the dedicated metadata-phase engine (above).
                     // Magnets have no private form (BEP27 always allows; the

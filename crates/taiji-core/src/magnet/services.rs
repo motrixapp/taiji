@@ -125,7 +125,7 @@ impl MagnetServices {
     ) -> Option<super::cache::CacheHit> {
         self.cache.load(v1, v2).await
     }
-    pub(super) async fn remember(
+    pub(crate) async fn remember(
         &self,
         v1: Option<[u8; 20]>,
         v2: Option<[u8; 32]>,

@@ -332,7 +332,7 @@ impl SessionActor {
                 let _ = reply.send(result);
             }
             C::GetTorrentMetadata { gid } => {
-                let result = self.get_torrent_metadata(&gid);
+                let result = self.get_torrent_metadata(&gid).await;
                 let _ = reply.send(result);
             }
             C::ConfirmTorrentSelection { gid, options } => {

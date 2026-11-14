@@ -141,7 +141,13 @@ async fn magnet_selection_barrier_and_atomic_confirmation_survive_restart() {
             ),
             CommandReply::TorrentMetadata {
                 data: bytes.clone(),
-                awaiting_selection: true
+                awaiting_selection: true,
+                manifest: Box::new(
+                    taiji_domain::torrent_manifest::TorrentManifest::from_metainfo(&ok(
+                        Metainfo::parse(&bytes),
+                        "manifest metadata"
+                    ))
+                )
             }
         );
         ok(

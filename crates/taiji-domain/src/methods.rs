@@ -101,6 +101,7 @@ pub const RPC_METHODS: &[&str] = &[
     "taiji.prepareBitTorrent",
     "taiji.notifyNetworkChange",
     "taiji.getMagnetResolution",
+    "taiji.getTorrentManifest",
     "taiji.getTorrentMetadata",
     "taiji.confirmTorrentSelection",
     "taiji.getHttpOutput",
@@ -493,6 +494,11 @@ pub const RPC_METHOD_INFO: &[RpcMethodDescriptor] = &[
     },
     RpcMethodDescriptor {
         name: "taiji.getMagnetResolution",
+        read_only: true,
+        kind: RpcMethodKind::Control,
+    },
+    RpcMethodDescriptor {
+        name: "taiji.getTorrentManifest",
         read_only: true,
         kind: RpcMethodKind::Control,
     },

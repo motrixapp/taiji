@@ -41,8 +41,22 @@ class Fixture:
         }
         if scenario == "slow-blocks":
             info[b"x-benchmark-padding"] = bytes(128 * 1024)
+        self.v2 = scenario in {"v2-32k", "v2-513"}
+        if self.v2:
+            piece_length, pieces = (32768, 2) if scenario == "v2-32k" else (16384, 513)
+            blocks = piece_length // 16384 * pieces
+            nodes = [hashlib.sha256(bytes(16384)).digest()] * blocks
+            nodes += [bytes(32)] * ((1 << (len(nodes) - 1).bit_length()) - len(nodes))
+            while len(nodes) > 1:
+                nodes = [hashlib.sha256(nodes[i] + nodes[i + 1]).digest()
+                         for i in range(0, len(nodes), 2)]
+            info = {b"name": f"{scenario}-{iteration}.bin".encode(), b"meta version": 2,
+                    b"piece length": piece_length,
+                    b"file tree": {b"payload.bin": {b"": {
+                        b"length": piece_length * pieces, b"pieces root": nodes[0]}}}}
         self.info = lt.bencode(info)
-        self.hash = hashlib.sha1(self.info).digest()
+        self.identity = (hashlib.sha256 if self.v2 else hashlib.sha1)(self.info).digest()
+        self.hash = self.identity[:20]
         self.scenario = scenario
         self.public = False
         self.file_count = 1
@@ -52,6 +66,8 @@ class Fixture:
                          "metadata_bytes": 0}
         self.trackers = []
         self.peers = []
+        self.healthy_peers = []
+        self.responded_pieces = set()
 
     async def server(self, callback, peer=False):
         async def track(reader, writer):
@@ -81,6 +97,7 @@ class Fixture:
             async def peer(reader, writer, index=index):
                 return await self.peer(reader, writer, index)
             self.peers.append(await self.server(peer, peer=True))
+            self.healthy_peers.append(self.peers[-1])
         for _ in range(24 if self.scenario == "dead-trackers" else 0):
             port = await self.server(blackhole)
             self.trackers.append(f"http://127.0.0.1:{port}/announce")
@@ -90,7 +107,7 @@ class Fixture:
 
     @property
     def magnet(self):
-        return "magnet:?xt=urn:btih:" + self.hash.hex() + "".join(
+        return "magnet:?xt=urn:" + ("btmh:1220" if self.v2 else "btih:") + self.identity.hex() + "".join(
             "&tr=" + urllib.parse.quote(url, safe="") for url in self.trackers)
 
     async def tracker(self, reader, writer):
@@ -114,6 +131,8 @@ class Fixture:
         self.counters["connections"] += 1
         reserved = bytearray(8)
         reserved[5] = 0x10
+        if self.v2:
+            reserved[7] = 0x10
         peer_id = b"-BM0001-" + f"{index:012d}".encode()
         writer.write(b"\x13BitTorrent protocol" + reserved + self.hash + peer_id)
         def send(extension, data):
@@ -143,6 +162,9 @@ class Fixture:
                         await asyncio.sleep(0.05)
                     self.counters["metadata_requests"] += 1
                     self.counters["metadata_bytes"] += len(block)
+                    if piece in self.responded_pieces:
+                        self.counters["duplicate_metadata_bytes"] = self.counters.get("duplicate_metadata_bytes", 0) + len(block)
+                    self.responded_pieces.add(piece)
                     send(remote_id, lt.bencode({b"msg_type": 1, b"piece": piece,
                                               b"total_size": len(self.info)}) + block)
                 await writer.drain()
@@ -301,7 +323,6 @@ class Daemon:
                 if ready and int(result["completedLength"]) != 0:
                     raise RuntimeError("unexpected payload before file selection")
             if ready:
-                elapsed = (time.monotonic() - started) * 1000
                 expected = lt.parse_magnet_uri(magnet).info_hashes
                 if self.kind == "transmission":
                     expected_hash = str(expected.v1 if expected.has_v1() else expected.v2)
@@ -312,6 +333,7 @@ class Daemon:
                     received = lt.torrent_info(base64.b64decode(metadata["data"])).info_hashes()
                     if (expected.has_v1() and received.v1 != expected.v1) or (expected.has_v2() and received.v2 != expected.v2):
                         raise RuntimeError("native metadata identity mismatch")
+                elapsed = (time.monotonic() - started) * 1000
                 diagnostics = None
                 if self.kind == "taiji":
                     diagnostics = await self.rpc.call("taiji.getMagnetResolution", [task_id])
@@ -338,7 +360,11 @@ async def libtorrent_resolve(fixture, directory, timeout, warmup=0):
         "listen_interfaces": "0.0.0.0:0,[::]:0" if fixture.public else fixture.peer_host + ":0", "enable_dht": fixture.public, "enable_lsd": False,
         "enable_upnp": False, "enable_natpmp": False,
         "enable_outgoing_utp": fixture.public, "enable_incoming_utp": fixture.public,
-        "announce_to_all_tiers": True, "announce_to_all_trackers": False,
+        # v2.1.1 reverses these names in its enum/name table. Magnets assign
+        # each tr a separate tier, so enabling both preserves the intended
+        # one-per-tier fan-out regardless of that mapping. Wire preflight
+        # below validates behavior, not just a symmetric settings readback.
+        "announce_to_all_tiers": True, "announce_to_all_trackers": True,
         "connection_speed": 30, "connections_limit": 500,
         # All test peers are loopback endpoints, not a production recommendation.
         "allow_multiple_connections_per_ip": True,
@@ -358,6 +384,9 @@ async def libtorrent_resolve(fixture, directory, timeout, warmup=0):
             if status.has_metadata:
                 if status.total_payload_download != 0:
                     raise RuntimeError("unexpected libtorrent payload in upload mode")
+                files = handle.torrent_file().files()
+                if files.num_files() != fixture.file_count:
+                    raise RuntimeError("reference file manifest mismatch")
                 return (time.monotonic() - started) * 1000, None
             await asyncio.sleep(0.01)
         return None, None
@@ -383,6 +412,22 @@ def summarize(rows):
     return result
 
 
+async def check_libtorrent_discovery(output, peer_host):
+    fixture = await Fixture("dead-trackers", -1, peer_host).start()
+    try:
+        params = lt.parse_magnet_uri(fixture.magnet)
+        if len(set(params.tracker_tiers)) != len(fixture.trackers):
+            raise RuntimeError("reference magnet tiers are not independent")
+        elapsed, _ = await libtorrent_resolve(fixture, output / "reference-preflight", 3)
+        evidence = {"version": lt.version, "elapsed_ms": elapsed,
+                    "tracker_count": len(fixture.trackers), "counters": fixture.counters.copy()}
+        (output / "reference-preflight.json").write_text(json.dumps(evidence, indent=2))
+        if elapsed is None or not fixture.counters["announces"]:
+            raise RuntimeError("libtorrent did not reach the valid tracker behind 24 stalled tiers; refusing a misconfigured comparison")
+    finally:
+        await fixture.close()
+
+
 async def main(args):
     output = args.output.resolve()
     if (output / "results.json").exists():
@@ -405,6 +450,8 @@ async def main(args):
         del clients["transmission"]
     binary_hashes = {name: hashlib.sha256(Path(binary).read_bytes()).hexdigest()
                      for name, binary in clients.items() if binary is not None}
+    if "libtorrent" in clients:
+        await check_libtorrent_discovery(output, args.peer_host)
     rows = []
     for iteration in range(args.samples):
         for scenario in args.scenarios.split(","):
@@ -412,10 +459,18 @@ async def main(args):
             rng.shuffle(order)
             for name in order:
                 fixture = await (PublicTorrent(args.torrent, scenario) if args.torrent else Fixture(scenario, iteration, args.peer_host)).start()
+                if not fixture.public and scenario == "dead-peers":
+                    if args.peer_order == "seeded":
+                        random.Random(args.seed * 1009 + iteration).shuffle(fixture.peers)
+                    elif args.peer_order in {"first", "middle"}:
+                        healthy = fixture.peers.pop()
+                        fixture.peers.insert(0 if args.peer_order == "first" else len(fixture.peers)//2, healthy)
                 directory = output / f"{iteration}-{scenario}-{name}"
                 daemon = None
                 row = {"client": name, "scenario": scenario, "iteration": iteration,
                        "info_bytes": len(fixture.info), "timeout_s": args.timeout, "warmup_s": args.warmup}
+                if not fixture.public:
+                    row["healthy_peer_positions"] = [fixture.peers.index(p) + 1 for p in fixture.healthy_peers]
                 try:
                     if name == "libtorrent":
                         row["version"] = lt.version
@@ -441,7 +496,7 @@ async def main(args):
                 rows.append(row)
                 print(json.dumps(row), flush=True)
                 (output / "results.json").write_text(json.dumps({
-                    "config": {"samples": args.samples, "seed": args.seed, "clients": list(clients), "binary_sha256": binary_hashes, "peer_host": args.peer_host, "public_torrent": str(args.torrent) if args.torrent else None, "warmup_s": args.warmup,
+                    "config": {"samples": args.samples, "seed": args.seed, "peer_order": args.peer_order, "clients": list(clients), "binary_sha256": binary_hashes, "peer_host": args.peer_host, "public_torrent": str(args.torrent) if args.torrent else None, "warmup_s": args.warmup,
                                "scenario_order": args.scenarios, "timeout_s": args.timeout},
                     "runs": rows, "summary": summarize(rows),
                 }, indent=2))
@@ -457,6 +512,7 @@ if __name__ == "__main__":
     parser.add_argument("--scenarios", default="healthy,dead-peers,dead-trackers,slow-blocks")
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--peer-order", choices=["seeded", "first", "middle", "last"], default="seeded", help="Healthy candidate placement; seeded order avoids a fixed last-candidate bias")
     parser.add_argument("--clients", help="Optional comma-separated subset of taiji,baseline,libtorrent,transmission")
     parser.add_argument("--peer-host", default="127.0.0.1", help="Local IPv4 interface; Transmission rejects loopback tracker peers, so use a LAN address for that reference")
     parser.add_argument("--torrent", type=Path, help="Opt into metadata-only public tests using a known torrent descriptor; no metainfo is submitted to clients")

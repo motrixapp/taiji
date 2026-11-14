@@ -446,35 +446,9 @@ pub fn engine_config(
     // depends on that shape); the disk-view layout is used for disk
     // delivery (multi-file layouts carry the name directory layer). Their
     // offsets/totals are always equal (the prefix only changes paths).
-    let layout = meta.meta.layout()?;
-    let disk_layout = meta.disk_layout()?;
+    let (layout, disk_layout) = crate::metainfo_admission::layouts(meta)?;
     let piece_len = meta.meta.piece_length;
-    // Piece-vector budget cap: each face's piece count must be checked
-    // BEFORE the piece-level Vec allocation (checking after progressive
-    // allocation = the amplification already happened). v1 face piece
-    // count = ceil(layout total/piece_len) (pad counts into stream space,
-    // = the real v1 Vec lengths); v2 face piece count =
-    // sum(ceil(file.length/piece_len)) (including layer_missing files —
-    // missing-layer pieces still occupy piece-vector slots and must not
-    // be skipped in the count).
-    let v1_pieces = layout.total().div_ceil(u64::from(piece_len));
-    let v2_pieces = meta
-        .meta
-        .files
-        .iter()
-        .map(|f| f.length.div_ceil(u64::from(piece_len)))
-        .fold(0u64, u64::saturating_add);
-    // The config field keeps the boolean fact (`EngineConfig` is a
-    // struct of named fields); the enum lives at the call surface.
     let seed_after_complete = completion == CompletionMode::Seed;
-    match meta.meta.kind {
-        SwarmKind::V1Only => ensure_piece_budget(v1_pieces)?,
-        SwarmKind::V2Only => ensure_piece_budget(v2_pieces)?,
-        SwarmKind::Hybrid => {
-            ensure_piece_budget(v1_pieces)?;
-            ensure_piece_budget(v2_pieces)?;
-        }
-    }
     let mut faces: Vec<FaceConfig> = Vec::new();
     match meta.meta.kind {
         SwarmKind::V1Only => faces.push(v1_face(meta, &layout)?),

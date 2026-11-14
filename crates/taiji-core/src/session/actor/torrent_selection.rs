@@ -10,16 +10,63 @@ impl SessionActor {
             })
     }
 
-    pub(super) fn get_torrent_metadata(&self, raw_gid: &str) -> Result<CommandReply, SessionError> {
-        let gid = self.resolve_gid(raw_gid)?;
-        let data = self
+    pub(super) async fn get_torrent_metadata(
+        &self,
+        raw_gid: &str,
+    ) -> Result<CommandReply, SessionError> {
+        let gid = if raw_gid.len() == 16 {
+            Gid::from_u64(
+                u64::from_str_radix(raw_gid, 16)
+                    .map_err(|_| SessionError::failed("invalid task identity"))?,
+            )
+        } else {
+            self.resolve_gid(raw_gid)?
+        };
+        let mut data = self
             .rows
             .get(&gid.to_string())
-            .and_then(|(row, _)| row.metadata.clone())
-            .ok_or_else(|| SessionError::failed("torrent metadata is not ready"))?;
+            .and_then(|(row, _)| row.metadata.clone());
+        if data.is_none() {
+            if let Some(persist) = &self.persist {
+                data = persist
+                    .load_download_result(&gid.to_string())
+                    .await
+                    .map_err(|e| SessionError::failed(e.to_string()))?
+                    .and_then(|row| row.metadata);
+            }
+        }
+        let data = data.ok_or_else(|| SessionError::failed("torrent metadata is not ready"))?;
+        let awaiting_selection = self.awaiting_torrent_selection(gid);
+        let recovered = if !awaiting_selection {
+            if let Some(persist) = &self.persist {
+                persist
+                    .load_recovered_layers(&gid.to_string())
+                    .await
+                    .map_err(|e| SessionError::failed(e.to_string()))?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        let (meta, data) = tokio::task::spawn_blocking(move || {
+            let (meta, data) = taiji_domain::torrent_manifest::enrich(data, recovered)?;
+            taiji_engine::metainfo_admission::validate(&meta).map_err(|e| e.to_string())?;
+            Ok::<_, String>((meta, data))
+        })
+        .await
+        .map_err(|e| SessionError::failed(e.to_string()))?
+        .map_err(SessionError::failed)?;
+        let manifest = taiji_domain::torrent_manifest::TorrentManifest::from_metainfo(&meta);
+        if !awaiting_selection && manifest.verification_ready {
+            self.magnet_services
+                .remember(meta.meta.identity.v1, meta.meta.identity.v2, &data)
+                .await;
+        }
         Ok(CommandReply::TorrentMetadata {
             data,
-            awaiting_selection: self.awaiting_torrent_selection(gid),
+            awaiting_selection,
+            manifest: Box::new(manifest),
         })
     }
 

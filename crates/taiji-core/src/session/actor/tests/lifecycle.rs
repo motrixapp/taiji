@@ -86,6 +86,7 @@ fn method_surface_is_frozen() {
         "taiji.prepareBitTorrent",
         "taiji.notifyNetworkChange",
         "taiji.getMagnetResolution",
+        "taiji.getTorrentManifest",
         "taiji.getTorrentMetadata",
         "taiji.confirmTorrentSelection",
         "taiji.getHttpOutput",

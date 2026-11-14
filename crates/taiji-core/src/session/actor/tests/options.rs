@@ -835,6 +835,8 @@ fn get_option_echo_keys_are_fully_declared() {
         scheduler_policy: crate::engine::SchedulerPolicy::default(),
         dest: PathBuf::from("/m"),
         options: crate::magnet::MagnetOptions {
+            known_private: false,
+            task_trackers: None,
             holepunch: true,
             bt_save_metadata: true,
             bt_metadata_only: false,

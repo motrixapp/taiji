@@ -234,6 +234,11 @@ impl MetadataFetchSession {
     pub(super) fn is_shared(&self) -> bool {
         self.shared.is_some()
     }
+    pub(super) fn changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.shared
+            .as_ref()
+            .map(crate::ut_metadata::SharedMetadataPeer::changes)
+    }
     pub(super) fn sweep(&mut self, now: Instant) {
         if let Some(fetcher) = &mut self.fetcher {
             fetcher.sweep_timeouts(now);

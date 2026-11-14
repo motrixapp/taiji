@@ -1559,7 +1559,16 @@ pub(super) fn handle_hash_fetch(
             return ControlFlow::Break(());
         };
         let deliver = state.recovery_deliver.clone();
-        handle_recovery_reply_and_drive(fi, face, book, &deliver, file_idx, block, reply);
+        handle_recovery_reply_and_drive(
+            fi,
+            face,
+            book,
+            &deliver,
+            file_idx,
+            block,
+            reply,
+            state.selected_mask.as_deref(),
+        );
         return ControlFlow::Continue(());
     }
     let Some(face) = state.faces.get_mut(fi) else {

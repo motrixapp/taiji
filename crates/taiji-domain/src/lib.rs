@@ -31,6 +31,7 @@ pub mod hash_source;
 /// upstream reference (argv-passing util.cc, no placeholder substitution).
 pub mod hook;
 pub mod metainfo;
+pub mod torrent_manifest;
 
 /// NAT assembly: single-instance NatActor supervisor, engine consumption
 /// surface, external port watch.

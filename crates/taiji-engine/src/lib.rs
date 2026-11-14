@@ -255,6 +255,7 @@ mod config;
 mod dht;
 mod dispatch;
 mod faces;
+pub mod metainfo_admission;
 mod pipeline;
 mod progress;
 mod query;

@@ -47,16 +47,14 @@ use taiji_bt::peer_wire::Reserved;
 use taiji_bt::tracker::TrackerOptions;
 use taiji_bt::tracker::actor::{
     TrackerActorConfig, TrackerActorEvent, TrackerCommand, UDP_INBOUND_CAPACITY,
-    UDP_OUTBOUND_CAPACITY, UdpTransport, spawn_tracker_actor_with_dns,
+    UDP_OUTBOUND_CAPACITY, UdpTransport, spawn_tracker_actor_with_budget,
 };
 use taiji_io::rate_limit::{LimiterSet, Throttled};
 use taiji_io::udp_demux::DemuxConfig;
-use taiji_store::merkle;
 use taiji_store::persist::PersistHandle;
 
 use crate::engine::{DownloadEngine, EngineEnd, TrackerWireConfig};
 use crate::gid::Gid;
-use crate::hash_fetch::HASH_FETCH_TIMEOUT;
 use crate::metainfo::Metainfo;
 use crate::seed::SeedPolicy;
 // hex_lower's single implementation lives in session::persist::import
@@ -104,6 +102,10 @@ pub struct MagnetOptions {
     pub bt_peer_connection_type: taiji_bt::utp::PeerConnectionType,
     /// Enable BEP55 metadata connections (independent of router mapping).
     pub holepunch: bool,
+    /// A verified cached info dictionary can establish privacy before discovery.
+    pub known_private: bool,
+    /// Request-owned trackers, excluding session-wide supplements.
+    pub task_trackers: Option<Vec<String>>,
 }
 
 impl Default for MagnetOptions {
@@ -116,6 +118,8 @@ impl Default for MagnetOptions {
             bt_load_saved_metadata: false,
             bt_peer_connection_type: taiji_bt::utp::PeerConnectionType::default(),
             holepunch: true,
+            known_private: false,
+            task_trackers: None,
         }
     }
 }
@@ -394,6 +398,10 @@ impl MetadataChain {
 // and this file's call sites (spawn_web_mirrors) keep unchanged paths.
 mod cache;
 mod candidates;
+mod layers;
+mod manifest;
+mod scheduler;
+use layers::prefetch_piece_layers;
 mod discovery;
 mod resolution;
 pub use discovery::DiscoveryConfig;
@@ -470,6 +478,8 @@ struct MetadataPeer {
 type LivePeers = Arc<std::sync::Mutex<Vec<MetadataPeer>>>;
 
 struct PeerSignals {
+    pending_admissions: AtomicUsize,
+    private: bool,
     resolution: Option<Arc<MagnetResolution>>,
     network: Arc<network::Dialer>,
     candidates: std::sync::Mutex<candidates::Candidates>,
@@ -499,6 +509,7 @@ impl PeerSignals {
 }
 
 enum PeerReport {
+    AdmissionChanged,
     Connected {
         face: usize,
         address: std::net::SocketAddr,
@@ -907,10 +918,15 @@ async fn run(
 
     if metainfo.is_none() {
         if let Some(cached) = cached_metadata {
-            if let Some(resolution) = &resolution {
-                resolution.cache_hit(cached.origin);
-            }
+            let cache_origin = cached.origin;
             let trackers = trs.clone();
+            let private_trackers = cfg.options.task_trackers.clone().unwrap_or_else(|| {
+                magnet
+                    .tr
+                    .iter()
+                    .map(|url| String::from_utf8_lossy(url).into_owned())
+                    .collect()
+            });
             let btih = magnet.btih;
             let btmh = magnet.btmh;
             metainfo = tokio::task::spawn_blocking(move || {
@@ -919,15 +935,64 @@ async fn run(
                 let bytes =
                     metadata2torrent(&cached[span], &trackers, &services::cached_layers(&cached));
                 let meta = Metainfo::parse(&bytes).ok()?;
-                Some((meta, bytes))
+                if meta.private {
+                    let bytes = metadata2torrent(
+                        &meta.info_bytes,
+                        &private_trackers,
+                        &services::cached_layers(&bytes),
+                    );
+                    Some((Metainfo::parse(&bytes).ok()?, bytes))
+                } else {
+                    Some((meta, bytes))
+                }
             })
             .await
             .ok()
             .flatten();
-            if metainfo.is_some() {
+            if metainfo.as_ref().is_some_and(|(meta, _)| meta.private) {
+                cfg.options.known_private = true;
+                cfg.options.holepunch = false;
+                cfg.dht_enabled = false;
+                cfg.dht_ipv6_enabled = false;
+                cfg.lsd = None;
+                cfg.web = None;
+                cfg.tracker_updates = None;
+                trs = cfg.options.task_trackers.clone().unwrap_or_else(|| {
+                    magnet
+                        .tr
+                        .iter()
+                        .map(|url| String::from_utf8_lossy(url).into_owned())
+                        .collect()
+                });
+                tiers = trs.iter().cloned().enumerate().collect();
+            }
+            if metainfo.as_ref().is_some_and(|(meta, _)| {
+                !(cfg.options.bt_metadata_only || cfg.options.bt_save_metadata)
+                    || !meta
+                        .meta
+                        .files
+                        .iter()
+                        .any(|file| file.layer_missing(meta.meta.piece_length))
+            }) {
+                if let Some(resolution) = &resolution {
+                    resolution.cache_hit(cache_origin);
+                }
                 info!(target:"taiji::core::magnet","verified session metadata cache hit");
             }
         }
+    }
+
+    if (cfg.options.bt_metadata_only || cfg.options.bt_save_metadata)
+        && metainfo.as_ref().is_some_and(|(meta, _)| {
+            meta.meta
+                .files
+                .iter()
+                .any(|file| file.layer_missing(meta.meta.piece_length))
+        })
+    {
+        // Info-only cache hits can serve a manifest, but cannot masquerade as
+        // a complete exported torrent. Discover proof suppliers for this mode.
+        metainfo = None;
     }
 
     if metainfo.is_none()
@@ -1111,7 +1176,7 @@ async fn discover_and_fetch(
         let (actor_out_tx, carrier_out_rx) = mpsc::channel(UDP_OUTBOUND_CAPACITY);
         let (carrier_in_tx, actor_in_rx) = mpsc::channel(UDP_INBOUND_CAPACITY);
         tokio::spawn(udp_carrier(carrier_out_rx, carrier_in_tx));
-        let actor_cmd = spawn_tracker_actor_with_dns(
+        let actor_cmd = spawn_tracker_actor_with_budget(
             TrackerActorConfig {
                 info_hash: face.info_hash,
                 peer_id: cfg.peer_id,
@@ -1134,7 +1199,7 @@ async fn discover_and_fetch(
                 // ("a magnet cannot be private -> BEP27 always allows",
                 // same as the DHT face); the upgraded engine takes over
                 // via EngineConfig.private.
-                private: false,
+                private: cfg.options.known_private,
                 tiers: tiers.to_vec(),
                 scrape_hashes: faces.iter().map(|f| f.info_hash).collect(),
             },
@@ -1147,6 +1212,7 @@ async fn discover_and_fetch(
                 inbound: actor_in_rx,
             },
             Arc::clone(&dns),
+            network.dialer.announces.clone(),
         );
         match actor_cmd {
             Ok(cmd) => actor_cmds.push(cmd),
@@ -1257,9 +1323,20 @@ async fn discover_and_fetch(
     let (hp_tx, mut hp_rx) = mpsc::channel(64);
     let (report_tx, mut report_rx) = mpsc::channel(128);
     let signals = Arc::new(PeerSignals {
+        pending_admissions: AtomicUsize::new(0),
+        private: cfg.options.known_private,
         resolution: resolution.clone(),
         network: network.dialer.clone(),
-        candidates: std::sync::Mutex::new(candidates::Candidates::new()),
+        candidates: std::sync::Mutex::new(candidates::Candidates::with_local(
+            network
+                .dialer
+                .self_v4
+                .map(|ip| std::net::SocketAddr::new(ip, network.dialer.port)),
+            network
+                .dialer
+                .self_v6
+                .map(|ip| std::net::SocketAddr::new(ip, network.dialer.port)),
+        )),
         metadata: faces
             .iter()
             .map(|face| {
@@ -1310,16 +1387,25 @@ async fn discover_and_fetch(
                 resolution.mark(ResolutionMilestone::FirstCandidate);
             }
         }
-        while dialed_total.load(Ordering::Relaxed)
-            < cfg.phase.max_metadata_peers
-                + if pending_peers
-                    .front()
-                    .is_some_and(|(_, _, source)| matches!(*source, "holepunch" | "relay-utp"))
-                {
-                    4
-                } else {
-                    0
-                }
+        if !pending_peers.is_empty()
+            && dialed_total.load(Ordering::Relaxed) >= cfg.phase.max_metadata_peers
+        {
+            network.dialer.retire_stalled(cfg.gid.as_u64());
+        }
+        while (signals.pending_admissions.load(Ordering::Relaxed) == 0
+            || pending_peers
+                .iter()
+                .any(|(_, _, source)| matches!(*source, "holepunch" | "relay-utp")))
+            && dialed_total.load(Ordering::Relaxed)
+                < cfg.phase.max_metadata_peers
+                    + if pending_peers
+                        .front()
+                        .is_some_and(|(_, _, source)| matches!(*source, "holepunch" | "relay-utp"))
+                    {
+                        4
+                    } else {
+                        0
+                    }
         {
             let connected: Vec<_> = crate::lock(&live)
                 .iter()
@@ -1379,6 +1465,7 @@ async fn discover_and_fetch(
             Some(report) = report_rx.recv() => {
                 match report {
                     PeerReport::Slow { face, address } | PeerReport::Failed { face, address } => hp_books[face].note_dial_failed(address, std::time::Instant::now()),
+                    PeerReport::AdmissionChanged => {},
                     PeerReport::Closed(id) => { for book in &mut hp_books { book.remove_introducer(id); } },
                     PeerReport::Connected { face, address, id, source } => {
                         hp_books[face].note_dial_connected(&address);
@@ -1682,10 +1769,10 @@ fn spawn_dial(
 async fn finalize(
     cfg: MagnetTaskConfig,
     magnet: magnet_parse::Magnet,
-    trs: Vec<String>,
-    tiers: Vec<(usize, String)>,
+    mut trs: Vec<String>,
+    mut tiers: Vec<(usize, String)>,
     metadata: Bytes,
-    metainfo: Option<(Metainfo, Vec<u8>)>,
+    mut metainfo: Option<(Metainfo, Vec<u8>)>,
     phase: Option<MetadataPhase>,
     faces: Vec<MetaFace>,
     mut state: TorrentState,
@@ -1710,18 +1797,49 @@ async fn finalize(
     if let Some(resolution) = &resolution {
         resolution.mark(ResolutionMilestone::InfoVerified);
     }
+    let fetched = metainfo.is_none();
+    if let Err(error) = manifest::prepare_verified_info(
+        &cfg,
+        &magnet,
+        &metadata,
+        &mut trs,
+        &mut tiers,
+        &mut metainfo,
+        phase.as_ref(),
+    )
+    .await
+    {
+        return MagnetEnd::Failed(error);
+    }
+    if cfg.options.pause_metadata
+        && cfg.options.follow_torrent
+        && !cfg.options.bt_metadata_only
+        && !cfg.options.bt_save_metadata
+    {
+        return manifest::park_selection(
+            &cfg,
+            &metadata,
+            &trs,
+            metainfo,
+            phase,
+            chain,
+            resolution.as_ref(),
+        )
+        .await;
+    }
+    if fetched {
+        metainfo = None;
+    }
     // ---- BEP52 piece-layer prefetch (before parsing) ----
     // `piece layers` sits outside the info dict (a BEP52 top-level key) —
     // magnet metadata does not carry it. Multi-piece files' v2
     // verification anchors (per-piece hashes) are therefore missing;
-    // BEP52 hash exchange exists exactly for this: the base layer
-    // (<=512 leaves, one request) is fetched from a peer and the whole
-    // layer recomputes and verifies against the pieces root; once trusted
-    // it is injected as the top-level `piece layers` (the parser's load
-    // verification then passes).
-    // Failure = an explicit Failed: v2/hybrid metadata without layers
-    // cannot pass the parser load, and no fake upgrade is allowed. The
-    // metadata-phase connections close after the prefetch.
+    // BEP52 hash exchange supplies these anchors in authenticated chunks
+    // of at most 512 hashes, at the base derived from piece length. Each
+    // subtree and the complete layer must match the info's file root.
+    // This export path requires complete layers; native selection above
+    // may instead park verified info and recover selected proofs later.
+    // Metadata-phase connections close after the prefetch.
     let piece_layers: Vec<([u8; 32], Vec<u8>)> = match &phase {
         Some(phase) => match &phase.web_layers {
             // HTTP mirror hit — the layers were already Merkle-verified to
@@ -1781,8 +1899,15 @@ async fn finalize(
         }
     };
 
-    if let Some(resolution) = &resolution {
-        resolution.mark(ResolutionMilestone::VerificationReady);
+    if !metainfo
+        .meta
+        .files
+        .iter()
+        .any(|file| file.layer_missing(metainfo.meta.piece_length))
+    {
+        if let Some(resolution) = &resolution {
+            resolution.mark(ResolutionMilestone::VerificationReady);
+        }
     }
     if let Some(services) = &cfg.services {
         services
@@ -2032,204 +2157,6 @@ async fn finalize(
         meta: std::sync::Arc::new(metainfo),
         torrent: torrent_bytes,
     }
-}
-
-/// The single-request cap for a single-file piece layer (BEP52 SHOULD
-/// be <=512; a file layer with >512 leaves cannot be verified to the
-/// root within one request and is not prefetched).
-const MAX_PREFETCH_LEAVES: u64 = 512;
-
-/// Files waiting for prefetch: (pieces root, file length).
-type LayersWanted = Vec<([u8; 32], u64)>;
-
-/// Scan the raw info-dict bytes for files needing piece-layer prefetch
-/// (multi-piece and <= [`MAX_PREFETCH_LEAVES`] pieces). v1-only metadata
-/// (no `file tree`) returns an empty list — v1 verification does not rely
-/// on piece layers.
-fn scan_layers_needed(metadata: &[u8]) -> Result<(u32, LayersWanted), &'static str> {
-    let value = bencode::decode_permissive(metadata).map_err(|_| "info dict not decodable")?;
-    let Value::Dict(d) = &value else {
-        return Err("info dict is not a dict");
-    };
-    let piece_len = match d
-        .iter()
-        .find(|(k, _)| k.as_slice() == b"piece length")
-        .map(|(_, v)| v)
-    {
-        Some(Value::Int(i)) if *i > 0 => *i as u64,
-        _ => return Err("info dict missing `piece length`"),
-    };
-    let Some(tree) = d
-        .iter()
-        .find(|(k, _)| k.as_slice() == b"file tree")
-        .map(|(_, v)| v)
-    else {
-        return Ok((piece_len as u32, Vec::new())); // v1-only: no layers needed
-    };
-    let mut wanted = Vec::new();
-    let mut oversized = false;
-    fn walk(tree: &Value, piece_len: u64, wanted: &mut Vec<([u8; 32], u64)>, oversized: &mut bool) {
-        let Value::Dict(d) = tree else {
-            return;
-        };
-        let is_leaf = d.iter().any(|(k, _)| k.as_slice() == b"length");
-        if is_leaf {
-            let length = match d
-                .iter()
-                .find(|(k, _)| k.as_slice() == b"length")
-                .map(|(_, v)| v)
-            {
-                Some(Value::Int(i)) if *i > 0 => *i as u64,
-                _ => return, // empty files have no root, no layer
-            };
-            let root = match d
-                .iter()
-                .find(|(k, _)| k.as_slice() == b"pieces root")
-                .map(|(_, v)| v)
-            {
-                Some(Value::Bytes(b)) => <[u8; 32]>::try_from(b.as_slice()).ok(),
-                _ => None,
-            };
-            let Some(root) = root else {
-                return;
-            };
-            let pieces = length.div_ceil(piece_len);
-            if pieces > 1 {
-                if pieces <= MAX_PREFETCH_LEAVES {
-                    wanted.push((root, length));
-                } else {
-                    *oversized = true;
-                }
-            }
-            return;
-        }
-        for (_, v) in d {
-            walk(v, piece_len, wanted, oversized);
-        }
-    }
-    walk(tree, piece_len, &mut wanted, &mut oversized);
-    if oversized {
-        return Err(
-            "file exceeds 512 pieces: piece layer needs segmented hash fetch \
-             with proofs (not in M2 scope)",
-        );
-    }
-    Ok((piece_len as u32, wanted))
-}
-
-/// BEP52 piece-layer prefetch (completing the magnet chain).
-///
-/// Fact: `piece layers` is a .torrent TOP-LEVEL key outside the info
-/// dict (BEP52 "Torrent File Structure") — metadata fetched by
-/// ut_metadata does not contain it. Multi-piece files' v2 verification
-/// anchors (per-piece hashes) are therefore missing; BEP52 hash exchange
-/// is designed for exactly this: the base layer (<=512 leaves, one
-/// request) is fetched from a peer and the whole layer recomputes and
-/// verifies against the pieces root (`merkle::validate_piece_layer`, the
-/// same function as the filetree load check); once trusted it is
-/// injected as the top-level `piece layers` (the parser's load check
-/// then passes).
-///
-/// Failure semantics (honesty): any file layer unobtainable -> `Err`
-/// (an explicit Failed — v2/hybrid metadata without layers cannot pass
-/// the parser load, and no fake upgrade is allowed).
-async fn prefetch_piece_layers(
-    metadata: &[u8],
-    phase: &MetadataPhase,
-    faces: &[MetaFace],
-) -> Result<Vec<([u8; 32], Vec<u8>)>, String> {
-    let (piece_len, wanted) = scan_layers_needed(metadata).map_err(|e| e.to_string())?;
-    if wanted.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Candidate connections: v2-face peers first (hash exchange is a
-    // BEP52 capability).
-    let peers: Vec<PeerTaskHandle> = {
-        let pool = crate::lock(&phase.peers);
-        let mut v2: Vec<PeerTaskHandle> = Vec::new();
-        let mut rest: Vec<PeerTaskHandle> = Vec::new();
-        for peer in pool.iter() {
-            let (fi, h, token) = (&peer.face, &peer.handle, &peer.token);
-            if token.is_cancelled() {
-                continue;
-            }
-            let is_v2 = faces
-                .get(*fi)
-                .map(|f| matches!(f.expected, ExpectedInfoHash::V2(_)))
-                .unwrap_or(false);
-            if is_v2 {
-                v2.push(h.clone());
-            } else {
-                rest.push(h.clone());
-            }
-        }
-        v2.extend(rest);
-        v2
-    };
-    if peers.is_empty() {
-        return Err("no metadata-phase peer left for hash exchange".into());
-    }
-    let mut out = Vec::with_capacity(wanted.len());
-    for (root, length) in wanted {
-        let pieces = length.div_ceil(u64::from(piece_len));
-        // Single-request domain: length = a power of two covering the
-        // whole leaf domain (BEP52 zero padding; the validate side is
-        // isomorphic), MUST be >=2 and a power of two, index=0 a multiple
-        // of length.
-        let req_len = pieces.next_power_of_two().max(2) as u32;
-        let mut got = None;
-        for handle in &peers {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let sent = handle
-                .command(PeerCommand::RequestHashes {
-                    root,
-                    base: 0,
-                    index: 0,
-                    length: req_len,
-                    proof: 0,
-                    reply: tx,
-                })
-                .is_ok();
-            if !sent {
-                continue;
-            }
-            // rx: oneshot<Result<HashFetch, HashRequestError>>; the outer
-            // Result is the oneshot itself (timeout/connection closed).
-            let Ok(Ok(Ok(taiji_bt::peer::HashFetch::Hashes(hashes)))) =
-                tokio::time::timeout(HASH_FETCH_TIMEOUT, rx).await
-            else {
-                continue; // timeout/connection closed/hash rejected: try the next peer
-            };
-            if (hashes.len() as u64) < pieces {
-                continue; // insufficient coverage
-            }
-            let mut layer = Vec::with_capacity(pieces as usize * 32);
-            for h in &hashes[..pieces as usize] {
-                layer.extend_from_slice(h);
-            }
-            if merkle::validate_piece_layer(&root, &layer, length, piece_len).is_ok() {
-                got = Some(layer);
-                break;
-            }
-            debug!(target: "taiji::core::magnet",
-                "prefetched piece layer rejected by root check; trying next peer");
-        }
-        match got {
-            Some(layer) => {
-                debug!(target: "taiji::core::magnet", pieces,
-                    "piece layer fetched + verified to pieces root");
-                out.push((root, layer));
-            }
-            None => {
-                return Err(
-                    "piece layer fetch failed on all peers (reject/timeout/root \
-                     mismatch); v2/hybrid metadata cannot be loaded without layers"
-                        .to_string(),
-                );
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// State transition (a legality check + log; illegal transitions do not
@@ -2813,19 +2740,29 @@ mod tests {
         let (_torrent, btih, info) = web_mirror_torrent();
         let (bad, bad_hits) = spawn_metadata_peer(Arc::new(info.to_vec()), btih, false).await;
         let (good, good_hits) = spawn_xpe_metadata_seeder(Arc::new(info.to_vec()), btih).await;
-        let tracker = metadata_tracker(vec![bad, good]).await;
+        let tracker = metadata_tracker(vec![bad]).await;
+        let next_tracker = metadata_tracker(vec![good]).await;
         let directory =
             std::env::temp_dir().join(format!("taiji-metadata-{}", rand::random::<u64>()));
         let mut cfg = metadata_fixture_config(btih, directory.clone());
-        let (_updates, receiver) = tokio::sync::watch::channel(vec![(0, tracker)]);
+        let (updates, receiver) = tokio::sync::watch::channel(vec![(0, tracker)]);
         cfg.tracker_updates = Some(receiver);
         cfg.phase.max_metadata_peers = 1;
         cfg.phase.peer_metadata_timeout = Duration::from_millis(300);
         cfg.phase.discovery_round = Duration::from_secs(30);
         let root = CancellationToken::new();
-        let end = MagnetEngine::spawn(cfg, &root)
-            .await
-            .unwrap_or_else(|error| panic!("{error}"));
+        let run = MagnetEngine::spawn(cfg, &root);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while bad_hits.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        updates
+            .send(vec![(0, next_tracker)])
+            .unwrap_or_else(|e| panic!("{e}"));
+        let end = run.await.unwrap_or_else(|error| panic!("{error}"));
         assert!(matches!(end, MagnetEnd::MetadataFetched { .. }), "{end:?}");
         assert_eq!(bad_hits.load(Ordering::Relaxed), 1);
         assert_eq!(good_hits.load(Ordering::Relaxed), 1);
@@ -2964,6 +2901,8 @@ mod tests {
             dht_kind: DhtSwarmKind::V1,
         }];
         let signals = Arc::new(PeerSignals {
+            pending_admissions: AtomicUsize::new(0),
+            private: false,
             resolution: None,
             network: network.dialer.clone(),
             candidates: std::sync::Mutex::new(candidates::Candidates::new()),

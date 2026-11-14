@@ -42,6 +42,7 @@ mod multicall;
 // the parameter-decoding helpers (opt_options/opt_position/param_error/
 // try_rpc — the addMetalink parameter face shares the addUri template
 // wording).
+mod manifest;
 pub(crate) mod params;
 mod payload;
 mod resolution;
@@ -330,7 +331,7 @@ async fn process_call_inner(
             if st.secret().is_none() && !is_read_only(method) {
                 return unauthenticated_write_error(id);
             }
-            execute_session_method(st, method, params, id).await
+            execute_session_method(st, method, params, id, raw_method.starts_with("taiji.")).await
         }
     }
 }

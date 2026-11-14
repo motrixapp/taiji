@@ -948,8 +948,8 @@ async fn corrupt_metadata_rejected_by_parser() {
         panic!("expected Failed, got {end:?}");
     };
     assert!(
-        reason.contains("rejected by parser"),
-        "corrupt metadata must be rejected at rebuild: {reason}"
+        reason.contains("verified info structure rejected") && reason.contains("pieces"),
+        "corrupt metadata must be rejected at info admission: {reason}"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }

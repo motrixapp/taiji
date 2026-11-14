@@ -333,6 +333,7 @@ const PROMISED_TAIJI_EXTENSION_METHODS: &[&str] = &[
     "taiji.prepareBitTorrent",
     "taiji.notifyNetworkChange",
     "taiji.getMagnetResolution",
+    "taiji.getTorrentManifest",
     "taiji.getTorrentMetadata",
     "taiji.confirmTorrentSelection",
     "taiji.getHttpOutput",
@@ -4822,4 +4823,46 @@ fn media_subdict_renders_promised_fields() {
     // Non-media tasks omit the key.
     let bare = super::view::status_entry_json(&base_view());
     assert!(bare.get("media").is_none());
+}
+
+#[test]
+fn native_v2_status_keeps_full_identity_before_key_filtering() {
+    use taiji_core::session::{BittorrentView, StatusKind, TorrentStatusView};
+    let mut view =
+        TorrentStatusView::minimal(taiji_core::gid::Gid::from_u64(9), StatusKind::Paused, 1, 0);
+    view.info_hash = Some([7; 20]);
+    view.bittorrent = Some(BittorrentView {
+        v1_info_hash: None,
+        v2_info_hash: Some([7; 32]),
+        comment: None,
+        creation_date: None,
+        mode: Some("single"),
+        announce_list: Vec::new(),
+        name: Some("file".into()),
+        meta_version: Some(2),
+        private: Some(false),
+    });
+    assert_eq!(
+        super::view::status_entry_json(&view)["infoHash"],
+        "07".repeat(20)
+    );
+    assert_eq!(
+        super::view::native_status_entry_json(&view)["infoHash"],
+        "07".repeat(32)
+    );
+    let list = super::view::render_status_list_for(
+        vec![view.clone()],
+        None,
+        None,
+        &["infoHash".into()],
+        true,
+    );
+    assert_eq!(list, json!([{"infoHash":"07".repeat(32)}]));
+    if let Some(bt) = &mut view.bittorrent {
+        bt.v1_info_hash = Some([9; 20]);
+    }
+    assert_eq!(
+        super::view::native_status_entry_json(&view)["infoHash"],
+        "09".repeat(20)
+    );
 }

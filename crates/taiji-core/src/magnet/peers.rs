@@ -6,6 +6,14 @@ use taiji_bt::holepunch::{HolepunchBook, HpError, RelayAction, UtHolepunch, rela
 use taiji_bt::peer::{HolepunchEvent, HolepunchExt, PexExt};
 use taiji_bt::utp::{PeerConnectionType, Transport};
 
+struct PendingAdmission(Arc<PeerSignals>);
+impl Drop for PendingAdmission {
+    fn drop(&mut self) {
+        self.0.pending_admissions.fetch_sub(1, Ordering::Relaxed);
+        let _ = self.0.reports.try_send(PeerReport::AdmissionChanged);
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "metadata connection assembly keeps identity, transport and lifecycle ownership explicit"
@@ -69,6 +77,16 @@ pub(super) fn spawn_dial_with_network(
     let (peers, dialed, total, live) = (peers.clone(), dialed.clone(), total.clone(), live.clone());
     let token = token.child_token();
     let peer_id = cfg.peer_id;
+    let owner = cfg.gid.as_u64();
+    let foreground =
+        cfg.options.pause_metadata || cfg.options.bt_metadata_only || !cfg.options.follow_torrent;
+    let admission = signals
+        .as_ref()
+        .filter(|_| !punch && !relay)
+        .map(|signals| {
+            signals.pending_admissions.fetch_add(1, Ordering::Relaxed);
+            PendingAdmission(signals.clone())
+        });
     let limiter = cfg.limiter.clone();
     let timeout = cfg.phase.peer_metadata_timeout;
     let policy = if relay {
@@ -113,6 +131,8 @@ pub(super) fn spawn_dial_with_network(
         }
         let connected = if let Some(signals) = &signals {
             let connect = signals.network.connect(
+                owner,
+                foreground,
                 address,
                 &face_config.info_hash,
                 &peer_id,
@@ -121,6 +141,7 @@ pub(super) fn spawn_dial_with_network(
                 punch,
                 punch || relay,
                 &token,
+                || drop(admission),
             );
             tokio::pin!(connect);
             if signals.enabled && source == "pex-holepunch" {
@@ -302,7 +323,7 @@ async fn peer_session(
             }),
         tx: metadata_tx,
     });
-    if let Some(signals) = &signals {
+    if let Some(signals) = signals.as_ref().filter(|signals| !signals.private) {
         ext.pex = Some(PexExt {
             tx: signals.pex.clone(),
             interval: taiji_bt::pex::DEFAULT_INTERVAL,

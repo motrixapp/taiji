@@ -42,6 +42,8 @@ pub(super) fn magnet_options_from_patch(
 ) -> MagnetOptions {
     MagnetOptions {
         holepunch: true,
+        known_private: false,
+        task_trackers: None,
         bt_save_metadata: patch.bt_save_metadata.unwrap_or(false),
         bt_metadata_only: patch.bt_metadata_only.unwrap_or(false),
         follow_torrent: patch.follow_torrent.unwrap_or(true),
@@ -89,6 +91,7 @@ pub(super) fn single_tier_from_announce(announce: &str) -> Vec<(usize, String)> 
 /// None (never over-reported; the value-range narrowing is noted).
 pub(super) fn magnet_bittorrent_view(mj: &MagnetJob) -> BittorrentView {
     BittorrentView {
+        v1_info_hash: mj.btih,
         comment: None,
         creation_date: None,
         mode: None,

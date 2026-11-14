@@ -97,8 +97,9 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
         CommandReply::TorrentMetadata {
             data,
             awaiting_selection,
+            manifest,
         } => Ok(
-            json!({ "data": crate::base64::encode(&data), "awaitingSelection": awaiting_selection }),
+            json!({ "data": crate::base64::encode(&data), "awaitingSelection": awaiting_selection, "manifest": super::manifest::encode(*manifest) }),
         ),
         CommandReply::HttpOutput(output) => {
             let state = crate::aria2::status::http_output_phase_word(output.phase);
@@ -305,6 +306,21 @@ fn torrent_percent_encode(bytes: &[u8]) -> String {
 /// gatherStoppedDownload (same file).
 /// Note: aria2 has no downloadLength key (previously emitted in excess)
 /// — this layer no longer outputs it.
+pub(crate) fn native_status_entry_json(v: &TorrentStatusView) -> Value {
+    let mut value = status_entry_json(v);
+    if let Some(bt) = &v.bittorrent {
+        let identity = bt
+            .v1_info_hash
+            .as_ref()
+            .map(|hash| jhex(hash))
+            .or_else(|| bt.v2_info_hash.as_ref().map(|hash| jhex(hash)));
+        if let Some(identity) = identity {
+            value["infoHash"] = json!(identity);
+        }
+    }
+    value
+}
+
 pub(crate) fn status_entry_json(v: &TorrentStatusView) -> Value {
     let stopped = matches!(
         v.status,
@@ -716,11 +732,22 @@ pub(crate) fn pagination_range(offset: i64, num: i64, size: i64) -> Option<(usiz
 /// offset (direct translation of AbstractPaginationRpcMethod::process's
 /// `if (offset < 0) reverse`, RpcMethodImpl.h) + per-entry keys
 /// filtering. `offset/num = None` means no pagination (tellActive).
+#[cfg(test)]
 pub(crate) fn render_status_list(
     views: Vec<TorrentStatusView>,
     offset: Option<i64>,
     num: Option<i64>,
     keys: &[String],
+) -> Value {
+    render_status_list_for(views, offset, num, keys, false)
+}
+
+pub(crate) fn render_status_list_for(
+    views: Vec<TorrentStatusView>,
+    offset: Option<i64>,
+    num: Option<i64>,
+    keys: &[String],
+    native: bool,
 ) -> Value {
     let total = views.len() as i64;
     let sliced: Vec<&TorrentStatusView> = match (offset, num) {
@@ -732,7 +759,16 @@ pub(crate) fn render_status_list(
     };
     let mut items: Vec<Value> = sliced
         .into_iter()
-        .map(|v| apply_keys(status_entry_json(v), keys))
+        .map(|v| {
+            apply_keys(
+                if native {
+                    native_status_entry_json(v)
+                } else {
+                    status_entry_json(v)
+                },
+                keys,
+            )
+        })
         .collect();
     if offset.is_some_and(|o| o < 0) {
         items.reverse();

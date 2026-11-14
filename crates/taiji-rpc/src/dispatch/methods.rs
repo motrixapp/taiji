@@ -48,7 +48,7 @@ use super::params::{
 };
 use super::view::{
     apply_keys, created_torrent_json, encode_reply, file_entry_json, num_clamp, peer_entry_json,
-    render_status_list, server_entry_json, status_entry_json, unexpected_reply,
+    server_entry_json, status_entry_json, unexpected_reply,
 };
 
 /// `taiji.createTorrent` execution (the taiji.* namespace; a write
@@ -213,6 +213,7 @@ async fn create_torrent_method(st: &AppState, params: &[Value], id: Value) -> Rp
 /// — defaults are placeholders only).
 #[derive(Default)]
 struct QueryParams {
+    native_identity: bool,
     /// The gid locator (GidKeys/GidOnly shapes).
     gid: String,
     /// The keys filter (GidKeys/KeysOnly/PagedKeys shapes; empty = all fields).
@@ -284,7 +285,14 @@ pub(crate) const QUERY_METHODS: &[QueryEntry] = &[
             keys: p.keys.clone(),
         },
         render: |reply, p| match reply {
-            CommandReply::TorrentStatus(v) => Ok(apply_keys(status_entry_json(&v), &p.keys)),
+            CommandReply::TorrentStatus(v) => Ok(apply_keys(
+                if p.native_identity {
+                    super::view::native_status_entry_json(&v)
+                } else {
+                    status_entry_json(&v)
+                },
+                &p.keys,
+            )),
             other => Err(other),
         },
     },
@@ -367,7 +375,13 @@ pub(crate) const QUERY_METHODS: &[QueryEntry] = &[
             keys: p.keys.clone(),
         },
         render: |reply, p| match reply {
-            CommandReply::StatusList(views) => Ok(render_status_list(views, None, None, &p.keys)),
+            CommandReply::StatusList(views) => Ok(super::view::render_status_list_for(
+                views,
+                None,
+                None,
+                &p.keys,
+                p.native_identity,
+            )),
             other => Err(other),
         },
     },
@@ -381,11 +395,12 @@ pub(crate) const QUERY_METHODS: &[QueryEntry] = &[
             keys: p.keys.clone(),
         },
         render: |reply, p| match reply {
-            CommandReply::StatusList(views) => Ok(render_status_list(
+            CommandReply::StatusList(views) => Ok(super::view::render_status_list_for(
                 views,
                 Some(p.offset),
                 Some(p.num),
                 &p.keys,
+                p.native_identity,
             )),
             other => Err(other),
         },
@@ -400,11 +415,12 @@ pub(crate) const QUERY_METHODS: &[QueryEntry] = &[
             keys: p.keys.clone(),
         },
         render: |reply, p| match reply {
-            CommandReply::StatusList(views) => Ok(render_status_list(
+            CommandReply::StatusList(views) => Ok(super::view::render_status_list_for(
                 views,
                 Some(p.offset),
                 Some(p.num),
                 &p.keys,
+                p.native_identity,
             )),
             other => Err(other),
         },
@@ -446,6 +462,7 @@ async fn run_query_method(
     entry: &QueryEntry,
     params: &[Value],
     id: Value,
+    native_identity: bool,
 ) -> RpcResponse {
     // Routing invariant (a runtime defense line complementing the
     // governance tests): table entries must carry a query category — a
@@ -455,10 +472,11 @@ async fn run_query_method(
         entry.kind,
         RpcMethodKind::QueryList | RpcMethodKind::QueryStatus
     ));
-    let p = match decode_query_params(entry, params) {
+    let mut p = match decode_query_params(entry, params) {
         Ok(p) => p,
         Err(e) => return RpcResponse::error(&e, id),
     };
+    p.native_identity = native_identity;
     let cmd = (entry.build)(&p);
     match st.session.call(cmd).await {
         Ok(reply) => match (entry.render)(reply, &p) {
@@ -478,6 +496,7 @@ pub(crate) async fn execute_session_method(
     method: &'static str,
     params: Vec<Value>,
     id: Value,
+    native_identity: bool,
 ) -> RpcResponse {
     // Immediate-semantics commands (shutdown threading / the RPC-layer
     // consumption seam / the direct facade call).
@@ -527,7 +546,7 @@ pub(crate) async fn execute_session_method(
     // carry the decode shape / command construction / reply rendering;
     // keys and pagination semantics unchanged inside the render entries).
     if let Some(entry) = QUERY_METHODS.iter().find(|entry| entry.name == method) {
-        return run_query_method(st, entry, &params, id).await;
+        return run_query_method(st, entry, &params, id, native_identity).await;
     }
     // Per-method session calls (parameter decode errors short-circuit).
     let call = async {
@@ -666,7 +685,7 @@ pub(crate) async fn execute_session_method(
             "taiji.prepareBitTorrent" => Ok(SessionCommand::PrepareBitTorrent),
             "taiji.notifyNetworkChange" => Ok(SessionCommand::NotifyNetworkChange),
             "taiji.getMagnetResolution" => Ok(SessionCommand::GetMagnetResolution { gid: gid_param(&params, 0)? }),
-            "taiji.getTorrentMetadata" => Ok(SessionCommand::GetTorrentMetadata { gid: gid_param(&params, 0)? }),
+            "taiji.getTorrentMetadata" | "taiji.getTorrentManifest" => Ok(SessionCommand::GetTorrentMetadata { gid: gid_param(&params, 0)? }),
             "taiji.confirmTorrentSelection" => Ok(SessionCommand::ConfirmTorrentSelection { gid: gid_param(&params, 0)?, options: opt_options(&params, 1)? }),
             "taiji.getHttpOutput" => Ok(SessionCommand::GetHttpOutput { gid: gid_param(&params, 0)? }),
             "taiji.finalizeHttp" => {

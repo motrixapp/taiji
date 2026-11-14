@@ -2651,6 +2651,7 @@ pub(super) fn drive_recovery(
     fi: usize,
     book: &mut RecoveryBook,
     deliver: &mpsc::Sender<RecoveredPieceLayer>,
+    selected: Option<&[bool]>,
 ) {
     if book.files.is_empty() || face.completed || face.kind != FaceKind::V2 {
         return;
@@ -2664,6 +2665,14 @@ pub(super) fn drive_recovery(
         })
         .collect();
     for (&file_idx, rec) in book.files.iter_mut() {
+        if matches!(rec.state, RecoveryFetchState::Missing)
+            && selected.is_some_and(|mask| {
+                !(rec.piece_base..rec.piece_base + rec.staging.pieces())
+                    .any(|piece| mask.get(piece as usize).copied().unwrap_or(false))
+            })
+        {
+            continue;
+        }
         match rec.state {
             RecoveryFetchState::Received => try_deliver_recovery(fi, file_idx, rec, deliver),
             RecoveryFetchState::Missing => {
@@ -2710,6 +2719,10 @@ pub(super) fn drive_recovery(
 /// The recovery reply-event arm body (the EngineLoop glue lives in
 /// run::arms — EngineLoop's visibility domain; this function only makes
 /// bookkeeping decisions).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "recovery reply and selection context stay explicit at the engine boundary"
+)]
 pub(super) fn handle_recovery_reply_and_drive(
     fi: usize,
     face: &mut FaceState,
@@ -2718,9 +2731,10 @@ pub(super) fn handle_recovery_reply_and_drive(
     file_idx: usize,
     block: usize,
     reply: Result<HashFetch, RecoveryFetchFail>,
+    selected: Option<&[bool]>,
 ) {
     handle_recovery_reply(fi, book, file_idx, block, reply);
-    drive_recovery(face, fi, book, deliver);
+    drive_recovery(face, fi, book, deliver, selected);
 }
 /// Dispatch-reply drain entry: takes the [`FaceState`] receipt / in-flight
 /// / refetch / piece-length bookkeeping and hands it to

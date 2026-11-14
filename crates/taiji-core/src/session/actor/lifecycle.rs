@@ -137,7 +137,7 @@ impl SessionActor {
             // GID reserve (cross-restart dedup): a fresh allocation
             // never collides with a restored GID.
             self.gid.reserve(raw_gid);
-            let cfg = PersistedTaskConfig::from_json(&row.config_json);
+            let mut cfg = PersistedTaskConfig::from_json(&row.config_json);
             // Recovery routing reads the row state through the unified
             // vocabulary's parse face — no bare word comparison. The
             // startup read face already filters rows to the active word
@@ -165,6 +165,13 @@ impl SessionActor {
                     let (metainfo, tiers) = *boxed;
                     let meta = Arc::new(metainfo);
                     let total_len = meta.meta.total_len();
+                    // moveStorage crash close-out: a journal
+                    // in the row = a move interrupted at any point;
+                    // redo it idempotently (fsmove — the source was
+                    // never destroyed) and commit the corrected dir
+                    // BEFORE the Job/queue rebuild continues on it.
+                    self.close_out_torrent_move(&gid_hex, &mut row, &snap.files, &mut cfg, &meta)
+                        .await;
                     let dir = PathBuf::from(&cfg.dir);
                     // checking-state re-entry (the check-pool routing): row
                     // state 'checking' = the bitmap is not trusted
@@ -519,7 +526,7 @@ impl SessionActor {
         };
         let mut reserved: Vec<(i64, Gid, bool)> = Vec::new();
         for snap in snaps {
-            let row = snap.row;
+            let mut row = snap.row;
             let gid_hex = row.gid.clone();
             let Ok(raw_gid) = u64::from_str_radix(&gid_hex, 16) else {
                 warn!(target: "taiji::core::session", gid = %gid_hex,
@@ -547,6 +554,10 @@ impl SessionActor {
             if self.global.motrix_startup_hold {
                 self.queue.startup_held.insert(gid, !paused);
             }
+            // moveStorage crash close-out (the torrent face's
+            // twin): redo the journaled move idempotently and commit
+            // the corrected dir before the Job rebuild reads it.
+            self.close_out_http_move(&gid_hex, &mut row).await;
             let queue_pos = row.queue_pos;
             // Concurrency-intent face replay: the split/cap effective
             // values frozen into the row at creation override the

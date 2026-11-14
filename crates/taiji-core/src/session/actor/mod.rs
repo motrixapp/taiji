@@ -1888,6 +1888,15 @@ enum TaskNotice {
     SynthesisGate {
         gid: Gid,
     },
+    /// `taiji.moveStorage` payload mover completion (the spawn_blocking
+    /// receipt): `Ok` = the payload landed at the new dir (the
+    /// actor commits the row + journal clear + releases the hold),
+    /// `Err` = the move failed (the hold releases, the journal stays —
+    /// the next bootstrap retries, the task continues at the old dir).
+    MoveDone {
+        gid: Gid,
+        result: Box<Result<taiji_io::fsmove::MoveOutcome, String>>,
+    },
 }
 
 impl TaskNotice {
@@ -1901,7 +1910,8 @@ impl TaskNotice {
             | TaskNotice::RecheckDone { gid, .. }
             | TaskNotice::StatusDirty { gid }
             | TaskNotice::SeedingStarted { gid }
-            | TaskNotice::SynthesisGate { gid } => *gid,
+            | TaskNotice::SynthesisGate { gid }
+            | TaskNotice::MoveDone { gid, .. } => *gid,
         }
         // (Media outcomes ride TaskNotice::Ended — no separate arm.)
     }
@@ -1941,6 +1951,11 @@ pub struct SessionActor {
     session_id: String,
     queue: QueueMan,
     jobs: HashMap<Gid, Job>,
+    /// `taiji.moveStorage` in-flight table: the runtime
+    /// face of the row's `move_pending` journal (gates fillup through
+    /// `QueueMan::set_moving`; the promotion step fires the payload
+    /// mover once the quiesce teardown completes).
+    moving: HashMap<Gid, move_storage::MoveState>,
     running: HashMap<Gid, RunningTask>,
     /// Persistence injection (None = nothing persisted; existing tests /
     /// CLI direct-run shapes unchanged). Task registration / lifecycle row
@@ -2270,6 +2285,7 @@ impl SessionActor {
             session_id: random_session_id(),
             queue: QueueMan::new(),
             jobs: HashMap::new(),
+            moving: HashMap::new(),
             running: HashMap::new(),
             global,
             limits,
@@ -2608,6 +2624,9 @@ impl SessionActor {
             // and backfilled in the same tick.
                                            self.on_seeding_started(gid).await;
                                        }
+                                       TaskNotice::MoveDone { gid, result } => {
+                                           self.finish_move(gid, *result).await;
+                                       }
                                        TaskNotice::SynthesisGate { gid } => {
             // Synthesis-pool transfer:
             // active → proc_wait, download slot released
@@ -2748,6 +2767,11 @@ impl SessionActor {
                 matches!(job, Job::Magnet(magnet) if magnet.options.bt_metadata_only)
                     .then_some(*gid)
             }));
+        // Storage-move promotion: feed the queue hold set,
+        // then fire every matured mover (quiesce complete / never
+        // quiescing). In-flight members stay held — activation would
+        // race the mover's source payload.
+        self.promote_matured_moves();
         // (1) check promotion: admit until the budget is full or the
         // FIFO drains. Each admission pops the entry; the meta lookup
         // precedes the registry move (a parked entry whose payload
@@ -2949,6 +2973,7 @@ mod magnet;
 /// addMedia option-parse face, and the driver spawn; the pipeline is
 /// `crate::session::media`.
 mod media_task;
+mod move_storage;
 pub(crate) mod output_paths;
 mod persist;
 /// Periodic task summary log (the `--summary-interval` feed; pub(crate)

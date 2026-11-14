@@ -177,12 +177,25 @@ impl SessionActor {
             // explicit off goes through the per-task
             // `enable-http-seeding` option face).
             enable_http_seeding: patch.enable_http_seeding,
+            move_pending: None,
         }
     }
 
     /// Task payload -> config_json payload (for transition rewrites;
     /// seed_time is stored in minutes, matching the option unit).
     pub(super) fn job_config(&self, gid: &Gid) -> PersistedTaskConfig {
+        let mut config = self.job_config_of_job(gid);
+        // moveStorage journal overlay: the journal's single
+        // truth is the row mirror — every job_config rewrite preserves
+        // it (the same read-back shape as selection_pending/output_paths,
+        // centralized here instead of per-arm).
+        if let Some((row, _)) = self.rows.get(&gid.to_string()) {
+            config.move_pending = PersistedTaskConfig::from_json(&row.config_json).move_pending;
+        }
+        config
+    }
+
+    fn job_config_of_job(&self, gid: &Gid) -> PersistedTaskConfig {
         match self.jobs.get(gid) {
             Some(Job::Torrent(tj)) => PersistedTaskConfig {
                 selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
@@ -228,6 +241,7 @@ impl SessionActor {
                 // (SeedPolicy seconds mapped directly — 0 writes no
                 // bytes, so existing payloads do not drift).
                 bt_stop_timeout_secs: tj.seed.stop_timeout.as_secs(),
+                move_pending: None,
             },
             Some(Job::Magnet(mj)) => PersistedTaskConfig {
                 selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
@@ -283,6 +297,7 @@ impl SessionActor {
                 // bt-stop-timeout persists with the task mirror (same
                 // as the torrent branch).
                 bt_stop_timeout_secs: mj.seed.stop_timeout.as_secs(),
+                move_pending: None,
             },
             Some(Job::TorrentUrl {
                 url,
@@ -331,6 +346,7 @@ impl SessionActor {
                 // (carried by the upgraded TorrentJob — mirrored by
                 // job_config after activation).
                 bt_stop_timeout_secs: 0,
+                move_pending: None,
             },
             // HTTP task rows live in the http_task table (config_json
             // carried separately) and have no torrent-row payload; this

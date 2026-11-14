@@ -186,7 +186,8 @@ impl RpcError {
 
     /// The standard error face for promised-but-not-implemented /
     /// permanently unsupported methods (the `system.*` introspection
-    /// placeholders, the taiji.moveStorage/renameFile capability face).
+    /// placeholders, the taiji.renameFile capability face, and
+    /// moveStorage's media-task family).
     pub fn not_supported(method: &str) -> Self {
         RpcError {
             code: CODE_GENERIC,

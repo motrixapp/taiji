@@ -774,17 +774,26 @@ pub(crate) async fn execute_session_method(
             "getSessionInfo" => Ok(SessionCommand::GetSessionInfo),
             "saveSession" => Ok(SessionCommand::SaveSession),
             "taiji.moveStorage" | "taiji.renameFile" => {
-                // Extensions kept as an explicit not_supported face (not
-                // in the committed set; the actor always answers
-                // NotSupported after GID pre-resolution). Without these
-                // arms the methods fell into an unreachable! panic (no
-                // response) — the listMethods promise face diverging from
-                // the callable face.
+                // moveStorage = the storage-migration extension (:
+                // real capability — journal + async payload move; the
+                // actor's move_storage module). renameFile stays an
+                // explicit not_supported face (the actor answers after
+                // GID pre-resolution); without its arm the method fell
+                // into an unreachable! panic (no response) — the
+                // listMethods promise face diverging from the callable
+                // face.
                 let gid = gid_param(&params, 0)?;
                 if method == "taiji.moveStorage" {
                     let Some(Value::String(dir)) = params.get(1) else {
                         return Err(param_error(1, true));
                     };
+                    if dir.trim().is_empty() {
+                        // An empty dir is a value-level violation (the
+                        // move target must name a directory) — the
+                        // aria2 generic illegal-argument face, the same
+                        // wording changePosition uses for a bad HOW.
+                        return Err(RpcError::generic(E_MSG_ILLEGAL_ARGUMENT));
+                    }
                     Ok(SessionCommand::MoveStorage {
                         gid,
                         dir: dir.clone(),

@@ -129,7 +129,7 @@ pub(crate) fn serialize_options(map: &BTreeMap<String, String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use taiji_core::session::{GlobalOptions, global_option_echo, option_name_declared};
+    use taiji_core::session::{GlobalOptions, global_option_echo};
 
     /// The echo key set ≡ the classification-known set, member for
     /// member: every key of the default global echo (the same face the
@@ -173,6 +173,8 @@ mod tests {
     #[cfg(feature = "metalink")]
     #[test]
     fn classify_partitions_reference_extension_unknown() {
+        use taiji_core::session::option_name_declared;
+
         assert_eq!(classify("dir"), OptionClass::Aria2Name);
         assert_eq!(classify("bt-tracker"), OptionClass::Aria2Name);
         // The seam's legacy family are reference names (prefs.cc);

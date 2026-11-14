@@ -1,8 +1,10 @@
 //! Shared logical DNS queries, bounded positive/negative caching and waiter isolation.
 use super::*;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 /// Resolver policy. Failed answers live briefly; a caller cancellation or
 /// admission failure is never evidence about a hostname and is not cached.
@@ -31,6 +33,7 @@ impl Default for DnsPolicy {
 type Answer = Result<Vec<IpAddr>, ResolveError>;
 struct Flight {
     result: watch::Sender<Option<Answer>>,
+    cancel: CancellationToken,
 }
 struct State {
     cache: HostCache,
@@ -42,6 +45,7 @@ struct Inner {
     policy: DnsPolicy,
     state: Mutex<State>,
     metrics: Arc<MetricsRegistry>,
+    generation: AtomicU64,
 }
 
 /// One process-wide production instance is shared by HTTP, FTP, trackers and
@@ -84,6 +88,7 @@ impl SharedDns {
                 }),
                 policy,
                 metrics,
+                generation: AtomicU64::new(0),
             }),
         }
     }
@@ -113,6 +118,24 @@ impl SharedDns {
         state.cache.remove(&key);
         state.flights.remove(&key);
         self.inner.resolver.invalidate_host(&key);
+    }
+
+    /// Invalidate positive/negative answers and retire pending queries together.
+    /// Existing callers retry within their original deadline. Physical system
+    /// calls keep their real permits until completion, even after retirement.
+    pub fn network_changed(&self) {
+        let mut state = crate::lock(&self.inner.state);
+        state.cache.clear();
+        for (_, flight) in state.flights.drain() {
+            flight.cancel.cancel();
+        }
+        self.inner.resolver.invalidate_all();
+        self.inner.generation.fetch_add(1, Ordering::Release);
+        self.inner.metrics.dns().note_network_change();
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::Acquire)
     }
 
     pub fn cached_family_list(
@@ -151,49 +174,79 @@ impl SharedDns {
     }
 
     async fn query(&self, host: &str) -> Answer {
-        // DNS names are case insensitive, but the final dot changes OS search
-        // semantics and therefore remains part of the cache/flight identity.
+        // Keep the trailing dot: it controls OS search-domain semantics.
         let key = host.to_ascii_lowercase();
-        let mut receiver = {
-            let mut state = crate::lock(&self.inner.state);
-            if let Some(answer) = state.cache.get_result(&key, Instant::now()) {
-                if answer.is_ok() {
-                    self.inner.metrics.dns().note_lookup(DnsLookupResult::Hit);
-                } else {
-                    self.inner.metrics.dns().note_negative_hit();
-                }
-                return answer;
-            }
-            self.inner.metrics.dns().note_lookup(DnsLookupResult::Miss);
-            if let Some(flight) = state.flights.get(&key) {
-                self.inner.metrics.dns().note_coalesced();
-                flight.result.subscribe()
-            } else {
-                if state.active_queries >= self.inner.policy.max_in_flight {
-                    self.inner.metrics.dns().note_capacity_rejected();
-                    return Err(ResolveError::Capacity);
-                }
-                let (result, receiver) = watch::channel(None);
-                let flight = Arc::new(Flight { result });
-                state.flights.insert(key.clone(), flight.clone());
-                state.active_queries += 1;
-                let guard = FlightGuard {
-                    inner: self.inner.clone(),
-                    key,
-                    flight,
-                };
-                tokio::spawn(run_query(guard));
-                receiver
-            }
-        };
+        let deadline = Instant::now() + self.inner.policy.lookup_timeout;
         loop {
-            let answer = receiver.borrow_and_update().clone();
-            if let Some(answer) = answer {
+            let mut pending_guard = None;
+            let (mut receiver, generation) = {
+                let mut state = crate::lock(&self.inner.state);
+                if Instant::now() >= deadline {
+                    return Err(ResolveError::Timeout(self.inner.policy.lookup_timeout));
+                }
+                if let Some(answer) = state.cache.get_result(&key, Instant::now()) {
+                    if answer.is_ok() {
+                        self.inner.metrics.dns().note_lookup(DnsLookupResult::Hit);
+                    } else {
+                        self.inner.metrics.dns().note_negative_hit();
+                    }
+                    return answer;
+                }
+                self.inner.metrics.dns().note_lookup(DnsLookupResult::Miss);
+                let receiver = if let Some(flight) = state.flights.get(&key) {
+                    self.inner.metrics.dns().note_coalesced();
+                    flight.result.subscribe()
+                } else {
+                    if state.active_queries >= self.inner.policy.max_in_flight {
+                        self.inner.metrics.dns().note_capacity_rejected();
+                        return Err(ResolveError::Capacity);
+                    }
+                    let (result, receiver) = watch::channel(None);
+                    let flight = Arc::new(Flight {
+                        result,
+                        cancel: CancellationToken::new(),
+                    });
+                    state.flights.insert(key.clone(), flight.clone());
+                    state.active_queries += 1;
+                    let guard = FlightGuard {
+                        inner: self.inner.clone(),
+                        key: key.clone(),
+                        flight,
+                    };
+                    pending_guard = Some(guard);
+                    receiver
+                };
+                (receiver, self.generation())
+            };
+            // A closed runtime may drop the future synchronously. Its guard
+            // must be able to acquire state during cleanup.
+            if let Some(guard) = pending_guard {
+                tokio::spawn(run_query(guard));
+            }
+            let answer =
+                tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+                    loop {
+                        let answer = receiver.borrow_and_update().clone();
+                        if let Some(answer) = answer {
+                            return answer;
+                        }
+                        if receiver.changed().await.is_err() {
+                            return Err(ResolveError::Cancelled);
+                        }
+                    }
+                })
+                .await
+                .unwrap_or(Err(ResolveError::Timeout(self.inner.policy.lookup_timeout)));
+            // Serialize the final observation with invalidation, including an
+            // answer published just before a delayed caller is scheduled.
+            let state = crate::lock(&self.inner.state);
+            if Instant::now() >= deadline {
+                return Err(ResolveError::Timeout(self.inner.policy.lookup_timeout));
+            }
+            if generation == self.generation() {
                 return answer;
             }
-            if receiver.changed().await.is_err() {
-                return Err(ResolveError::Cancelled);
-            }
+            drop(state);
         }
     }
 
@@ -260,6 +313,11 @@ impl FlightGuard {
     }
     fn finish(&self, answer: Answer) {
         let mut state = crate::lock(&self.inner.state);
+        // Cancelled generations publish through Drop, after releasing their
+        // logical admission slot, so their waiters can join fresh work.
+        if self.flight.cancel.is_cancelled() || self.flight.result.borrow().is_some() {
+            return;
+        }
         if self.is_current(&state) {
             let ttl = match &answer {
                 Ok(_) => self.inner.policy.positive_ttl,
@@ -309,7 +367,7 @@ impl Drop for FlightGuard {
 }
 
 async fn run_query(guard: FlightGuard) {
-    if guard.abandon_if_unobserved() {
+    if guard.flight.cancel.is_cancelled() || guard.abandon_if_unobserved() {
         return;
     }
     guard.inner.metrics.dns().note_backend_started();
@@ -321,6 +379,8 @@ async fn run_query(guard: FlightGuard) {
     let mut future = Box::pin(tokio::time::timeout(timeout, future));
     loop {
         tokio::select! {
+            biased;
+            _ = guard.flight.cancel.cancelled() => return,
             result = &mut future => {
                 let answer = result.unwrap_or(Err(ResolveError::Timeout(timeout))).and_then(|list| {
                     let mut seen = HashSet::new();

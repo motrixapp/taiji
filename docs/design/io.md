@@ -97,12 +97,37 @@ are transient local outcomes and are never negatively cached.
 
 `SystemResolver` uses the system resolver to retain hosts-file, search-domain
 and scoped/VPN DNS behavior. Up to 32 system lookups run in dedicated threads;
-up to 256 distinct hosts may be running or awaiting admission. `SharedDns`
+up to 256 physical jobs may be running or awaiting admission, including retired
+network generations. `SharedDns`
 also limits outstanding logical queries to 256, including invalidated queries
-that have not yet finished. Same-host physical work is deduplicated even after
-the logical timeout or negative-cache expiry. Admission and resolution use a
+that have not yet finished. Same-host physical work is deduplicated within each network generation, even
+after the logical timeout or negative-cache expiry. Admission and resolution use a
 30-second deadline; waiting for an abandoned generation does not restart a
 caller's budget.
+
+`SharedDns::network_changed` clears positive/negative caches and cancels owned
+logical queries. Waiting callers retry within their original absolute deadline.
+The system resolver detaches retired flights from the current-name table while
+retaining their actual execution/admission permits. This lets the new network
+resolve the same name using available capacity, without waiting for an old
+network's syscall. Late answers, including answers published before a delayed
+waiter resumes, cannot enter the new cache or satisfy the new generation.
+Tracker actors observe this generation before processing replies and flushing
+requests: they retire old UDP connection IDs, pending operations and IPv6
+availability results, then make trackers eligible again.
+
+The host supplies changes through authenticated `taiji.notifyNetworkChange()`.
+Motrix desktop and Server check interface and system DNS configuration
+fingerprints every 10 seconds while the engine is ready. macOS uses `scutil`,
+Windows observes adapter configuration and both NRPT registry locations, and
+Linux observes resolver/NSS/hosts files, stable route fields and resolved's
+configuration when available. DNS server selection cursors and route usage
+counters do not constitute configuration changes. Wake/reconnect schedules a
+fresh check. Raw configuration and hostnames are neither sent to the engine nor
+logged. Missing optional inputs remain visible in local debug diagnostics;
+unobservable upstream proxy changes still rely on cache expiry. This is
+configuration polling, not a claim of instantaneous notification on every OS.
+Standalone embedders must supply their own network-change notification.
 
 A started `getaddrinfo` call cannot be safely force-cancelled. Its physical
 entry and permit remain owned until it returns, even if every caller has left.
@@ -138,7 +163,11 @@ backend work. `/metrics` additionally exposes `taiji_dns_backend_queries_total`,
 `taiji_dns_coalesced_total`, `taiji_dns_negative_hits_total`,
 `taiji_dns_capacity_rejected_total`, `taiji_dns_system_queries_total`,
 `taiji_dns_system_coalesced_total`, `taiji_dns_system_active` and
-`taiji_dns_system_queued`. Counters have no hostname/IP labels. A coalesced
+`taiji_dns_system_queued`. `taiji_dns_network_changes_total` counts context notifications.
+`taiji_dns_system_queue_seconds` measures physical admission/scheduling time,
+including queued work that is cancelled; `taiji_dns_system_lookup_seconds`
+measures actual calls until they return or panic, including retired calls.
+Unfinished calls remain represented by the active/queued gauges. Counters have no hostname/IP labels. A coalesced
 caller is still a cache miss; a negative-cache hit is counted separately from
 a successful hit. Active/queued gauges measure physical system work rather
 than surviving futures.

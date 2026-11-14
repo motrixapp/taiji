@@ -2,7 +2,7 @@
 //! running getaddrinfo call has released its thread or concurrency permit.
 use super::*;
 use std::net::ToSocketAddrs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tokio::sync::{Semaphore, watch};
 
@@ -28,7 +28,7 @@ impl BlockingHostLookup for OsLookup {
 #[derive(Debug, Clone)]
 pub struct SystemDnsPolicy {
     pub max_active: usize,
-    /// Includes executing and queued distinct hosts.
+    /// Includes executing and queued physical jobs, including retired generations.
     pub max_in_flight: usize,
     pub admission_timeout: Duration,
 }
@@ -55,6 +55,7 @@ struct Inner {
     admission: Arc<Semaphore>,
     flights: Mutex<HashMap<String, Arc<Flight>>>,
     metrics: Arc<MetricsRegistry>,
+    generation: AtomicU64,
 }
 
 /// A constructible OS resolver with a real physical-work budget. The blocking
@@ -77,6 +78,7 @@ impl SystemResolver {
                 policy,
                 flights: Mutex::new(HashMap::new()),
                 metrics,
+                generation: AtomicU64::new(0),
             }),
         }
     }
@@ -99,11 +101,13 @@ impl SystemResolver {
         let host = host.to_ascii_lowercase();
         let caller_deadline = Instant::now() + self.inner.policy.admission_timeout;
         loop {
-            let (receiver, flight) = {
+            let mut pending_guard = None;
+            let (receiver, flight, generation) = {
                 let mut flights = crate::lock(&self.inner.flights);
+                let generation = self.inner.generation.load(Ordering::Acquire);
                 if let Some(flight) = flights.get(&host) {
                     self.inner.metrics.dns().note_system_coalesced();
-                    (flight.result.subscribe(), flight.clone())
+                    (flight.result.subscribe(), flight.clone(), generation)
                 } else {
                     let slot = match self.inner.admission.clone().try_acquire_owned() {
                         Ok(slot) => slot,
@@ -127,17 +131,22 @@ impl SystemResolver {
                         inner: self.inner.clone(),
                         host: host.clone(),
                         flight: flight.clone(),
-                        queued: true,
-                        active: false,
+                        queued_at: Some(Instant::now()),
+                        started_at: None,
                         finished: false,
                         fallback: ResolveError::Cancelled,
                         slot: Some(slot),
                         execution: None,
                     };
-                    tokio::spawn(admit(guard));
-                    (receiver, flight)
+                    pending_guard = Some(guard);
+                    (receiver, flight, generation)
                 }
             };
+            // Never submit a cleanup-owning task while holding its registry
+            // lock: runtime shutdown can drop that task before polling it.
+            if let Some(guard) = pending_guard {
+                tokio::spawn(admit(guard));
+            }
             let mut waiter = Waiter {
                 inner: self.inner.clone(),
                 flight,
@@ -165,7 +174,8 @@ impl SystemResolver {
             // finish() validates success at publication under the registry
             // lock. A waiter scheduled after the physical deadline can still
             // consume that timely success within its own remaining budget.
-            let stale = waiter.flight.abandoned.load(Ordering::Acquire)
+            let stale = generation != self.inner.generation.load(Ordering::Acquire)
+                || waiter.flight.abandoned.load(Ordering::Acquire)
                 || (matches!(answer, Err(ResolveError::Timeout(_)))
                     && Instant::now() >= waiter.flight.deadline);
             drop(waiter);
@@ -197,6 +207,19 @@ impl Drop for Waiter {
 }
 
 impl HostResolver for SystemResolver {
+    fn invalidate_all(&self) {
+        let mut flights = crate::lock(&self.inner.flights);
+        for (_, flight) in flights.drain() {
+            flight.abandoned.store(true, Ordering::Release);
+            flight
+                .result
+                .send_replace(Some(Err(ResolveError::Cancelled)));
+        }
+        self.inner.generation.fetch_add(1, Ordering::Release);
+        // Running guards still own both permits. New-network queries can use
+        // free capacity without joining old-network work for the same name.
+    }
+
     fn invalidate_host(&self, host: &str) {
         if let Some(flight) = crate::lock(&self.inner.flights).get(&host.to_ascii_lowercase()) {
             flight.abandoned.store(true, Ordering::Release);
@@ -240,6 +263,10 @@ impl HostResolver for SystemResolver {
 /// same bounded OS service, including callers outside SharedDns.
 pub struct TokioHostResolver;
 impl HostResolver for TokioHostResolver {
+    fn invalidate_all(&self) {
+        SystemResolver::shared_default().invalidate_all();
+    }
+
     fn invalidate_host(&self, host: &str) {
         SystemResolver::shared_default().invalidate_host(host);
     }
@@ -261,8 +288,8 @@ struct PhysicalGuard {
     inner: Arc<Inner>,
     host: String,
     flight: Arc<Flight>,
-    queued: bool,
-    active: bool,
+    queued_at: Option<Instant>,
+    started_at: Option<Instant>,
     finished: bool,
     fallback: ResolveError,
     slot: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -270,13 +297,19 @@ struct PhysicalGuard {
 }
 impl PhysicalGuard {
     fn stop_metrics(&mut self) {
-        if self.queued {
+        if let Some(queued_at) = self.queued_at.take() {
             self.inner.metrics.dns().system_queued_dec();
-            self.queued = false;
+            self.inner
+                .metrics
+                .dns()
+                .observe_system_queue(queued_at.elapsed());
         }
-        if self.active {
+        if let Some(started_at) = self.started_at.take() {
             self.inner.metrics.dns().system_active_dec();
-            self.active = false;
+            self.inner
+                .metrics
+                .dns()
+                .observe_system_lookup(started_at.elapsed());
         }
     }
     fn try_start(&mut self) -> Result<(), ResolveError> {
@@ -294,7 +327,7 @@ impl PhysicalGuard {
         self.stop_metrics();
         self.inner.metrics.dns().note_system_started();
         self.inner.metrics.dns().system_active_inc();
-        self.active = true;
+        self.started_at = Some(Instant::now());
         Ok(())
     }
     fn finish(&mut self, mut answer: Answer) {

@@ -455,6 +455,7 @@ pub struct TrackerActor {
     /// — **whole-list backfill happens only inside the service** (the
     /// actor has no cache write path).
     dns: Arc<SharedDns>,
+    dns_generation: u64,
     /// v6 carrier availability override (test seam; None = production:
     /// probe_source_ip(true) measurement).
     v6_probe_override: Option<bool>,
@@ -627,6 +628,8 @@ impl TrackerActor {
         cfg.scrape_hashes = scrape_hashes;
         let mut token_seq = 0u64;
         let (tiers, slots) = build_tables(&cfg.tiers, &mut token_seq);
+        let dns = SharedDns::shared_default();
+        let dns_generation = dns.generation();
         Ok(TrackerActor {
             tiers,
             slots,
@@ -636,7 +639,8 @@ impl TrackerActor {
             udp: UdpTrackerClient::new(),
             udp_closed: false,
             scrapes: HashMap::new(),
-            dns: SharedDns::shared_default(),
+            dns,
+            dns_generation,
             v6_probe_override: None,
             v6_gate_cache: None,
             v6_probe_factory: Arc::new(|| {
@@ -670,14 +674,33 @@ impl TrackerActor {
     /// counts can be asserted both ways, zero cross-test pollution).
     pub fn with_resolver(mut self, resolver: Arc<dyn HostResolver>) -> Self {
         self.dns = Arc::new(SharedDns::with_resolver(resolver));
+        self.dns_generation = self.dns.generation();
         self
     }
 
     /// Inject one service into HTTP and UDP so lookups/cache/limits are shared.
     pub fn with_dns(mut self, dns: Arc<SharedDns>) -> Result<Self, TrackerError> {
         self.http = HttpAnnounce::with_dns(&self.cfg.options, Arc::clone(&dns))?;
+        self.dns_generation = dns.generation();
         self.dns = dns;
         Ok(self)
+    }
+
+    fn refresh_network(&mut self, now: Instant) {
+        let generation = self.dns.generation();
+        if generation == self.dns_generation {
+            return;
+        }
+        self.dns_generation = generation;
+        self.clear_operations();
+        self.v6_gate_cache = None;
+        for slot in &mut self.slots {
+            slot.fails = 0;
+        }
+        for tier in &mut self.tiers {
+            tier.failed_walk = 0;
+        }
+        self.force_ready(now);
     }
 
     fn next_token(&mut self) -> u64 {
@@ -1725,6 +1748,7 @@ impl TrackerActor {
 
     /// Maintain deadlines even while the carrier is backpressured.
     async fn drain_udp(&mut self, now: Instant) {
+        self.refresh_network(now);
         for i in 0..self.slots.len() {
             if self.slots[i].updating {
                 self.advance_udp_attempt(i, now);
@@ -1758,6 +1782,7 @@ impl TrackerActor {
     }
 
     fn on_udp_packet(&mut self, from: SocketAddr, data: &[u8], now: Instant) {
+        self.refresh_network(now);
         let expired: Vec<_> = self
             .slots
             .iter()
@@ -1834,6 +1859,7 @@ impl TrackerActor {
     }
 
     fn on_outcome(&mut self, outcome: AnnounceOutcome, now: Instant) {
+        self.refresh_network(now);
         match outcome {
             AnnounceOutcome::V6Probe {
                 token,
@@ -1977,6 +2003,7 @@ impl TrackerActor {
     /// free their slot immediately) -> UDP maintenance -> noMoreAnnounce
     /// -> the parallel wave issues (all due slots drain within the cap).
     pub async fn tick(&mut self, now: Instant) {
+        self.refresh_network(now);
         while let Ok((from, data)) = self.transport.inbound.try_recv() {
             self.on_udp_packet(from, &data, now);
         }
@@ -5934,5 +5961,53 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("shutdown deadline: {e}"))
             .unwrap_or_else(|e| panic!("actor: {e}"));
+    }
+    #[tokio::test]
+    async fn network_change_reconnects_udp_and_ignores_old_announce_reply() {
+        let (mut actor, mut out, _input) =
+            address_actor(&["127.0.0.1"], Duration::from_secs(30)).await;
+        let (events, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        actor.event_tx = events;
+        let now = Instant::now();
+        actor.tick(now).await;
+        let connect = out.recv().await.unwrap_or_else(|| panic!("CONNECT"));
+        actor.on_udp_packet(
+            connect.0,
+            &udp_response(&connect.1, UdpAction::Connect, &1i64.to_be_bytes()),
+            now,
+        );
+        actor.tick(now).await;
+        let announce = out.recv().await.unwrap_or_else(|| panic!("ANNOUNCE"));
+        assert_eq!(&announce.1[8..12], &1i32.to_be_bytes());
+        actor.v6_gate_cache = Some((true, now));
+        let old_token = actor.slots[0].token;
+
+        actor.dns.network_changed();
+        let mut body = Vec::new();
+        body.extend_from_slice(&60i32.to_be_bytes());
+        body.extend_from_slice(&0i32.to_be_bytes());
+        body.extend_from_slice(&1i32.to_be_bytes());
+        body.extend_from_slice(&[192, 0, 2, 90, 0x1a, 0xe1]);
+        actor.on_udp_packet(
+            announce.0,
+            &udp_response(&announce.1, UdpAction::Announce, &body),
+            now,
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "retired tracker reply cannot publish peers"
+        );
+        assert!(actor.v6_gate_cache.is_none());
+        actor.tick(now).await;
+        settle_dns_outcomes(&mut actor, now).await;
+        let fresh = out.recv().await.unwrap_or_else(|| panic!("fresh CONNECT"));
+        assert_eq!(fresh.0, connect.0);
+        assert_eq!(
+            &fresh.1[8..12],
+            &0i32.to_be_bytes(),
+            "old connection ID was retired"
+        );
+        assert_ne!(actor.slots[0].token, old_token);
+        assert_eq!(actor.slots[0].fails, 0);
     }
 }

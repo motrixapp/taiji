@@ -11,7 +11,7 @@
 //! The semaphore permit and cleanup guard live inside the blocking closure;
 //! cancelling a waiter cannot falsely release a running getaddrinfo call.
 //! Timeouts abandon logical waits, not OS calls. Retries join an outstanding
-//! physical call and cannot duplicate it; stale answers are discarded before
+//! physical call within that network generation; stale answers are discarded before
 //! a new cohort retries within its own remaining deadline.
 //!
 //! Metrics keep cache hit/miss and caller error/latency semantics separate
@@ -119,6 +119,10 @@ pub trait HostResolver: Send + Sync + 'static {
     /// Forget an outstanding physical generation if the backend maintains one.
     /// Existing system work is not forcibly stopped; its answer must be ignored.
     fn invalidate_host(&self, _host: &str) {}
+
+    /// Retire lookups issued under a previous network configuration.
+    /// Stateless backends need no action; caching backends must override this.
+    fn invalidate_all(&self) {}
 
     fn resolve(&self, host: String) -> ResolverFuture;
 
@@ -240,6 +244,9 @@ impl TimeoutResolver {
 }
 
 impl HostResolver for TimeoutResolver {
+    fn invalidate_all(&self) {
+        self.inner.invalidate_all();
+    }
     fn invalidate_host(&self, host: &str) {
         self.inner.invalidate_host(host);
     }
@@ -695,6 +702,11 @@ impl HostCache {
     fn remove(&mut self, host: &str) {
         self.entries.remove(host);
         self.order.retain(|entry| entry != host);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
     }
 
     /// Per-family projection read: the **first** address of the family

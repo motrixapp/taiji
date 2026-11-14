@@ -207,6 +207,7 @@ pub struct HistogramSnapshot {
 ///   oldest).
 #[derive(Debug)]
 pub struct DnsMetrics {
+    network_changes: Counter,
     backend_started: Counter,
     coalesced: Counter,
     negative_hit: Counter,
@@ -225,6 +226,8 @@ pub struct DnsMetrics {
     events_evict_ttl: Counter,
     events_evict_capacity: Counter,
     resolve_seconds: Histogram,
+    system_queue_seconds: Histogram,
+    system_lookup_seconds: Histogram,
 }
 
 impl Default for DnsMetrics {
@@ -236,6 +239,7 @@ impl Default for DnsMetrics {
 impl DnsMetrics {
     fn new() -> Self {
         DnsMetrics {
+            network_changes: Counter::default(),
             backend_started: Counter::default(),
             coalesced: Counter::default(),
             negative_hit: Counter::default(),
@@ -254,9 +258,20 @@ impl DnsMetrics {
             events_evict_ttl: Counter::default(),
             events_evict_capacity: Counter::default(),
             resolve_seconds: Histogram::new(DNS_RESOLVE_BUCKETS_SECONDS),
+            system_queue_seconds: Histogram::new(DNS_RESOLVE_BUCKETS_SECONDS),
+            system_lookup_seconds: Histogram::new(DNS_RESOLVE_BUCKETS_SECONDS),
         }
     }
 
+    pub(crate) fn note_network_change(&self) {
+        self.network_changes.inc();
+    }
+    pub(crate) fn observe_system_queue(&self, elapsed: Duration) {
+        self.system_queue_seconds.observe(elapsed);
+    }
+    pub(crate) fn observe_system_lookup(&self, elapsed: Duration) {
+        self.system_lookup_seconds.observe(elapsed);
+    }
     pub(crate) fn note_backend_started(&self) {
         self.backend_started.inc();
     }
@@ -330,6 +345,7 @@ impl DnsMetrics {
     /// docs).
     pub fn snapshot(&self) -> DnsMetricsSnapshot {
         DnsMetricsSnapshot {
+            network_changes: self.network_changes.get(),
             backend_started: self.backend_started.get(),
             coalesced: self.coalesced.get(),
             negative_hit: self.negative_hit.get(),
@@ -348,6 +364,8 @@ impl DnsMetrics {
             events_evict_ttl: self.events_evict_ttl.get(),
             events_evict_capacity: self.events_evict_capacity.get(),
             resolve_seconds: self.resolve_seconds.snapshot(),
+            system_queue_seconds: self.system_queue_seconds.snapshot(),
+            system_lookup_seconds: self.system_lookup_seconds.snapshot(),
         }
     }
 }
@@ -393,6 +411,7 @@ pub enum DnsCacheEvent {
 /// projection/rendering faces).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DnsMetricsSnapshot {
+    pub network_changes: u64,
     pub backend_started: u64,
     pub coalesced: u64,
     pub negative_hit: u64,
@@ -411,6 +430,8 @@ pub struct DnsMetricsSnapshot {
     pub events_evict_ttl: u64,
     pub events_evict_capacity: u64,
     pub resolve_seconds: HistogramSnapshot,
+    pub system_queue_seconds: HistogramSnapshot,
+    pub system_lookup_seconds: HistogramSnapshot,
 }
 
 /// Transport class -> metric class mapping (single source; `Other` =
@@ -1156,6 +1177,9 @@ mod tests {
         assert_eq!(
             b.snapshot().dns,
             DnsMetricsSnapshot {
+                network_changes: 0,
+                system_queue_seconds: Histogram::new(DNS_RESOLVE_BUCKETS_SECONDS).snapshot(),
+                system_lookup_seconds: Histogram::new(DNS_RESOLVE_BUCKETS_SECONDS).snapshot(),
                 backend_started: 0,
                 coalesced: 0,
                 negative_hit: 0,

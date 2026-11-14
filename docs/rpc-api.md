@@ -168,6 +168,19 @@ an interrupted request can be replayed after restart. Unselected files are not
 preallocated. A piece shared by selected and unselected files may still require
 bytes outside the selected file for hash verification.
 
+## Network context notification
+
+`taiji.notifyNetworkChange()` takes no arguments and returns `"OK"`. It is a
+native-only, authenticated write operation. Hosts call it after observing a
+network/DNS configuration change or resume. It invalidates positive/negative
+DNS cache entries, retires prior-generation results and causes tracker actors
+to refresh connection state. Existing DNS callers retry within their original
+deadlines; running system calls retain their real resource permits until they
+finish. The operation does not change OS DNS settings or provide DNS servers.
+`/metrics` exposes `taiji_dns_network_changes_total` and separate system queue
+and lookup duration histograms to distinguish local contention from resolver
+latency.
+
 ## CLI Shortcut Surface (`taiji http`)
 
 `taiji http <URL…> [-d dir] [-o name] [--checksum md5|sha-1|sha-224|sha-256|sha-384|sha-512=<hex>]`

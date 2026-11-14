@@ -83,6 +83,7 @@ fn method_surface_is_frozen() {
         // (the taiji.* namespace; the disk_tier face get query / set
         // write + the parameterless getCapabilities query — mechanical
         // completion follows the same note).
+        "taiji.notifyNetworkChange",
         "taiji.getTorrentMetadata",
         "taiji.confirmTorrentSelection",
         "taiji.getHttpOutput",

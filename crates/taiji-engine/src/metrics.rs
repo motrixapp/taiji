@@ -581,6 +581,7 @@ pub struct MetricsSnapshot {
     /// section). Multiple atomics, non-consistent snapshot - each count
     /// read independently; do not assert cross-field consistency.
     /// DNS work and admission counters; active/queued track physical system queries.
+    pub dns_network_changes_total: u64,
     pub dns_backend_queries_total: u64,
     pub dns_coalesced_total: u64,
     pub dns_negative_hits_total: u64,
@@ -603,6 +604,12 @@ pub struct MetricsSnapshot {
     /// microseconds total (converted at render time).
     pub dns_resolve_seconds_buckets: Vec<u64>,
     pub dns_resolve_seconds_count: u64,
+    pub dns_system_queue_seconds_buckets: Vec<u64>,
+    pub dns_system_queue_seconds_count: u64,
+    pub dns_system_queue_seconds_sum_us: u64,
+    pub dns_system_lookup_seconds_buckets: Vec<u64>,
+    pub dns_system_lookup_seconds_count: u64,
+    pub dns_system_lookup_seconds_sum_us: u64,
     pub dns_resolve_seconds_sum_us: u64,
     /// HTTP transport family (io registry seam; feed terms in the taiji-io
     /// `metrics` module's `HttpMetrics` doc - errors count each failed
@@ -777,6 +784,7 @@ impl Default for MetricsSnapshot {
             rpc_conn_rejected_total_scope_total: 0,
             rpc_conn_rejected_total_scope_per_ip: 0,
             rpc_auth_fail_total: 0,
+            dns_network_changes_total: 0,
             dns_backend_queries_total: 0,
             dns_coalesced_total: 0,
             dns_negative_hits_total: 0,
@@ -796,6 +804,12 @@ impl Default for MetricsSnapshot {
             dns_events_evict_capacity_total: 0,
             dns_resolve_seconds_buckets: vec![0; DNS_RESOLVE_BUCKETS_SECONDS.len()],
             dns_resolve_seconds_count: 0,
+            dns_system_queue_seconds_buckets: vec![0; DNS_RESOLVE_BUCKETS_SECONDS.len()],
+            dns_system_queue_seconds_count: 0,
+            dns_system_queue_seconds_sum_us: 0,
+            dns_system_lookup_seconds_buckets: vec![0; DNS_RESOLVE_BUCKETS_SECONDS.len()],
+            dns_system_lookup_seconds_count: 0,
+            dns_system_lookup_seconds_sum_us: 0,
             dns_resolve_seconds_sum_us: 0,
             http_errors_dns_permanent_total: 0,
             http_errors_dns_transient_total: 0,
@@ -1992,6 +2006,7 @@ impl SessionMetrics {
         // family; multiple atomics, non-consistent snapshot - see the
         // module and field docs).
         let io = self.io_metrics.snapshot();
+        snap.dns_network_changes_total = io.dns.network_changes;
         snap.dns_backend_queries_total = io.dns.backend_started;
         snap.dns_coalesced_total = io.dns.coalesced;
         snap.dns_negative_hits_total = io.dns.negative_hit;
@@ -2011,6 +2026,12 @@ impl SessionMetrics {
         snap.dns_events_evict_capacity_total = io.dns.events_evict_capacity;
         snap.dns_resolve_seconds_buckets = io.dns.resolve_seconds.buckets;
         snap.dns_resolve_seconds_count = io.dns.resolve_seconds.count;
+        snap.dns_system_queue_seconds_buckets = io.dns.system_queue_seconds.buckets;
+        snap.dns_system_queue_seconds_count = io.dns.system_queue_seconds.count;
+        snap.dns_system_queue_seconds_sum_us = io.dns.system_queue_seconds.sum_us;
+        snap.dns_system_lookup_seconds_buckets = io.dns.system_lookup_seconds.buckets;
+        snap.dns_system_lookup_seconds_count = io.dns.system_lookup_seconds.count;
+        snap.dns_system_lookup_seconds_sum_us = io.dns.system_lookup_seconds.sum_us;
         snap.dns_resolve_seconds_sum_us = io.dns.resolve_seconds.sum_us;
         let http = &io.http;
         snap.http_errors_dns_permanent_total = http.errors_dns_permanent;

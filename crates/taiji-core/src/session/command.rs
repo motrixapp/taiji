@@ -281,6 +281,8 @@ pub enum SessionCommand {
     },
     /// Durable HTTP publication state and actual paths.
     /// Read original verified metainfo without exposing engine filesystem paths.
+    /// Retire cached and pending name resolution after host network changes.
+    NotifyNetworkChange,
     GetTorrentMetadata {
         gid: String,
     },
@@ -753,6 +755,7 @@ mod tests {
         ("taiji.getSchedulerPolicy", true),
         ("taiji.setFilePriority", false),
         ("taiji.setStreamingPlayhead", false),
+        ("taiji.notifyNetworkChange", false),
         ("taiji.getTorrentMetadata", true),
         ("taiji.confirmTorrentSelection", false),
         ("taiji.getHttpOutput", true),

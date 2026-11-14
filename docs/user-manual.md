@@ -64,6 +64,15 @@ cached for 5 minutes, failures for 2 seconds and timeouts for 1 second; a
 cancelled request or local capacity limit is not cached as a hostname failure.
 The resolver retains the operating system's hosts-file and VPN DNS settings.
 
+Motrix observes network and DNS configuration while the engine is ready, with
+a 10-second polling interval and an immediate check on desktop wake. Detected
+changes invalidate both successful and failed cached answers, retire pending
+results and refresh UDP tracker connection state. Queries keep their original
+timeout budget across this transition. Optional system information tools may
+be unavailable in containers or restricted environments; the remaining file
+and interface observations still apply. Changes invisible to the application,
+such as reconfiguration behind an unchanged DNS proxy, still rely on expiry.
+
 UDP trackers try alternate addresses when an endpoint is unreachable. Only a
 successful CONNECT endpoint receives ANNOUNCE, and changing addresses does not
 extend the attempt's total timeout. DNS/endpoint recovery helps discovery but
@@ -72,7 +81,7 @@ IPv6 availability checks run in the background so an unresponsive IPv6 route
 does not hold up IPv4 tracker requests or cancellation.
 
 A timed-out system lookup may continue in the OS. taiji bounds these calls to
-32 active and 256 active/queued hosts, and isolates them from other blocking
+32 active and 256 active/queued queries, and isolates them from other blocking
 I/O. The `/metrics` DNS counters distinguish cache hits, coalesced callers,
 backend queries and actual system activity; they do not expose hostnames.
 

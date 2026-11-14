@@ -278,7 +278,7 @@
   kind: taiji-extension
   where: "taiji/crates/taiji-domain/src/methods.rs:81-128"
   what: >-
-    17 个 taiji.* 扩展 RPC 方法:moveStorage/renameFile/banAddr/unbanAddr/listBans/setSchedulerPolicy/getSchedulerPolicy/setFilePriority/setStreamingPlayhead/getDiskTier/setDiskTier/getCapabilities/createTorrent/addTracker/removeTracker/addUriWithCookies/setTaskCookies——双模式下同名呈现,compat 面不投影 aria2.* 别名。
+    17 个 taiji.* 扩展 RPC 方法:moveStorage/renameFile/banAddr/unbanAddr/listBans/setSchedulerPolicy/getSchedulerPolicy/setFilePriority/setStreamingPlayhead/getDiskTier/setDiskTier/getCapabilities/createTorrent/addTracker/removeTracker/addUriWithCookies/setTaskCookies——双模式下同名呈现,compat 面不投影 aria2.* 别名。moveStorage 为真实现(四族载荷迁移+move_pending 日志崩溃安全,异步受理回 OK);renameFile 维持 not_supported。
   refs: >-
     方法注册表 taiji-domain/src/methods.rs:81-128;docs/rpc-api-diff.md §1:38(17 names 逐名列举);read_only 判定单源 RPC_METHOD_INFO(dispatch.rs:240-250)
 

@@ -62,8 +62,8 @@ Naming-surface rules (one surface at a time, `--rpc-aria2-compat`, dispatch.rs:1
 
 | Name | Shape | aria2 counterpart | Notes |
 |---|---|---|---|
-| `taiji.moveStorage` | (gid, dir: string) | 无上游对应 | 写;注册但 actor 恒答 NotSupported(显式 not_supported 面,methods.rs:756-762) |
-| `taiji.renameFile` | (gid, oldPath, newPath) | 无上游对应 | 写;同上 |
+| `taiji.moveStorage` | (gid, dir: string) | 无上游对应 | 写;真实现:四族载荷迁移(torrent 子树/HTTP .part/magnet 与 .torrent URL 纯换 dir;media 回 not_supported)+ config_json move_pending 日志崩溃安全;异步受理回 "OK",活动任务自动停熄重激活,checking/合成/结果态拒绝;空 dir=Illegal argument. |
+| `taiji.renameFile` | (gid, oldPath, newPath) | 无上游对应 | 写;注册但 actor 恒答 NotSupported(显式 not_supported 面) |
 | `taiji.banAddr` | (target: string, minutes?: 数字/数字串) | taiji 扩展 | 写;target=单 IP/CIDR;minutes 缺省=永久(methods.rs:788-818) |
 | `taiji.unbanAddr` | (target) | taiji 扩展 | 写 |
 | `taiji.listBans` | () | taiji 扩展 | 只读 |
@@ -185,7 +185,7 @@ Note: aria2's 19/15/16 (NAME_RESOLVE/FILE_OPEN/FILE_CREATE) have no production-r
 
 | Name | Shape | aria2 counterpart | Notes |
 |---|---|---|---|
-| `STR_NOT_SUPPORTED` | `taiji.method.not_supported: {method}` | 无对应 | 承诺未实现/永久不支持方法的标准面(system.* 占位、moveStorage/renameFile 能力面;error.rs:114-124) |
+| `STR_NOT_SUPPORTED` | `taiji.method.not_supported: {method}` | 无对应 | 承诺未实现/永久不支持方法的标准面(system.* 占位、renameFile 能力面、moveStorage 的 media 任务面;error.rs:114-124) |
 | `STR_SESSION_CLOSED` | `taiji.session.closed` | 无对应 | map_session_error 落点(error.rs:131-135) |
 | `STR_REQUEST_TOO_LARGE` | `taiji.request.too_large: see --rpc-max-request-size` | 无对应(aria2 直接断连,HttpServerCommand.cc) | 显式化差异:HTTP 413 + JSON body(server.rs:640-652) |
 | `STR_TOO_MANY_ITEMS` | `taiji.request.too_many_items: batch/multicall capped at 1000 calls` / `…: batch subcall budget exceeded ({n} > 10000)` | 无对应(aria2 无 cap) | 构造点 payload.rs:68-75、105-111;cap=MAX_BATCH_ITEMS 1000(payload.rs:35)/MAX_REQUEST_SUBCALLS 10_000(payload.rs:45) |
@@ -551,7 +551,7 @@ The following open review items were recorded by the read-only survey that produ
 
 1. The header comment at taiji-rpc/src/dispatch/methods.rs:6 says "the 35 aria2 methods", which does not match the registry decomposition (33 upstream same-name bare names + addMetalink = 34 bare names, plus forceRecheck as an extension and 3 `system.*` entries) — likely a stale comment; needs a human pass (does not affect the table itself).
 2. addTorrent parameter slot 1 (webseed URIs) is currently dropped explicitly (dispatch/methods.rs:551-556); the code comment declares the merge as pending engine-side wiring. The difference from upstream aria2 (which merges them into the webseed set) is declared in code; the external documentation stance needs human confirmation.
-3. taiji.moveStorage / taiji.renameFile are registered but always answer NotSupported; whether any frontend actually calls them was not checked (the motrix-app frontend code was not read).
+3. taiji.moveStorage is implemented (same-volume/cross-volume payload migration with a config_json move journal; async "OK" acceptance). taiji.renameFile remains registered but always answers NotSupported; whether any frontend actually calls it was not checked (the motrix-app frontend code was not read).
 4. The survey was read-only; cargo test was not run (a build writes target/ artifacts). The governance test asserting the two registry tables are identical lives at taiji-core/src/session/command.rs:783-810; its pass status is unverified.
 5. "Same name" in the aria2-counterpart column follows the inline comments in taiji-domain/src/methods.rs (several cross-checked against RpcMethodFactory.cc / RpcMethodImpl.cc) and the public aria2 1.37.0 method set; the aria2 sources were not re-checked row by row.
 

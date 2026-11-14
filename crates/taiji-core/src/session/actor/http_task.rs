@@ -426,6 +426,13 @@ pub(in crate::session) struct HttpPersistConfig {
     /// initialization face. None (old or unadjusted rows) = no intent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_cap: Option<u32>,
+    /// `taiji.moveStorage` intent journal (the rename_pending
+    /// discipline applied to dir migration): recorded in the row's
+    /// config_json in the same upsert, strictly before any on-disk
+    /// move; cleared in the commit upsert (`dir = to_dir`). None
+    /// writes no bytes (zero drift for existing payloads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_pending: Option<super::super::persist::MovePending>,
 }
 
 /// Concurrency-intent payload: the two [`HttpTaskOpts`] members that decide
@@ -488,6 +495,7 @@ impl Default for HttpPersistConfig {
             origin_fork_key: None,
             concurrency: None,
             host_cap: None,
+            move_pending: None,
         }
     }
 }
@@ -2729,7 +2737,7 @@ async fn drive_segmented(
     // resume/clear/probe-facts settle, so the saveSession/pause row write
     // before the first snapshot tick no longer carries stale progress (the
     // sync-point contract lives in [`sync_mirror_progress`]).
-    sync_mirror_progress(mirror, &row);
+    sync_mirror_progress(mirror, &mut row);
 
     // ---- Small-task fast-path dispatch: at most [`SMALL_TASK_MAX_BLOCKS`]
     // blocks, no resume progress (bitmap/recovery all zero), AND an
@@ -3242,7 +3250,8 @@ async fn drive_segmented(
             {
                 let pipe = pipeline.lock().await;
                 if let Some(flushed) = pipe.flushed_row() {
-                    sync_mirror_progress(mirror, flushed);
+                    let mut flushed = flushed.clone();
+                    sync_mirror_progress(mirror, &mut flushed);
                 }
             }
             return cancelled_row(run, mirror, pause).await;
@@ -3426,8 +3435,8 @@ async fn drive_segmented(
                 let mirror_sync = Arc::clone(mirror);
                 let mut pipe = pipeline.lock().await;
                 if let Err(error) = pipe
-                    .flush_now(HttpLive::now_ms(), move |row| {
-                        sync_mirror_progress(&mirror_sync, &row);
+                    .flush_now(HttpLive::now_ms(), move |mut row| {
+                        sync_mirror_progress(&mirror_sync, &mut row);
                         persist_snapshot(persist, row)
                     })
                     .await
@@ -3507,8 +3516,8 @@ async fn drive_segmented(
         let mirror_sync = Arc::clone(mirror);
         let mut pipe = pipeline.lock().await;
         if let Err(e) = pipe
-            .flush_due(HttpLive::now_ms(), move |row| {
-                sync_mirror_progress(&mirror_sync, &row);
+            .flush_due(HttpLive::now_ms(), move |mut row| {
+                sync_mirror_progress(&mirror_sync, &mut row);
                 persist_snapshot(persist, row)
             })
             .await
@@ -3528,14 +3537,14 @@ async fn drive_segmented(
         let mirror_sync = Arc::clone(mirror);
         let mut pipe = pipeline.lock().await;
         if let Err(e) = pipe
-            .flush_now(HttpLive::now_ms(), move |row| {
+            .flush_now(HttpLive::now_ms(), move |mut row| {
                 // The final row's progress face takes the same
                 // authoritative row as its source: mirror sync + persistence
                 // in the same tick (saveSession races on mirror freshness
                 // are backstopped by the write-side terminal guard; here
                 // the rename/done row carries full progress by
                 // construction).
-                sync_mirror_progress(&mirror_sync, &row);
+                sync_mirror_progress(&mirror_sync, &mut row);
                 persist_snapshot(persist, row)
             })
             .await
@@ -4234,7 +4243,7 @@ async fn drive_small(
     live.blocks_done.store(blocks_total, Ordering::Relaxed);
     live.done_bytes.store(total_len, Ordering::Relaxed);
     row.total_done = total_len as i64;
-    sync_mirror_progress(mirror, &row);
+    sync_mirror_progress(mirror, &mut row);
 
     // `--checksum` verdict before rename (the grid path's position:
     // failure = task error, the `.part` stays on disk).
@@ -5315,7 +5324,19 @@ fn set_state(mirror: &StdMutex<HttpTaskRow>, phase: TaskPhase) {
 /// digest -> the re-activation judges FromZero -> the whole file is
 /// re-downloaded). The state column is not written here: state-machine
 /// fields are maintained by the [`set_state`] driver face.
-fn sync_mirror_progress(mirror: &StdMutex<HttpTaskRow>, row: &HttpTaskRow) {
+///
+/// `config_json` syncs in the OPPOSITE direction (mirror -> pipeline
+/// row): the mirror is the config face's single truth (the driver's own
+/// read-modify-write arms — publication store, rename journal — and the
+/// actor's moveStorage journal all land there), while the pipeline row
+/// carries an activation-time snapshot that never learns about later
+/// config edits. Syncing config pipeline->mirror would erase a journal
+/// written after activation from both the mirror and the next full-row
+/// DB flush (the mover would then relocate the payload with no durable
+/// intent — a crash orphans the moved data and the resume judges
+/// FromZero). Pulling the mirror's config into the row keeps every
+/// flush faithful.
+fn sync_mirror_progress(mirror: &StdMutex<HttpTaskRow>, row: &mut HttpTaskRow) {
     let mut m = crate::lock(mirror);
     m.block_size = row.block_size;
     m.block_bitmap = row.block_bitmap.clone();
@@ -5323,7 +5344,7 @@ fn sync_mirror_progress(mirror: &StdMutex<HttpTaskRow>, row: &HttpTaskRow) {
     m.total_done = row.total_done;
     m.probe_json = row.probe_json.clone();
     m.validator_digest = row.validator_digest.clone();
-    m.config_json = row.config_json.clone();
+    row.config_json = m.config_json.clone();
 }
 
 /// Cancel close-out: a pause origin -> the row state paused (a restart
@@ -5628,6 +5649,58 @@ fn redact_uri(uri: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// sync_mirror_progress keeps the config face mirror-authoritative:
+    /// the pipeline row (an activation-time snapshot) must ADOPT the
+    /// mirror's config_json, never overwrite it — a journal written
+    /// after activation (moveStorage) would otherwise be erased from
+    /// both the mirror and the next full-row DB flush.
+    #[test]
+    fn sync_mirror_progress_adopts_mirror_config() {
+        let journal = HttpPersistConfig {
+            move_pending: Some(crate::session::persist::MovePending {
+                from_dir: "/old".into(),
+                to_dir: "/new".into(),
+            }),
+            ..HttpPersistConfig::default()
+        };
+        let row_of = |tag: &str, done: i64, config: String| HttpTaskRow {
+            gid: tag.into(),
+            url: "http://origin/s.bin".into(),
+            final_url: String::new(),
+            mirrors_json: None,
+            state: "downloading".into(),
+            queue_pos: 0,
+            dir: "/old".into(),
+            out: "s.bin".into(),
+            config_json: config,
+            probe_json: None,
+            validator_digest: None,
+            block_size: 256 * 1024,
+            block_bitmap: None,
+            block_count: Some(1),
+            total_done: done,
+            error_code: None,
+            error_msg: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mirror_row = row_of("cfg-mirror", 0, journal.to_json());
+        let mut pipe_row = row_of("cfg-pipe", 4096, HttpPersistConfig::default().to_json());
+        let mirror = std::sync::Mutex::new(mirror_row);
+        sync_mirror_progress(&mirror, &mut pipe_row);
+        assert_eq!(
+            pipe_row.config_json,
+            crate::lock(&mirror).config_json,
+            "the pipeline row must carry the mirror's journal forward"
+        );
+        assert_eq!(pipe_row.total_done, 4096);
+        assert_eq!(
+            crate::lock(&mirror).total_done,
+            4096,
+            "progress still flows pipeline -> mirror"
+        );
+    }
+
     use super::*;
     // The pure-function/constant unit tests moved with the worker loop into
     // taiji-http (the protocol face's single source).
@@ -6567,6 +6640,7 @@ mod tests {
             }),
             // The cap intent round-trips faithfully.
             host_cap: Some(2),
+            move_pending: None,
         };
         let json = cfg.to_json();
         let back = HttpPersistConfig::from_json(&json);

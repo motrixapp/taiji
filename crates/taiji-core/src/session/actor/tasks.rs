@@ -3329,6 +3329,15 @@ impl SessionActor {
                 "forceRecheck: session storage is not enabled",
             ));
         }
+        // Storage-move race guard: a recheck reads the payload at the
+        // current dir while the mover relocates it — refuse until the
+        // move commits (moveStorage refuses symmetrically while a
+        // recheck teardown is in flight).
+        if self.moving.contains_key(&gid) {
+            return Err(SessionError::failed(format!(
+                "forceRecheck: storage move in flight for GID#{gid}"
+            )));
+        }
         // The family face rejects non-torrent jobs before Location
         // dispatch — the synthesis locations are
         // structurally unreachable here (media tasks have no recheck
@@ -3494,6 +3503,12 @@ impl SessionActor {
         if let Some(resume) = self.queue.startup_held.get_mut(&gid) {
             *resume = false;
         }
+        // A user pause during an in-flight storage move overrides the
+        // move's own reactivation intent (no auto seed re-entry / the
+        // restart requeue stays paused by this flag's record).
+        if let Some(state) = self.moving.get_mut(&gid) {
+            state.user_paused = true;
+        }
         match self.queue.find(gid) {
             Some(Location::Active) => {
                 if self.queue.request_pause(gid) {
@@ -3649,6 +3664,19 @@ impl SessionActor {
             // the reactivation occupies a seed slot (or parks back into
             // seed_wait when the budget is full), never a download
             // slot. The download-slot count is untouched throughout.
+            Some(Location::ReservedPaused)
+                if self.seed_parked.contains(&gid) && self.moving.contains_key(&gid) =>
+            {
+                // Storage move in flight: the payload is relocating —
+                // activation on either side must wait for the commit's
+                // pump. Record the resume intent on the queue entry and
+                // answer; the commit re-enters (download-side fillup
+                // converges onto the seed side at SeedingStarted).
+                if let Some(entry) = self.queue.reserved_entry_mut(gid) {
+                    entry.paused = false;
+                }
+                Ok(CommandReply::Gid(gid))
+            }
             Some(Location::ReservedPaused) if self.seed_parked.contains(&gid) => {
                 self.queue.remove_reserved(gid);
                 self.seed_parked.remove(&gid);

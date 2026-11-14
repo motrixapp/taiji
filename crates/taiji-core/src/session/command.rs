@@ -631,9 +631,9 @@ pub enum CommandReply {
 pub enum SessionError {
     /// The method is defined but not yet implemented (an unlanded
     /// entry of the promise table), or permanently unsupported (the
-    /// system.* introspection placeholders, the
-    /// taiji.moveStorage/renameFile capability face). The string code
-    /// is frozen as `taiji.method.not_supported`.
+    /// system.* introspection placeholders, the taiji.renameFile
+    /// capability face, and moveStorage's media-task family). The
+    /// string code is frozen as `taiji.method.not_supported`.
     #[error("taiji.method.not_supported: {method}")]
     NotSupported { method: &'static str },
     /// The SessionActor has exited (a late command after shutdown).

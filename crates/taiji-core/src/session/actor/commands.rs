@@ -950,14 +950,12 @@ impl SessionActor {
             C::SystemListMethods => not_yet(reply, "system.listMethods"),
             C::SystemMulticall => not_yet(reply, "system.multicall"),
             C::SystemListNotifications => not_yet(reply, "system.listNotifications"),
-            C::MoveStorage { gid, dir: _ } => {
-                // Deferred extension: GID resolution first (aria2
-                // parameter face), capability always not_supported
-                // (SPEC §8.2).
-                let r: Result<CommandReply, SessionError> =
-                    self.resolve_gid(&gid).and(Err(SessionError::NotSupported {
-                        method: "taiji.moveStorage",
-                    }));
+            C::MoveStorage { gid, dir } => {
+                // Storage migration: async acceptance — the
+                // journal + quiesce initiation land before the reply,
+                // the payload mover completes through
+                // TaskNotice::MoveDone (the module docs).
+                let r = self.move_storage(gid, dir).await;
                 let _ = reply.send(r);
             }
             C::RenameFile { gid, .. } => {
@@ -2568,6 +2566,15 @@ impl SessionActor {
             )));
         }
         let patch = parse_task_options(&options);
+        // moveStorage race guard: a `dir` change during an
+        // in-flight move would be silently overwritten by the move's
+        // commit (the row rewrite is authoritative) — reject up front
+        // instead of losing the caller's intent.
+        if self.moving.contains_key(&gid) && options.contains_key("dir") {
+            return Err(SessionError::failed(format!(
+                "Cannot change option for GID#{gid}: storage move in flight"
+            )));
+        }
         let metadata_tracker_only = options.len() == 1
             && options.contains_key("bt-tracker")
             && matches!(self.jobs.get(&gid), Some(Job::Magnet(_)));
@@ -2911,11 +2918,24 @@ impl SessionActor {
                     hj.max_upload_limit = m;
                 }
                 // dir applies only to never-activated tasks (aria2
-                // reserved face, same as the torrent branch).
+                // reserved face, same as the torrent branch). The row
+                // (restore/mirror) follows: the task's own storage
+                // face trusts the row dir, and a driver-created .part
+                // lands under run.dir anyway — a split would send a
+                // later moveStorage journal at the wrong dir.
                 if let Some(dir) = &patch.dir
                     && !self.queue.contains_active(gid)
                 {
                     hj.dir = dir.clone();
+                    let dir_text = dir.display().to_string();
+                    if let Some(row) = hj.restore.as_mut() {
+                        row.dir = dir_text.clone();
+                        http_row_snapshot = Some(row.clone());
+                    }
+                    if let Some(m) = &hj.mirror {
+                        crate::lock(m).dir = dir_text.clone();
+                        http_row_snapshot = Some(crate::lock(m).clone());
+                    }
                 }
                 // Apply legal values for known HTTP options (validated
                 // up front): the runtime family (read by

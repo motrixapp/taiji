@@ -400,6 +400,11 @@ pub(crate) struct QueueMan {
     /// snapshot this at request time; finalization compares.
     pause_intent_epoch: u64,
     pub(crate) startup_held: BTreeMap<Gid, bool>,
+    /// `taiji.moveStorage` in-flight set: members stay in the
+    /// reserved FIFO but are held back by every fillup face until the
+    /// move commits (activation would race the mover's source payload).
+    /// Fed by the actor each pump (the set_metadata_only shape).
+    moving: std::collections::HashSet<Gid>,
 }
 
 impl QueueMan {
@@ -420,6 +425,7 @@ impl QueueMan {
             num_stopped_total: 0,
             pause_intent_epoch: 0,
             startup_held: BTreeMap::new(),
+            moving: std::collections::HashSet::new(),
         }
     }
 
@@ -563,6 +569,7 @@ impl QueueMan {
             if entry.paused
                 || self.startup_held.contains_key(&entry.gid)
                 || self.metadata_only.contains(&entry.gid)
+                || self.moving.contains(&entry.gid)
             {
                 // keepRunning (RPC session) && pauseRequested ->
                 // pending.
@@ -587,6 +594,7 @@ impl QueueMan {
         self.reserved.retain(|entry| {
             if !entry.paused
                 && !self.startup_held.contains_key(&entry.gid)
+                && !self.moving.contains(&entry.gid)
                 && self.finalizing.contains(&entry.gid)
             {
                 self.active.insert(entry.gid, ActiveRecord::default());
@@ -601,6 +609,13 @@ impl QueueMan {
 
     pub(crate) fn set_metadata_only(&mut self, ids: impl IntoIterator<Item = Gid>) {
         self.metadata_only = ids.into_iter().collect();
+    }
+
+    /// Replace the moving-hold set (the actor feeds it from its
+    /// in-flight move table every pump; stale members are absent from
+    /// the fresh set and release automatically).
+    pub(crate) fn set_moving(&mut self, ids: impl IntoIterator<Item = Gid>) {
+        self.moving = ids.into_iter().collect();
     }
     fn take_active(&mut self, gid: Gid) -> Option<ActiveRecord> {
         self.finalizing.remove(&gid);
@@ -627,6 +642,7 @@ impl QueueMan {
                 && self.metadata_only.contains(&entry.gid)
                 && !entry.paused
                 && !self.startup_held.contains_key(&entry.gid)
+                && !self.moving.contains(&entry.gid)
             {
                 self.active.insert(entry.gid, ActiveRecord::default());
                 spawn.push(entry.gid);
@@ -956,10 +972,9 @@ impl QueueMan {
         if self.checking_len() >= budget {
             return None;
         }
-        let index = self
-            .check_pending
-            .iter()
-            .position(|entry| !self.startup_held.contains_key(&entry.gid))?;
+        let index = self.check_pending.iter().position(|entry| {
+            !self.startup_held.contains_key(&entry.gid) && !self.moving.contains(&entry.gid)
+        })?;
         self.check_pending.remove(index)
     }
 
@@ -1114,7 +1129,7 @@ impl QueueMan {
         let index = self
             .seed_wait
             .iter()
-            .position(|gid| !self.startup_held.contains_key(gid))?;
+            .position(|gid| !self.startup_held.contains_key(gid) && !self.moving.contains(gid))?;
         let gid = self.seed_wait.remove(index)?;
         self.seeding.insert(gid, SeedingRecord::default());
         Some(gid)
@@ -2921,5 +2936,66 @@ mod metadata_queue_tests {
         assert_eq!(q.fillup_metadata(4), vec![ids[5]]);
         assert!(q.reserved.iter().any(|e| e.gid == ids[6] && e.paused));
         assert!(q.startup_held.contains_key(&ids[7]));
+    }
+
+    /// The storage-move hold gates EVERY admission face (download
+    /// fillup, finalizing promotion, metadata fillup, check-pool and
+    /// seed-pool admission): an activation of any kind would touch the
+    /// payload at the old dir while the mover relocates it. Stale
+    /// members release automatically on the next set_moving (the
+    /// set_metadata_only shape).
+    #[test]
+    fn moving_hold_gates_every_admission_face() {
+        let mut q = QueueMan::new();
+        let a = Gid::from_u64(0x10);
+        let b = Gid::from_u64(0x11);
+        let m = Gid::from_u64(0x12);
+        q.insert_reserved(
+            ReservedEntry {
+                gid: a,
+                paused: false,
+            },
+            None,
+        );
+        q.insert_reserved(
+            ReservedEntry {
+                gid: b,
+                paused: false,
+            },
+            None,
+        );
+        q.insert_reserved(
+            ReservedEntry {
+                gid: m,
+                paused: false,
+            },
+            None,
+        );
+        q.set_moving([m]);
+        // Metadata + finalizing membership for the held gid.
+        q.set_metadata_only([m]);
+        q.finalizing.insert(m);
+        // Download fillup serves the free members and holds the mover
+        // even with budget to spare.
+        assert_eq!(q.fillup(3), vec![a, b], "download fillup skips the mover");
+        assert!(
+            q.fillup_finalizing().is_empty(),
+            "finalizing promotion skips the mover"
+        );
+        assert!(
+            q.fillup_metadata(4).is_empty(),
+            "metadata fillup skips the mover"
+        );
+        // Check/seed pools: a held member parks in both FIFOs and is
+        // never admitted.
+        q.insert_check_pending(m, false);
+        q.push_seed_wait(m);
+        assert!(q.admit_next_check(4).is_none());
+        assert!(q.admit_next_seed(4).is_none());
+        // Release: the fresh set without the gid frees every face.
+        q.set_moving([]);
+        assert_eq!(q.fillup_finalizing(), vec![m]);
+        assert!(q.admit_next_check(4).is_some());
+        assert!(q.admit_next_seed(4).is_some());
     }
 }

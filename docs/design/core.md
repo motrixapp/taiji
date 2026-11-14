@@ -1582,8 +1582,18 @@ reply and never an interruption of the other hot-changeable keys.
   adds setForceHaltRequested(true, NONE) (skip tracker notification);
   per-group pause failures do not short-circuit; checking tasks get
   the pause intent recorded and reserved rows persist paused.
-- MoveStorage/RenameFile resolve the GID then answer NotSupported
-  (SPEC §8.2).
+- MoveStorage is the implemented storage-migration extension:
+  resolve the GID, adjudicate the location (waiting/active/seeding
+  accept; checking/synthesis/results reject), journal the intent in
+  config_json (same row upsert, strictly before any on-disk action),
+  quiesce active/seeding tasks (the changeOption restart path / the
+  seed-pause face), move the payload via taiji-io fsmove (same-volume
+  rename / EXDEV copy; the source is never destroyed before the
+  commit), then commit dir+journal-clear and reactivate; completion
+  rides an internal MoveDone notice (async "OK" acceptance). A journaled
+  row found at startup is closed out idempotently before rebuild.
+  RenameFile still resolves the GID then answers NotSupported (SPEC
+  §8.2).
 - GetCapabilities collects from the policy/feature registry and adds
   taiji.* method names plus the RecoveryEventKind notification method
   names (extension events never re-face under --rpc-aria2-compat).

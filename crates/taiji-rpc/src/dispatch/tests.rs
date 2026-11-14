@@ -4821,3 +4821,70 @@ fn media_subdict_renders_promised_fields() {
     let bare = super::view::status_entry_json(&base_view());
     assert!(bare.get("media").is_none());
 }
+
+/// taiji.moveStorage e2e: a paused magnet task (the dir-only
+/// family) accepts the move and answers the sibling-extension "OK"; an
+/// empty dir string hits the illegal-argument value face; an unknown
+/// gid keeps the str2Gid wording; the write gate stays fail-closed.
+#[tokio::test]
+async fn move_storage_rpc_face_ok_and_rejections() {
+    let st = state(Some("t"));
+    let magnet = call_auth(
+        &st,
+        "addUri",
+        vec![
+            json!(["magnet:?xt=urn:btih:7777777777777777777777777777777777777777"]),
+            json!({"pause": "true"}),
+        ],
+    )
+    .await;
+    let mgid = ok_str(&magnet);
+    // Accepted → "OK" (the banAddr/setDiskTier sibling convention).
+    let dir = std::env::temp_dir().join("mvst-rpc-move");
+    let moved = call_auth(
+        &st,
+        "taiji.moveStorage",
+        vec![json!(mgid.clone()), json!(dir.display().to_string())],
+    )
+    .await;
+    assert_eq!(moved.code, 0, "{}", moved.payload["message"]);
+    assert_eq!(moved.payload, json!("OK"));
+    // Empty dir: the illegal-argument value face.
+    let empty = call_auth(
+        &st,
+        "taiji.moveStorage",
+        vec![json!(mgid.clone()), json!("  ")],
+    )
+    .await;
+    assert_eq!(empty.code, 1);
+    assert_eq!(empty.payload["message"], "Illegal argument.");
+    // Unknown gid: the str2Gid family wording passed through.
+    let notfound = call_auth(
+        &st,
+        "taiji.moveStorage",
+        vec![json!("dead000000000000"), json!("/tmp")],
+    )
+    .await;
+    assert_eq!(notfound.code, 1);
+    assert_eq!(
+        notfound.payload["message"],
+        "GID dead000000000000 is not found"
+    );
+    // Non-string dir: the required-param wording face.
+    let wrongtype = call_auth(
+        &st,
+        "taiji.moveStorage",
+        vec![json!(mgid.clone()), json!(42)],
+    )
+    .await;
+    assert_eq!(wrongtype.code, 1);
+    // Write gate: fails closed without the token.
+    let gated = call(
+        &st,
+        "taiji.moveStorage",
+        vec![json!(mgid.clone()), json!("/tmp")],
+    )
+    .await;
+    assert_eq!(gated.code, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -211,6 +211,14 @@ pub(crate) struct PersistedTaskConfig {
     /// for existing payloads — same discipline as super_seeding).
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub bt_stop_timeout_secs: u64,
+    /// `taiji.moveStorage` intent journal . Written into the
+    /// row in the same upsert, strictly before any on-disk move action;
+    /// cleared in the commit upsert (`dir = to_dir`). Not derived from
+    /// the Job — read back from the row mirror (the single journal
+    /// truth; every config_json rewrite preserves it). None writes no
+    /// bytes (zero drift for existing payloads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_pending: Option<MovePending>,
 }
 
 fn default_true() -> bool {
@@ -236,6 +244,24 @@ where
 {
     use serde::Deserialize as _;
     Ok(Option::<f64>::deserialize(d)?.unwrap_or(0.0))
+}
+
+/// `taiji.moveStorage` intent journal (the rename_pending
+/// discipline applied to dir migration): recorded in the task row's
+/// `config_json` **in the same row upsert, strictly before any on-disk
+/// action**. The source payload is never destroyed before the commit
+/// (taiji-io fsmove), so recovery after a kill at any point = redo the
+/// move idempotently (`from_dir` payload → `to_dir`), then rewrite the
+/// row with `dir = to_dir` and the journal cleared. Shared by the
+/// torrent face ([`PersistedTaskConfig`]) and the HTTP face
+/// (`HttpPersistConfig`); dirs are stored as display strings exactly
+/// like `PersistedTaskConfig::dir`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MovePending {
+    /// Absolute old download dir (the payload's current/resting place).
+    pub from_dir: String,
+    /// Absolute new download dir (the move target / committed face).
+    pub to_dir: String,
 }
 
 fn is_true(v: &bool) -> bool {
@@ -276,6 +302,8 @@ impl Default for PersistedTaskConfig {
             // Default 0 = no seeding-stall watchdog (aria2 default is
             // the same).
             bt_stop_timeout_secs: 0,
+            // Default None = no storage move in flight.
+            move_pending: None,
         }
     }
 }
@@ -609,6 +637,7 @@ mod tests {
             bt_disable_dht: None,
             enable_http_seeding: None,
             bt_stop_timeout_secs: 0,
+            move_pending: None,
         };
         let json = cfg.to_json();
         assert_eq!(PersistedTaskConfig::from_json(&json), cfg);
@@ -645,6 +674,42 @@ mod tests {
         // panic, no partial recovery).
         assert_eq!(
             PersistedTaskConfig::from_json("{\"dir\":\"/x\",\"scheduler_policy\":42}"),
+            PersistedTaskConfig::default()
+        );
+    }
+
+    /// move_pending field: default None writes no bytes (zero drift —
+    /// the journal must not appear on every existing payload); a
+    /// recorded intent roundtrips losslessly (the bootstrap close-out
+    /// trusts it); a corrupt value degrades to the whole-payload
+    /// default (no panic, no partial recovery).
+    #[test]
+    fn move_pending_field_roundtrip_and_zero_drift() {
+        let cfg = PersistedTaskConfig::default();
+        assert!(
+            !cfg.to_json().contains("move_pending"),
+            "the journalless default emits no JSON bytes: {}",
+            cfg.to_json()
+        );
+        let with_move = PersistedTaskConfig {
+            move_pending: Some(MovePending {
+                from_dir: "/old".into(),
+                to_dir: "/new".into(),
+            }),
+            ..PersistedTaskConfig::default()
+        };
+        let json = with_move.to_json();
+        assert!(json.contains("\"from_dir\":\"/old\""), "{json}");
+        assert_eq!(PersistedTaskConfig::from_json(&json), with_move);
+        // Legacy payloads without the key take the serde default None.
+        assert_eq!(
+            PersistedTaskConfig::from_json("{\"dir\":\"/x\"}").move_pending,
+            None
+        );
+        // Corrupt value (a string instead of the dict) -> whole-payload
+        // default (unwrap_or_default), never a partial recovery.
+        assert_eq!(
+            PersistedTaskConfig::from_json("{\"dir\":\"/x\",\"move_pending\":\"oops\"}"),
             PersistedTaskConfig::default()
         );
     }

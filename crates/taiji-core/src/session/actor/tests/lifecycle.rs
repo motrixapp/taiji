@@ -171,11 +171,12 @@ async fn unimplemented_commands_still_answer_not_supported() {
     // RPC consumption seam; the parser face taiji-metalink stays out of
     // the core dependency graph). Its registration state is pinned by
     // method_surface_is_frozen's dual-feature list.
-    // taiji.moveStorage/renameFile (extensions): the capability face is
-    // always not_supported, but the gid argument first goes through
-    // expandUnique (the aria2 str2Gid pre-step order) — an unknown GID
-    // answers not found first; only a known GID reaches the capability
-    // face.
+    // taiji.moveStorage is a real capability now: the gid
+    // argument first goes through expandUnique (the aria2 str2Gid
+    // pre-step order) — an unknown GID answers not found first; a
+    // known GID enters the move face (covered separately by the
+    // move_storage tests). renameFile keeps the always-not_supported
+    // capability face with the same gid-first order.
     match call(
         &handle,
         SessionCommand::MoveStorage {
@@ -193,23 +194,20 @@ async fn unimplemented_commands_still_answer_not_supported() {
     let dir = temp_dir("p2ext");
     let bytes = build_v2_torrent(&vec![0u8; 128 * 1024], &dead_tracker());
     let live = gid_of(&call(&handle, torrent_cmd(bytes, &dir)).await);
-    for cmd in [
-        SessionCommand::MoveStorage {
-            gid: live.to_string(),
-            dir: "/tmp".into(),
-        },
+    match call(
+        &handle,
         SessionCommand::RenameFile {
             gid: live.to_string(),
             old_path: "a".into(),
             new_path: "b".into(),
         },
-    ] {
-        match call(&handle, cmd).await {
-            Err(SessionError::NotSupported { method: m }) => {
-                assert!(RPC_METHODS.contains(&m), "{m} must be on the surface");
-            }
-            other => panic!("P2 extension must answer NotSupported, got {other:?}"),
+    )
+    .await
+    {
+        Err(SessionError::NotSupported { method: m }) => {
+            assert!(RPC_METHODS.contains(&m), "{m} must be on the surface");
         }
+        other => panic!("renameFile must answer NotSupported, got {other:?}"),
     }
     handle.shutdown().await;
     let joined = tokio::time::timeout(Duration::from_secs(1), join).await;

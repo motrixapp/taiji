@@ -3767,6 +3767,58 @@ mod tests {
         }
     }
 
+    /// A resolver whose completion is explicitly released by the test.
+    struct GatedStubResolver {
+        inner: StubResolver,
+        started: mpsc::UnboundedSender<()>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl HostResolver for GatedStubResolver {
+        fn resolve(&self, host: String) -> ResolverFuture {
+            let result = self.inner.resolve(host);
+            let started = self.started.clone();
+            let release = self.release.clone();
+            Box::pin(async move {
+                let _ = started.send(());
+                let permit = release
+                    .acquire()
+                    .await
+                    .unwrap_or_else(|e| panic!("DNS release gate: {e}"));
+                permit.forget();
+                result.await
+            })
+        }
+    }
+
+    /// Wait for the actor's real completion message, not a scheduling delay.
+    async fn next_tracker_outcome(actor: &mut TrackerActor) -> AnnounceOutcome {
+        tokio::time::timeout(Duration::from_secs(1), actor.result_rx.recv())
+            .await
+            .unwrap_or_else(|e| panic!("tracker outcome deadline: {e}"))
+            .unwrap_or_else(|| panic!("tracker result channel closed"))
+    }
+
+    /// DNS-only test phases can have one owned lookup per address family (or
+    /// scrape). Settle every lookup before asserting frames or cache counters.
+    async fn settle_dns_outcomes(actor: &mut TrackerActor, now: Instant) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while actor.slots.iter().any(|slot| slot.pending_task.is_some())
+                || actor.scrapes.values().any(|attempt| attempt.task.is_some())
+            {
+                let outcome = actor
+                    .result_rx
+                    .recv()
+                    .await
+                    .unwrap_or_else(|| panic!("tracker result channel closed"));
+                actor.on_outcome(outcome, now);
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("pending DNS outcomes did not settle: {e}"));
+        actor.tick(now).await;
+    }
+
     /// Per-family stub resolver (test seam): separate V4/V6 result
     /// tables + per-family query counts (real DNS forbidden by design).
     /// `resolve` is only a trait-compat implementation (the actor now
@@ -3902,7 +3954,8 @@ mod tests {
             transport,
         )
         .unwrap_or_else(|e| panic!("{e}"))
-        .with_resolver(Arc::new(stub.clone()));
+        .with_resolver(Arc::new(stub.clone()))
+        .with_v6_probe_override(Some(false));
 
         // tick: a domain -> spawns a resolve task (no frame out).
         let t0 = Instant::now();
@@ -3911,7 +3964,7 @@ mod tests {
             out_rx.try_recv().is_err(),
             "no outbound frame before the resolve completes"
         );
-        pump(&mut actor).await; // the resolve result returns -> announce request -> CONNECT frame
+        settle_dns_outcomes(&mut actor, t0).await; // real resolve outcome -> CONNECT
         let tracker: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1337);
         let (to, frame) = out_rx
             .recv()
@@ -3948,7 +4001,7 @@ mod tests {
             .send((tracker, reply))
             .await
             .unwrap_or_else(|_| panic!("in"));
-        pump(&mut actor).await; // announce succeeds -> same-host scrape (cache hit) -> SCRAPE frame
+        actor.tick(t0 + Duration::from_secs(2)).await; // queued ANNOUNCE reply -> cached SCRAPE
         let (to, sframe) = out_rx
             .recv()
             .await
@@ -3971,7 +4024,7 @@ mod tests {
             .send((tracker, sreply))
             .await
             .unwrap_or_else(|_| panic!("in"));
-        pump(&mut actor).await; // the scrape reply -> the ScrapeResult event
+        actor.tick(t0 + Duration::from_secs(3)).await; // queued SCRAPE reply -> event
 
         let mut saw_interval = false;
         let mut saw_peers = false;
@@ -3998,7 +4051,7 @@ mod tests {
         // Resend round (+122s > min_interval 60s + the connection id
         // lifetime 60s, < cache TTL 300s): a cache hit issues no query
         // -> the connection has expired -> a fresh CONNECT frame.
-        pump_at(&mut actor, t0 + Duration::from_secs(122)).await;
+        actor.tick(t0 + Duration::from_secs(122)).await;
         let (to, frame) = out_rx
             .recv()
             .await
@@ -4025,6 +4078,13 @@ mod tests {
     #[tokio::test]
     async fn udp_domain_dns_failure_is_retryable_with_dns_class() {
         let stub = StubResolver::new(vec![("dead.example", Err("nxdomain".to_string()))]);
+        let (started, mut started_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let resolver = GatedStubResolver {
+            inner: stub.clone(),
+            started,
+            release: release.clone(),
+        };
         let url = "udp://dead.example:1337/announce";
         let (_cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -4037,16 +4097,37 @@ mod tests {
             transport,
         )
         .unwrap_or_else(|e| panic!("{e}"))
-        .with_resolver(Arc::new(stub.clone()));
+        .with_resolver(Arc::new(resolver))
+        .with_v6_probe_override(Some(false));
 
-        actor.tick(Instant::now()).await; // spawns the resolve
-        tokio::time::sleep(Duration::from_millis(30)).await; // the resolve task lands (Err into the result channel)
-        // The failure-settle tick drives inside the capturing subscriber
-        // (futures::executor, zero runtime dependency — this tick has no
-        // spawn/timer path).
+        actor.tick(Instant::now()).await;
+        tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+            .await
+            .unwrap_or_else(|e| panic!("DNS did not start: {e}"))
+            .unwrap_or_else(|| panic!("DNS start channel closed"));
+        // Hold completion beyond the former 30ms assumption. This delay only
+        // creates the adversarial schedule; readiness is signalled explicitly.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            actor.result_rx.is_empty(),
+            "the resolver gate is still closed"
+        );
+        assert!(
+            actor.slots[0].updating,
+            "lookup remains owned while pending"
+        );
+        release.add_permits(1);
+        let outcome = next_tracker_outcome(&mut actor).await;
+        assert!(
+            matches!(&outcome, AnnounceOutcome::UdpAnnounceResolve { result: Err(reason), .. } if reason.contains("nxdomain"))
+        );
+        // Capture processing of the actual completion, just as run() does;
+        // background scheduling cannot move this log outside the subscriber.
+        let settled_at = Instant::now();
         let capture = LogCapture::default();
         tracing::subscriber::with_default(capture.clone(), || {
-            futures::executor::block_on(actor.tick(Instant::now()));
+            actor.on_outcome(outcome, settled_at);
+            futures::executor::block_on(actor.tick(settled_at));
         });
         assert!(
             capture.lines().iter().any(|l| l.contains("announce failed")
@@ -4085,9 +4166,16 @@ mod tests {
         let due = actor.slots[0]
             .next_due
             .unwrap_or_else(|| panic!("a failure must set the next_due backoff gate"));
-        actor.tick(due + Duration::from_secs(1)).await;
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        actor.tick(Instant::now()).await;
+        let retry_at = due + Duration::from_secs(1);
+        actor.tick(retry_at).await;
+        tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+            .await
+            .unwrap_or_else(|e| panic!("retry DNS did not start: {e}"))
+            .unwrap_or_else(|| panic!("DNS start channel closed"));
+        release.add_permits(1);
+        settle_dns_outcomes(&mut actor, retry_at).await;
+        assert_eq!(actor.slots[0].fails, 2, "retry failure booked");
+        assert!(!actor.slots[0].updating, "retry also releases its slot");
         assert_eq!(
             stub.queries(),
             2,
@@ -4118,7 +4206,8 @@ mod tests {
             transport,
         )
         .unwrap_or_else(|e| panic!("{e}"))
-        .with_resolver(Arc::new(stub.clone()));
+        .with_resolver(Arc::new(stub.clone()))
+        .with_v6_probe_override(Some(false));
         actor.last_ok_url = Some(url.to_string()); // white-box: simulate a previously successful host
 
         actor
@@ -4136,7 +4225,7 @@ mod tests {
             out_rx.try_recv().is_err(),
             "no outbound frame before the resolve completes"
         );
-        pump(&mut actor).await; // the resolve result returns -> scrape enqueued (an unknown endpoint prepends CONNECT)
+        settle_dns_outcomes(&mut actor, Instant::now()).await; // real resolve outcome -> CONNECT
         let tracker: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1337);
         let (to, cframe) = out_rx
             .recv()
@@ -4208,8 +4297,7 @@ mod tests {
         assert!(actor.slots[1].silent_failure);
 
         actor.tick(Instant::now()).await; // both faces spawn per-family resolves
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        actor.tick(Instant::now()).await; // results return -> the v6 carrier CONNECT frame
+        settle_dns_outcomes(&mut actor, Instant::now()).await; // both family outcomes -> v6 CONNECT
         let tracker: SocketAddr = SocketAddr::new(v6, 1337);
         let (to, frame) = out_rx
             .recv()
@@ -4377,18 +4465,16 @@ mod tests {
         (addr, captured, handle)
     }
 
-    /// Poll until the mock has received n frames (isolates the local
-    /// loopback latency; 10ms steps).
-    async fn wait_for_frames(captured: &Arc<std::sync::Mutex<Vec<Vec<u8>>>>, n: usize) {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while captured.lock().unwrap_or_else(|e| e.into_inner()).len() < n {
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for the mock's frame #{n}: {:?}",
-                captured.lock().unwrap_or_else(|e| e.into_inner()).len()
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    /// Await the actual loopback reply before driving its actor transition.
+    async fn receive_udp_reply(actor: &mut TrackerActor) {
+        let (from, bytes) =
+            tokio::time::timeout(Duration::from_secs(3), actor.transport.inbound.recv())
+                .await
+                .unwrap_or_else(|e| panic!("UDP reply deadline: {e}"))
+                .unwrap_or_else(|| panic!("UDP inbound closed"));
+        let now = Instant::now();
+        actor.on_udp_packet(from, &bytes, now);
+        actor.tick(now).await;
     }
 
     /// The full announce/scrape flow against the mock v6 UDP tracker (a
@@ -4451,20 +4537,9 @@ mod tests {
         // tick1: the literal v6 passes through (the gate forced open)
         // -> the CONNECT frame.
         actor.tick(Instant::now()).await;
-        wait_for_frames(&captured, 1).await;
-        tokio::time::sleep(Duration::from_millis(60)).await; // the reply lands via the relay
-        // tick2: CONNECT booked -> the ANNOUNCE frame.
-        actor.tick(Instant::now()).await;
-        wait_for_frames(&captured, 2).await;
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        // tick3: the ANNOUNCE reply (interval 60 + an 18B peer) ->
-        // success events + scrape.
-        actor.tick(Instant::now()).await;
-        wait_for_frames(&captured, 3).await;
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        // tick4: the SCRAPE reply -> the ScrapeResult event.
-        actor.tick(Instant::now()).await;
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        receive_udp_reply(&mut actor).await; // actual CONNECT reply -> ANNOUNCE
+        receive_udp_reply(&mut actor).await; // actual ANNOUNCE reply -> SCRAPE
+        receive_udp_reply(&mut actor).await; // actual SCRAPE reply -> result event
 
         // Wire assertions: the ANNOUNCE frame body (DefaultBtAnnounce.cc
         // semantics injected; the family-agnostic frame surface).
@@ -4574,7 +4649,7 @@ mod tests {
         let v6t: SocketAddr = "[::1]:1337".parse().unwrap_or_else(|e| panic!("{e}"));
 
         actor.tick(Instant::now()).await; // both faces spawn per-family resolves
-        pump(&mut actor).await; // results return -> both CONNECT frames
+        settle_dns_outcomes(&mut actor, Instant::now()).await; // both family outcomes -> CONNECTs
 
         // Both CONNECT frames (bucketed by destination address, not
         // issue order).
@@ -4634,8 +4709,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("in"));
         }
 
-        pump(&mut actor).await; // both announces succeed -> Peers/Interval + scrape enqueued
-        pump(&mut actor).await; // the scrape frames go out (same-tick drain) -> both SCRAPEs received
+        actor.tick(Instant::now()).await; // both queued ANNOUNCE replies -> Peers/Interval and SCRAPEs
         let mut scrape_tids = std::collections::HashMap::new();
         for _ in 0..2 {
             let (to, frame) = out_rx
@@ -4665,7 +4739,7 @@ mod tests {
                 .await
                 .unwrap_or_else(|_| panic!("in"));
         }
-        pump(&mut actor).await; // both scrape replies -> ScrapeResult
+        actor.tick(Instant::now()).await; // both queued SCRAPE replies -> ScrapeResult
 
         let mut saw_v4_peers = false;
         let mut saw_v6_peers = false;
@@ -4744,7 +4818,7 @@ mod tests {
         .with_v6_probe_override(Some(true));
 
         actor.tick(Instant::now()).await; // both faces spawn resolves
-        pump(&mut actor).await; // v4: the CONNECT frame; v6: resolution fails -> a silent settle
+        settle_dns_outcomes(&mut actor, Instant::now()).await; // both family outcomes settled
 
         // The v4 face issues its frame as usual (the v6 failure does
         // not affect the v4 announce).
@@ -4796,9 +4870,9 @@ mod tests {
         // round — the retry fails from the cache's empty projection and
         // fails are booked as usual; the stub's v6 query count stays at
         // the first round's 1).
-        pump_at(&mut actor, due + Duration::from_secs(1)).await;
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        actor.tick(due + Duration::from_secs(1)).await;
+        let retry_at = due + Duration::from_secs(1);
+        actor.tick(retry_at).await;
+        settle_dns_outcomes(&mut actor, retry_at).await;
         assert_eq!(
             stub.v6_queries(),
             1,
@@ -4849,7 +4923,7 @@ mod tests {
         .with_v6_probe_override(Some(false));
 
         actor.tick(Instant::now()).await; // both faces spawn per-family resolves
-        pump(&mut actor).await; // results return -> the v4 CONNECT frame; the v6 face gate skips
+        settle_dns_outcomes(&mut actor, Instant::now()).await; // real v4 outcome; v6 gate skips
         let (to, _frame) = out_rx
             .recv()
             .await

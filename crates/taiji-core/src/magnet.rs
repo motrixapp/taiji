@@ -392,7 +392,14 @@ impl MetadataChain {
 // Only the module declaration + re-export sit here — the session-side
 // `crate::magnet::{WebMirrors, WebMirrorHealth, parse_web_mirror_templates}`
 // and this file's call sites (spawn_web_mirrors) keep unchanged paths.
+mod cache;
 mod candidates;
+mod discovery;
+mod resolution;
+pub use discovery::DiscoveryConfig;
+pub use resolution::{
+    CacheOrigin, MagnetResolution, ResolutionMilestone, ResolutionSnapshot, ResolutionState,
+};
 mod services;
 pub use services::MagnetServices;
 mod network;
@@ -463,6 +470,7 @@ struct MetadataPeer {
 type LivePeers = Arc<std::sync::Mutex<Vec<MetadataPeer>>>;
 
 struct PeerSignals {
+    resolution: Option<Arc<MagnetResolution>>,
     network: Arc<network::Dialer>,
     candidates: std::sync::Mutex<candidates::Candidates>,
     metadata: Vec<Arc<taiji_bt::ut_metadata::MetadataCoordinator>>,
@@ -473,6 +481,21 @@ struct PeerSignals {
     introducers: AtomicUsize,
     max_introducers: usize,
     enabled: bool,
+}
+
+impl PeerSignals {
+    fn record_first_block(&self) {
+        if let Some(resolution) = &self.resolution {
+            if let Some(at) = self
+                .metadata
+                .iter()
+                .filter_map(|coordinator| coordinator.first_block_at())
+                .min()
+            {
+                resolution.mark_at(ResolutionMilestone::FirstInfoBlock, at);
+            }
+        }
+    }
 }
 
 enum PeerReport {
@@ -783,6 +806,10 @@ async fn run(
     parent: CancellationToken,
     upgrade_tx: Option<mpsc::Sender<crate::engine::EngineHandle>>,
 ) -> MagnetEnd {
+    let resolution = cfg
+        .services
+        .as_ref()
+        .map(|services| services.claim_resolution(cfg.gid));
     // ---- state machine: Queued -> MetadataPending ----
     let mut state = TorrentState::Queued;
     transit(&mut state, TorrentState::MetadataPending, cfg.gid);
@@ -813,10 +840,13 @@ async fn run(
             .map(|(_, tracker)| tracker.clone())
             .collect();
     }
-    let cached_metadata = cfg
-        .services
-        .as_ref()
-        .and_then(|services| services.cached(magnet.btih, magnet.btmh));
+    let cached_metadata = match &cfg.services {
+        Some(services) => tokio::select! {
+            _ = parent.cancelled() => return MagnetEnd::Failed("metadata phase cancelled".into()),
+            cached = services.cached(magnet.btih, magnet.btmh) => cached,
+        },
+        None => None,
+    };
     if trs.is_empty()
         && cached_metadata.is_none()
         && !cfg.options.bt_load_saved_metadata
@@ -877,6 +907,9 @@ async fn run(
 
     if metainfo.is_none() {
         if let Some(cached) = cached_metadata {
+            if let Some(resolution) = &resolution {
+                resolution.cache_hit(cached.origin);
+            }
             let trackers = trs.clone();
             let btih = magnet.btih;
             let btmh = magnet.btmh;
@@ -927,6 +960,7 @@ async fn run(
             &magnet.xpe_peers,
             &md_token,
             &face_by_hash,
+            resolution.clone(),
         )
         .await;
         match result {
@@ -951,6 +985,7 @@ async fn run(
     // ---- rebuild + verify + options + upgrade ----
     finalize(
         cfg, magnet, trs, tiers, metadata, metainfo, phase, faces, state, parent, upgrade_tx,
+        resolution,
     )
     .await
 }
@@ -978,6 +1013,7 @@ async fn discover_and_fetch(
     xpe: &[std::net::SocketAddr],
     md_token: &CancellationToken,
     face_by_hash: &(dyn Fn(&[u8; 20]) -> Option<usize> + Sync),
+    resolution: Option<Arc<MagnetResolution>>,
 ) -> Result<MetadataPhase, String> {
     let phase_started = std::time::Instant::now();
     let dns = cfg
@@ -1221,6 +1257,7 @@ async fn discover_and_fetch(
     let (hp_tx, mut hp_rx) = mpsc::channel(64);
     let (report_tx, mut report_rx) = mpsc::channel(128);
     let signals = Arc::new(PeerSignals {
+        resolution: resolution.clone(),
         network: network.dialer.clone(),
         candidates: std::sync::Mutex::new(candidates::Candidates::new()),
         metadata: faces
@@ -1267,6 +1304,12 @@ async fn discover_and_fetch(
     tokio::pin!(deadline);
 
     loop {
+        signals.record_first_block();
+        if !pending_peers.is_empty() {
+            if let Some(resolution) = &resolution {
+                resolution.mark(ResolutionMilestone::FirstCandidate);
+            }
+        }
         while dialed_total.load(Ordering::Relaxed)
             < cfg.phase.max_metadata_peers
                 + if pending_peers
@@ -1385,6 +1428,7 @@ async fn discover_and_fetch(
             }
             fetched = md_rx.recv() => match fetched {
                 Some(MetadataFetched::Complete(bytes)) => {
+                    signals.record_first_block();
                     info!(target: "taiji::core::magnet", len = bytes.len(), elapsed_ms = phase_started.elapsed().as_millis() as u64,
                         "metadata fetched: identity verified (ut_metadata)");
                     let peers = {
@@ -1647,6 +1691,7 @@ async fn finalize(
     mut state: TorrentState,
     parent: CancellationToken,
     upgrade_tx: Option<mpsc::Sender<crate::engine::EngineHandle>>,
+    resolution: Option<Arc<MagnetResolution>>,
 ) -> MagnetEnd {
     let chain = MetadataChain {
         metadata_gid: cfg.gid,
@@ -1662,6 +1707,9 @@ async fn finalize(
         return MagnetEnd::Failed(reason);
     }
 
+    if let Some(resolution) = &resolution {
+        resolution.mark(ResolutionMilestone::InfoVerified);
+    }
     // ---- BEP52 piece-layer prefetch (before parsing) ----
     // `piece layers` sits outside the info dict (a BEP52 top-level key) —
     // magnet metadata does not carry it. Multi-piece files' v2
@@ -1733,8 +1781,13 @@ async fn finalize(
         }
     };
 
+    if let Some(resolution) = &resolution {
+        resolution.mark(ResolutionMilestone::VerificationReady);
+    }
     if let Some(services) = &cfg.services {
-        services.remember(magnet.btih, magnet.btmh, &torrent_bytes);
+        services
+            .remember(magnet.btih, magnet.btmh, &torrent_bytes)
+            .await;
     }
 
     // ---- bt-save-metadata (before the metadata-only branch, matching the
@@ -1771,9 +1824,15 @@ async fn finalize(
 
     // ---- option gates (the same order as the reference) ----
     if cfg.options.bt_metadata_only {
+        if let Some(resolution) = &resolution {
+            resolution.mark(ResolutionMilestone::MetadataReady);
+        }
         return MagnetEnd::MetadataFetched { metadata, chain };
     }
     if !cfg.options.follow_torrent {
+        if let Some(resolution) = &resolution {
+            resolution.mark(ResolutionMilestone::MetadataReady);
+        }
         return MagnetEnd::NotFollowed { chain };
     }
 
@@ -1887,6 +1946,10 @@ async fn finalize(
             meta: std::sync::Arc::new(metainfo),
             torrent: torrent_bytes,
         };
+    }
+
+    if let Some(resolution) = &resolution {
+        resolution.mark(ResolutionMilestone::MetadataReady);
     }
 
     // Controlled spawn — the upgrade notification face (the EngineHandle
@@ -2901,6 +2964,7 @@ mod tests {
             dht_kind: DhtSwarmKind::V1,
         }];
         let signals = Arc::new(PeerSignals {
+            resolution: None,
             network: network.dialer.clone(),
             candidates: std::sync::Mutex::new(candidates::Candidates::new()),
             metadata: vec![Arc::new(taiji_bt::ut_metadata::MetadataCoordinator::new(

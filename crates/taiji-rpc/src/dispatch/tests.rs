@@ -330,7 +330,9 @@ const PROMISED_TAIJI_EXTENSION_METHODS: &[&str] = &[
     // Multi-level file priority write face (the write gate applies).
     "taiji.setFilePriority",
     "taiji.setStreamingPlayhead",
+    "taiji.prepareBitTorrent",
     "taiji.notifyNetworkChange",
+    "taiji.getMagnetResolution",
     "taiji.getTorrentMetadata",
     "taiji.confirmTorrentSelection",
     "taiji.getHttpOutput",

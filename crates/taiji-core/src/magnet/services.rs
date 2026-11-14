@@ -1,10 +1,14 @@
 //! Session-owned metadata listener, warm dual-stack DHT and verified cache.
 //! A subscription owns swarm routing and withdraws it as soon as fetching ends.
+use super::DiscoveryConfig;
 use super::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use taiji_io::udp_demux::{InboundPacket, UdpDemuxHandle};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OnceCell};
+
+type DhtCarrier = (mpsc::Receiver<InboundPacket>, UdpDemuxHandle);
 
 struct Subscriber {
     faces: Vec<MetaFace>,
@@ -20,11 +24,14 @@ struct Runtime {
     network: network::Network,
     controls: Arc<Mutex<Vec<(DhtFamily, DhtHandle)>>>,
     bootstrap_controls: Mutex<Vec<(DhtFamily, tokio::sync::watch::Sender<bool>)>>,
-    events: mpsc::Sender<DhtEvent>,
+    events: Mutex<Option<mpsc::Sender<DhtEvent>>>,
     subscribers: Subscribers,
     retired: Retired,
     changed: Arc<Notify>,
-    pump: tokio::task::JoinHandle<()>,
+    pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    carriers: Mutex<Vec<(DhtFamily, DhtCarrier)>>,
+    dht4: OnceCell<()>,
+    dht6: OnceCell<()>,
 }
 pub(super) struct Subscription {
     id: u64,
@@ -58,14 +65,16 @@ impl Drop for Subscription {
     }
 }
 
-type CachedTorrent = (Option<[u8; 20]>, Option<[u8; 32]>, Bytes);
-
 pub struct MagnetServices {
-    runtime: tokio::sync::Mutex<Option<Runtime>>,
+    runtime: OnceCell<Runtime>,
+    lifetime: CancellationToken,
+    preparing: AtomicBool,
+    dht_policy: AtomicU8,
     persist: Option<PersistHandle>,
     binding: crate::nat::PeerNetworkBinding,
     sequence: AtomicU64,
-    cache: Mutex<Vec<CachedTorrent>>,
+    resolutions: super::resolution::ResolutionBook,
+    cache: super::cache::MetadataCache,
     dns: Arc<taiji_io::dns::SharedDns>,
 }
 impl MagnetServices {
@@ -77,11 +86,15 @@ impl MagnetServices {
     /// Embedders can supply a service with their own resolution policy.
     pub fn with_dns(persist: Option<PersistHandle>, dns: Arc<taiji_io::dns::SharedDns>) -> Self {
         Self {
-            runtime: tokio::sync::Mutex::new(None),
-            persist,
+            runtime: OnceCell::new(),
+            lifetime: CancellationToken::new(),
+            preparing: AtomicBool::new(false),
+            dht_policy: AtomicU8::new(0),
+            persist: persist.clone(),
             binding: crate::nat::PeerNetworkBinding::new(rand::random()),
             sequence: AtomicU64::new(1),
-            cache: Mutex::new(Vec::new()),
+            resolutions: super::resolution::ResolutionBook::default(),
+            cache: super::cache::MetadataCache::new(persist),
             dns,
         }
     }
@@ -89,45 +102,36 @@ impl MagnetServices {
         Arc::clone(&self.dns)
     }
 
+    pub fn queue_resolution(&self, gid: Gid) {
+        self.resolutions.queued(gid);
+    }
+    pub(crate) fn admit_resolution(&self, gid: Gid) -> Arc<MagnetResolution> {
+        self.resolutions.admit(gid)
+    }
+    pub(super) fn claim_resolution(&self, gid: Gid) -> Arc<MagnetResolution> {
+        self.resolutions.claim(gid)
+    }
+    pub fn resolution(&self, gid: Gid) -> Option<Arc<MagnetResolution>> {
+        self.resolutions.get(gid)
+    }
+
     pub fn network(&self) -> crate::nat::PeerNetworkBinding {
         self.binding.clone()
     }
-    pub(super) fn cached(&self, v1: Option<[u8; 20]>, v2: Option<[u8; 32]>) -> Option<Bytes> {
-        let mut cache = crate::lock(&self.cache);
-        let index = cache.iter().position(|(a, b, _)| {
-            v1.is_some_and(|hash| *a == Some(hash)) || v2.is_some_and(|hash| *b == Some(hash))
-        })?;
-        let entry = cache.remove(index);
-        let bytes = entry.2.clone();
-        cache.push(entry);
-        Some(bytes)
+    pub(super) async fn cached(
+        &self,
+        v1: Option<[u8; 20]>,
+        v2: Option<[u8; 32]>,
+    ) -> Option<super::cache::CacheHit> {
+        self.cache.load(v1, v2).await
     }
-    pub(super) fn remember(&self, v1: Option<[u8; 20]>, v2: Option<[u8; 32]>, torrent: &[u8]) {
-        const CAP: usize = 16 * 1024 * 1024;
-        if torrent.len() > CAP {
-            return;
-        }
-        let Ok((_, span)) = taiji_bt::bencode::decode_with_info_span(torrent) else {
-            return;
-        };
-        let info = &torrent[span];
-        if super::check_identity(info, v1, v2).is_err() {
-            return;
-        }
-        // Cache content, not credentials or network policy from another add.
-        let canonical = super::metadata2torrent(info, &[], &cached_layers(torrent));
-        let torrent = canonical.as_slice();
-        if torrent.len() > CAP {
-            return;
-        }
-        let mut cache = crate::lock(&self.cache);
-        cache.retain(|(a, b, _)| !(v1.is_some() && *a == v1 || v2.is_some() && *b == v2));
-        while cache.len() >= 128
-            || cache.iter().map(|(_, _, bytes)| bytes.len()).sum::<usize>() + torrent.len() > CAP
-        {
-            cache.remove(0);
-        }
-        cache.push((v1, v2, Bytes::copy_from_slice(torrent)));
+    pub(super) async fn remember(
+        &self,
+        v1: Option<[u8; 20]>,
+        v2: Option<[u8; 32]>,
+        torrent: &[u8],
+    ) {
+        self.cache.remember(v1, v2, torrent).await;
     }
     pub(super) async fn open(
         &self,
@@ -135,21 +139,8 @@ impl MagnetServices {
         faces: &[MetaFace],
         parent: &CancellationToken,
     ) -> Result<(network::Network, Option<DhtLease>), String> {
-        let mut guard = self.runtime.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.start(cfg).await?);
-        }
-        let runtime = guard.as_mut().unwrap_or_else(|| unreachable!());
-        if cfg.dht_enabled {
-            if let Some(carrier) = runtime.network.dht.take() {
-                self.start_dht(runtime, cfg, DhtFamily::V4, carrier).await;
-            }
-            if cfg.dht_ipv6_enabled {
-                if let Some(carrier) = runtime.network.dht6.take() {
-                    self.start_dht(runtime, cfg, DhtFamily::V6, carrier).await;
-                }
-            }
-        }
+        self.prepare(&DiscoveryConfig::from(cfg)).await?;
+        let runtime = self.runtime.get().ok_or("discovery is not prepared")?;
         let (peers, incoming) = mpsc::channel(64);
         let (dht, events) = mpsc::channel(128);
         let id = self.sequence.fetch_add(1, Ordering::Relaxed);
@@ -202,22 +193,75 @@ impl MagnetServices {
         };
         Ok((network, lease))
     }
-    async fn start(&self, cfg: &MagnetTaskConfig) -> Result<Runtime, String> {
-        let root = CancellationToken::new();
+    /// Coalesce background requests, including callers arriving during startup.
+    pub fn request_preparation(self: &Arc<Self>, config: DiscoveryConfig) {
+        if self.lifetime.is_cancelled() || self.preparing.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let services = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = services.prepare(&config).await {
+                debug!(target:"taiji::core::magnet", %error, "discovery preparation unavailable");
+            }
+            services.preparing.store(false, Ordering::Release);
+        });
+    }
+
+    /// Prepare shared sockets and DHT without submitting a torrent. Concurrent
+    /// callers share one initialization and never hold a mutex across IO.
+    pub async fn prepare(&self, cfg: &DiscoveryConfig) -> Result<(), String> {
+        if self.lifetime.is_cancelled() {
+            return Err("discovery service is shut down".into());
+        }
+        let runtime = self.runtime.get_or_try_init(|| self.start(cfg)).await?;
+        for (family, enabled, initialized) in [
+            (DhtFamily::V4, cfg.dht_enabled, &runtime.dht4),
+            (
+                DhtFamily::V6,
+                cfg.dht_enabled && cfg.dht_ipv6_enabled,
+                &runtime.dht6,
+            ),
+        ] {
+            if enabled && self.dht_allowed(family) {
+                initialized
+                    .get_or_init(|| async {
+                        let carrier = {
+                            let mut carriers = crate::lock(&runtime.carriers);
+                            carriers
+                                .iter()
+                                .position(|(kind, _)| *kind == family)
+                                .map(|index| carriers.remove(index).1)
+                        };
+                        if let Some(carrier) = carrier {
+                            self.start_dht(runtime, cfg, family, carrier).await;
+                        }
+                    })
+                    .await;
+            }
+        }
+        if self.lifetime.is_cancelled() {
+            Self::close_runtime(runtime).await;
+            return Err("discovery service is shut down".into());
+        }
+        Ok(())
+    }
+
+    fn dht_allowed(&self, family: DhtFamily) -> bool {
+        let policy = self.dht_policy.load(Ordering::Acquire);
+        policy & 4 == 0 || policy & (if family == DhtFamily::V4 { 1 } else { 2 }) != 0
+    }
+
+    async fn start(&self, cfg: &DiscoveryConfig) -> Result<Runtime, String> {
+        let root = self.lifetime.child_token();
         let nat = cfg
             .nat
             .clone()
             .filter(|nat| !nat.is_host_managed())
             .map(|nat| self.binding.observe(nat))
             .unwrap_or_else(|| self.binding.engine());
-        let mut network = network::Network::bind(
-            cfg.phase.listen_port,
-            cfg.peer_id,
-            Vec::new(),
-            Some(nat),
-            &root,
-        )
-        .await?;
+        let mut network =
+            network::Network::bind(cfg.listen_port, cfg.peer_id, Vec::new(), Some(nat), &root)
+                .await?;
         let mut incoming = std::mem::replace(&mut network.incoming, mpsc::channel(1).1);
         let subscribers: Subscribers = Arc::new(Mutex::new(HashMap::new()));
         let retired: Retired = Arc::new(Mutex::new(HashSet::new()));
@@ -266,21 +310,31 @@ impl MagnetServices {
                 }
             }
         });
+        let mut carriers = Vec::new();
+        if let Some(carrier) = network.dht.take() {
+            carriers.push((DhtFamily::V4, carrier));
+        }
+        if let Some(carrier) = network.dht6.take() {
+            carriers.push((DhtFamily::V6, carrier));
+        }
         Ok(Runtime {
             network,
             controls,
             bootstrap_controls: Mutex::new(Vec::new()),
-            events,
+            events: Mutex::new(Some(events)),
             subscribers,
             retired,
             changed,
-            pump,
+            pump: Mutex::new(Some(pump)),
+            carriers: Mutex::new(carriers),
+            dht4: OnceCell::new(),
+            dht6: OnceCell::new(),
         })
     }
     async fn start_dht(
         &self,
         runtime: &Runtime,
-        cfg: &MagnetTaskConfig,
+        cfg: &DiscoveryConfig,
         family: DhtFamily,
         (inbound, demux): (mpsc::Receiver<InboundPacket>, UdpDemuxHandle),
     ) {
@@ -289,6 +343,9 @@ impl MagnetServices {
             None => None,
         };
         let (out_tx, out_rx) = mpsc::channel(64);
+        let Some(events) = crate::lock(&runtime.events).clone() else {
+            return;
+        };
         let (handle, _) = spawn_dht_engine(
             family,
             demux.bound_addr().port(),
@@ -301,10 +358,10 @@ impl MagnetServices {
                 outbound: out_tx,
             },
             restore,
-            runtime.events.clone(),
+            events,
         );
         forward_outbound(out_rx, demux);
-        crate::lock(&runtime.controls).push((family, handle.clone()));
+        let enabled = self.dht_allowed(family);
         let subscribers = runtime.subscribers.clone();
         let token = runtime.network.cancellation();
         let explicit = if family == DhtFamily::V4 {
@@ -331,8 +388,10 @@ impl MagnetServices {
                 "dht.libtorrent.org:25401".into(),
             ]
         };
-        let (enabled_tx, mut enabled) = tokio::sync::watch::channel(true);
-        crate::lock(&runtime.bootstrap_controls).push((family, enabled_tx));
+        let (enabled_tx, mut enabled) = tokio::sync::watch::channel(enabled);
+        crate::lock(&runtime.bootstrap_controls).push((family, enabled_tx.clone()));
+        crate::lock(&runtime.controls).push((family, handle.clone()));
+        self.apply_dht_policy(family, &handle, &enabled_tx).await;
         let dns = Arc::clone(&self.dns);
         tokio::spawn(async move {
             use futures::StreamExt;
@@ -410,60 +469,80 @@ impl MagnetServices {
         });
         info!(target:"taiji::core::magnet",?family,"shared metadata dht ready");
     }
+    async fn apply_dht_policy(
+        &self,
+        family: DhtFamily,
+        handle: &DhtHandle,
+        control: &tokio::sync::watch::Sender<bool>,
+    ) {
+        loop {
+            let before = self.dht_policy.load(Ordering::Acquire);
+            let active =
+                before & 4 == 0 || before & (if family == DhtFamily::V4 { 1 } else { 2 }) != 0;
+            if !active {
+                control.send_if_modified(|value| {
+                    let changed = *value;
+                    *value = false;
+                    changed
+                });
+            }
+            let _ = handle.set_enabled(active).await;
+            if active {
+                control.send_if_modified(|value| {
+                    let changed = !*value;
+                    *value = true;
+                    changed
+                });
+            }
+            if before == self.dht_policy.load(Ordering::Acquire) {
+                break;
+            }
+        }
+    }
+
     pub async fn set_dht_enabled(&self, v4: bool, v6: bool) {
-        let guard = self.runtime.lock().await;
-        if let Some(runtime) = guard.as_ref() {
+        self.dht_policy
+            .store(4 | u8::from(v4) | (u8::from(v6) << 1), Ordering::Release);
+        if let Some(runtime) = self.runtime.get() {
             let handles = crate::lock(&runtime.controls).clone();
             for (family, handle) in handles {
-                let active = if family == DhtFamily::V4 { v4 } else { v6 };
-                if !active {
-                    for (kind, control) in crate::lock(&runtime.bootstrap_controls)
-                        .iter()
-                        .filter(|(kind, _)| *kind == family)
-                    {
-                        let _ = kind;
-                        control.send_if_modified(|value| {
-                            let changed = *value != active;
-                            *value = active;
-                            changed
-                        });
-                    }
-                }
-                let _ = handle.set_enabled(active).await;
-                if active {
-                    for (_, control) in crate::lock(&runtime.bootstrap_controls)
-                        .iter()
-                        .filter(|(kind, _)| *kind == family)
-                    {
-                        control.send_if_modified(|value| {
-                            let changed = *value != active;
-                            *value = active;
-                            changed
-                        });
-                    }
+                let control = crate::lock(&runtime.bootstrap_controls)
+                    .iter()
+                    .find(|(kind, _)| *kind == family)
+                    .map(|(_, control)| control.clone());
+                if let Some(control) = control {
+                    self.apply_dht_policy(family, &handle, &control).await;
                 }
             }
         }
     }
 
     pub async fn shutdown(&self) {
-        if let Some(runtime) = self.runtime.lock().await.take() {
-            let controls = crate::lock(&runtime.controls).clone();
-            for (_, handle) in controls {
-                let _ = tokio::time::timeout(Duration::from_secs(2), handle.shutdown()).await;
-            }
-            drop(runtime.events);
-            let mut pump = runtime.pump;
+        self.lifetime.cancel();
+        if let Some(runtime) = self.runtime.get() {
+            Self::close_runtime(runtime).await;
+        }
+        let (id, _) = self.binding.snapshot();
+        self.binding.release(&id);
+    }
+
+    async fn close_runtime(runtime: &Runtime) {
+        runtime.network.cancellation().cancel();
+        let controls = crate::lock(&runtime.controls).clone();
+        for (_, handle) in controls {
+            let _ = tokio::time::timeout(Duration::from_secs(2), handle.shutdown()).await;
+        }
+        crate::lock(&runtime.events).take();
+        let pump = crate::lock(&runtime.pump).take();
+        if let Some(mut pump) = pump {
             if tokio::time::timeout(Duration::from_secs(2), &mut pump)
                 .await
                 .is_err()
             {
                 pump.abort();
+                let _ = pump.await;
             }
-            drop(runtime.network);
         }
-        let (id, _) = self.binding.snapshot();
-        self.binding.release(&id);
     }
 }
 
@@ -561,6 +640,28 @@ mod tests {
         let mut cfg = metadata_fixture_config(hash, PathBuf::new());
         cfg.dht_enabled = true;
         cfg.dht_entry_points = vec!["127.0.0.1:9".parse().unwrap_or_else(|e| panic!("{e}"))];
+        let preparation = DiscoveryConfig::from(&cfg);
+        let (first_prepare, second_prepare) = tokio::join!(
+            services.prepare(&preparation),
+            services.prepare(&preparation)
+        );
+        first_prepare.unwrap_or_else(|e| panic!("{e}"));
+        second_prepare.unwrap_or_else(|e| panic!("{e}"));
+        let runtime = services
+            .runtime
+            .get()
+            .unwrap_or_else(|| panic!("prepared runtime"));
+        assert!(crate::lock(&runtime.subscribers).is_empty());
+        assert_eq!(crate::lock(&runtime.controls).len(), 1);
+        let prepared_dht = crate::lock(&runtime.controls)[0].1.clone();
+        assert_eq!(
+            prepared_dht
+                .snapshot()
+                .await
+                .unwrap_or_else(|e| panic!("{e}"))
+                .announce_entries,
+            0
+        );
         let (mut network, lease) = services
             .open(&cfg, &faces(hash), &root)
             .await
@@ -622,11 +723,12 @@ mod tests {
     async fn cache_is_hash_checked_and_does_not_reuse_previous_trackers() {
         let services = Arc::new(MagnetServices::new(None));
         let (torrent, hash, _) = web_mirror_torrent();
-        services.remember(Some([0; 20]), None, &torrent);
-        assert!(services.cached(Some([0; 20]), None).is_none());
-        services.remember(Some(hash), None, &torrent);
+        services.remember(Some([0; 20]), None, &torrent).await;
+        assert!(services.cached(Some([0; 20]), None).await.is_none());
+        services.remember(Some(hash), None, &torrent).await;
         let cached = services
             .cached(Some(hash), None)
+            .await
             .unwrap_or_else(|| panic!("cached"));
         assert!(
             Metainfo::parse(&cached)
@@ -646,5 +748,41 @@ mod tests {
         assert!(matches!(end, MagnetEnd::MetadataFetched { .. }), "{end:?}");
         assert_eq!(services.network().snapshot().1, 0);
         std::fs::remove_dir_all(dir).unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    #[tokio::test]
+    async fn preparation_obeys_disabled_policy_and_shutdown_releases_the_listener() {
+        let services = Arc::new(MagnetServices::new(None));
+        let mut cfg = metadata_fixture_config([8; 20], PathBuf::new());
+        cfg.dht_enabled = true;
+        cfg.dht_entry_points = vec!["127.0.0.1:9".parse().unwrap_or_else(|e| panic!("{e}"))];
+        let preparation = DiscoveryConfig::from(&cfg);
+        services.set_dht_enabled(false, false).await;
+        services
+            .prepare(&preparation)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let runtime = services.runtime.get().unwrap_or_else(|| panic!("runtime"));
+        assert!(crate::lock(&runtime.controls).is_empty());
+        services.set_dht_enabled(true, false).await;
+        services
+            .prepare(&preparation)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(crate::lock(&runtime.controls).len(), 1);
+        let port = runtime.network.dialer.port;
+        services.shutdown().await;
+        let listener = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(listener) = tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
+                    break listener;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|e| panic!("listener not released: {e}"));
+        assert!(services.prepare(&preparation).await.is_err());
+        drop(listener);
     }
 }

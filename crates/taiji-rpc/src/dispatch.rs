@@ -44,6 +44,7 @@ mod multicall;
 // wording).
 pub(crate) mod params;
 mod payload;
+mod resolution;
 mod view;
 
 use methods::execute_session_method;

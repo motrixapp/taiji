@@ -36,6 +36,7 @@ use super::write_media::{
     replace_media_track, unpause_media_task, upsert_media_archive, upsert_media_format,
     upsert_media_keys, upsert_media_task,
 };
+use super::write_metadata_cache::{cache_metadata, evict_metadata, load_metadata};
 use super::write_progress::{load_torrent_progress, upsert_torrent_progress};
 use super::write_recovery::{load_recovered_layers, upsert_recovered_layer};
 use super::write_torrent::{
@@ -201,6 +202,19 @@ fn writer_loop(
             }
             PersistJob::LoadDownloadResult { gid, reply } => {
                 let _ = reply.send(load_download_result(&conn, &gid));
+            }
+            PersistJob::CacheMetadata {
+                identity,
+                metadata,
+                reply,
+            } => {
+                let _ = reply.send(cache_metadata(&mut conn, identity, &metadata));
+            }
+            PersistJob::LoadMetadata { identity, reply } => {
+                let _ = reply.send(load_metadata(&mut conn, identity));
+            }
+            PersistJob::EvictMetadata { identity, reply } => {
+                let _ = reply.send(evict_metadata(&conn, identity));
             }
             PersistJob::PutKv { key, value, reply } => {
                 let outcome = put_kv(&mut conn, &key, &value);

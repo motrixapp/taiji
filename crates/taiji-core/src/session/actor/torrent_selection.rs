@@ -129,6 +129,9 @@ impl SessionActor {
         if let Some(entry) = self.queue.reserved_entry_mut(gid) {
             entry.paused = false;
         }
+        if let Some(resolution) = self.magnet_services.resolution(gid) {
+            resolution.mark(crate::magnet::ResolutionMilestone::SelectionCommitted);
+        }
         Ok(CommandReply::Gid(gid))
     }
 }

@@ -2713,7 +2713,9 @@ mod tests {
             // with the method face).
             "taiji_rpc_requests_total{method=\"taiji.setFilePriority\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.setStreamingPlayhead\"} 0",
+            "taiji_rpc_requests_total{method=\"taiji.prepareBitTorrent\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.notifyNetworkChange\"} 0",
+            "taiji_rpc_requests_total{method=\"taiji.getMagnetResolution\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.getTorrentMetadata\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.confirmTorrentSelection\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.getHttpOutput\"} 0",

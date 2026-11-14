@@ -2745,8 +2745,11 @@ impl SessionActor {
         }
         self.queue
             .set_metadata_only(self.jobs.iter().filter_map(|(gid, job)| {
-                matches!(job, Job::Magnet(magnet) if magnet.options.bt_metadata_only)
-                    .then_some(*gid)
+                // A selection barrier cannot start payload either. Keep its
+                // original options: metadata-only changes the final result.
+                matches!(job, Job::Magnet(magnet) if magnet.options.bt_metadata_only
+                    || magnet.options.pause_metadata || !magnet.options.follow_torrent)
+                .then_some(*gid)
             }));
         // (1) check promotion: admit until the budget is full or the
         // FIFO drains. Each admission pops the entry; the meta lookup
@@ -2935,6 +2938,7 @@ use views::{group_tiers, random_session_id};
 mod tests;
 
 mod commands;
+mod discovery;
 mod http_output_commands;
 mod http_publication;
 /// pub(super): the migration importer's HTTP side

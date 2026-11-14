@@ -39,6 +39,9 @@ impl SessionActor {
     /// `reuse` is the existing task token carried over by the URL metadata
     /// upgrade path (`None` otherwise).
     pub(super) async fn activate(&mut self, gid: Gid, reuse: Option<CancellationToken>) {
+        if matches!(self.jobs.get(&gid), Some(Job::Magnet(_))) {
+            self.magnet_services.admit_resolution(gid);
+        }
         let token = reuse.unwrap_or_else(|| self.token.child_token());
         // Media activation consumes the token after the jobs-borrow
         // match (the other arms move it into RunningTask inline).
@@ -629,9 +632,14 @@ impl SessionActor {
                     phase: crate::magnet::MetadataPhaseConfig {
                         listen_port: self.global.listen_port,
                         max_metadata_peers: if self.global.bt_max_peers == 0 {
-                            32
+                            128
                         } else {
-                            self.global.bt_max_peers.min(32)
+                            // Half-open peers occupy this budget too. A 32-slot
+                            // truncation serializes 8s handshake timeouts before
+                            // healthy later candidates can be tried. Preserve the
+                            // user's limit up to a bounded 128-slot metadata pool;
+                            // the 30/s token bucket still controls connection rate.
+                            self.global.bt_max_peers.min(128)
                         },
                         ..crate::magnet::MetadataPhaseConfig::default()
                     },
@@ -1870,6 +1878,9 @@ impl SessionActor {
         );
         self.queue
             .insert_reserved(ReservedEntry { gid, paused: true }, Some(0));
+        if let Some(resolution) = self.magnet_services.resolution(gid) {
+            resolution.mark(crate::magnet::ResolutionMilestone::MetadataReady);
+        }
         info!(target: "taiji::core::session", gid = %gid,
             "upgraded metadata task parked as paused (bt-pause-metadata residency)");
     }
@@ -2479,6 +2490,7 @@ impl SessionActor {
             row.v1_infohash = parsed.btih.map(|b| b.to_vec());
             row.v2_infohash = parsed.btmh.map(|b| b.to_vec());
             self.persist_row(row, Vec::new()).await;
+            self.magnet_services.queue_resolution(gid);
             self.jobs.insert(
                 gid,
                 Job::Magnet(Box::new(MagnetJob {
@@ -3667,6 +3679,9 @@ impl SessionActor {
             Some(Location::ReservedPaused) => {
                 if let Some(e) = self.queue.reserved_entry_mut(gid) {
                     e.paused = false;
+                }
+                if matches!(self.jobs.get(&gid), Some(Job::Magnet(_))) {
+                    self.magnet_services.queue_resolution(gid);
                 }
                 // HTTP task row back to queued (the http_task table is the
                 // source of truth).

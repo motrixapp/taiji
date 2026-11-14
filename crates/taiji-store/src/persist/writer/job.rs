@@ -20,6 +20,22 @@ pub type MediaTrackSet = Vec<(MediaTrackRow, Vec<MediaSegmentRow>)>;
 
 /// One persistence command.
 pub enum PersistJob {
+    /// Derived verified metadata, independent of a task's lifetime.
+    CacheMetadata {
+        identity: super::MetadataCacheIdentity,
+        metadata: Vec<u8>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
+    /// Load cached content or an existing task's metadata; callers reverify it.
+    LoadMetadata {
+        identity: super::MetadataCacheIdentity,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, StoreError>>,
+    },
+    /// Evict corrupt content, or clear all cached metadata when identity is None.
+    EvictMetadata {
+        identity: Option<super::MetadataCacheIdentity>,
+        reply: oneshot::Sender<Result<(), StoreError>>,
+    },
     /// Upsert one torrent progress row; skip if the digest is unchanged.
     UpsertTorrentProgress {
         row: TorrentProgressRow,

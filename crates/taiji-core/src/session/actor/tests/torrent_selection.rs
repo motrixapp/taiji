@@ -1,4 +1,115 @@
 #[tokio::test]
+async fn native_selection_has_bounded_metadata_capacity_when_payload_queue_is_full() {
+    let dir = temp_dir("selection-admission");
+    let (handle, join) = SessionActor::spawn_with(SessionOptions {
+        global: GlobalOptions {
+            max_concurrent_downloads: 1,
+            enable_dht: false,
+            enable_dht6: false,
+            ..Default::default()
+        },
+    });
+    let payload = gid_of(
+        &call(
+            &handle,
+            torrent_cmd(
+                build_v2_torrent(&vec![23u8; 128 * 1024], &dead_tracker()),
+                &dir,
+            ),
+        )
+        .await,
+    );
+    let mut metadata = Vec::new();
+    for index in 1..=6 {
+        let mut options = BTreeMap::from([
+            (
+                "dir".into(),
+                dir.join(format!("metadata-{index}")).display().to_string(),
+            ),
+            ("motrix-await-selection".into(), "true".into()),
+        ]);
+        if index == 6 {
+            options.insert("pause".into(), "true".into());
+        }
+        metadata.push(gid_of(
+            &call(
+                &handle,
+                SessionCommand::AddUri {
+                    uris: vec![format!(
+                        "magnet:?xt=urn:btih:{index:040x}&tr=http%3A%2F%2F127.0.0.1%3A9%2Fannounce"
+                    )],
+                    options,
+                    position: None,
+                },
+            )
+            .await,
+        ));
+    }
+    assert_eq!(
+        status_of(&handle, &payload.to_string()).await.status,
+        StatusKind::Active
+    );
+    for gid in &metadata[..4] {
+        assert_eq!(
+            status_of(&handle, &gid.to_string()).await.status,
+            StatusKind::Active
+        );
+    }
+    assert_eq!(
+        status_of(&handle, &metadata[4].to_string()).await.status,
+        StatusKind::Waiting
+    );
+    assert_eq!(
+        status_of(&handle, &metadata[5].to_string()).await.status,
+        StatusKind::Paused
+    );
+    for (gid, expected, admitted) in [
+        (metadata[0], crate::magnet::ResolutionState::Resolving, true),
+        (metadata[4], crate::magnet::ResolutionState::Queued, false),
+        (metadata[5], crate::magnet::ResolutionState::Paused, false),
+    ] {
+        let reply = call(
+            &handle,
+            SessionCommand::GetMagnetResolution {
+                gid: gid.to_string(),
+            },
+        )
+        .await;
+        let Ok(CommandReply::MagnetResolution(snapshot)) = reply else {
+            panic!("resolution: {reply:?}")
+        };
+        assert_eq!(snapshot.state, expected);
+        assert_eq!(
+            snapshot
+                .milestones
+                .contains_key(&crate::magnet::ResolutionMilestone::Admitted),
+            admitted
+        );
+    }
+    ok(
+        call(
+            &handle,
+            SessionCommand::Remove {
+                gid: metadata[0].to_string(),
+            },
+        )
+        .await,
+        "remove metadata",
+    );
+    wait_until(async || {
+        status_of(&handle, &metadata[4].to_string()).await.status == StatusKind::Active
+    })
+    .await;
+    assert_eq!(
+        status_of(&handle, &payload.to_string()).await.status,
+        StatusKind::Active
+    );
+    handle.shutdown().await;
+    ok(join.await, "session shutdown");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn magnet_selection_barrier_and_atomic_confirmation_survive_restart() {
     let db = tmp_db("selection-barrier");
     let dir = temp_dir("selection-barrier");

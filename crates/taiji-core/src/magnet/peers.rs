@@ -92,7 +92,6 @@ pub(super) fn spawn_dial_with_network(
             })
     };
     tokio::spawn(async move {
-        peers.fetch_add(1, Ordering::Relaxed);
         if relay {
             // libtorrent rejects a second transport for the same peer ID.
             // Retire TCP before upgrading this introducer to its observed UDP
@@ -154,6 +153,8 @@ pub(super) fn spawn_dial_with_network(
         crate::lock(&dialed).remove(&key);
         match connected {
             Some((stream, handshake, transport)) => {
+                // Tracker numwant uses connected peers, not half-open attempts.
+                peers.fetch_add(1, Ordering::Relaxed);
                 if let Some(signals) = &signals {
                     crate::lock(&signals.candidates).connected(
                         face,
@@ -184,6 +185,7 @@ pub(super) fn spawn_dial_with_network(
                     signals,
                 )
                 .await;
+                peers.fetch_sub(1, Ordering::Relaxed);
             }
             None if token.is_cancelled() => {}
             None => {
@@ -197,7 +199,6 @@ pub(super) fn spawn_dial_with_network(
                 debug!(target: "taiji::core::magnet", %address, source, "metadata peer dial failed");
             }
         }
-        peers.fetch_sub(1, Ordering::Relaxed);
         total.fetch_sub(1, Ordering::Relaxed);
     });
 }
@@ -356,6 +357,9 @@ async fn peer_session(
         });
     }
     if let Some(signals) = &signals {
+        if let Some(resolution) = &signals.resolution {
+            resolution.mark(super::ResolutionMilestone::FirstHandshake);
+        }
         let _ = signals
             .reports
             .send(PeerReport::Connected {

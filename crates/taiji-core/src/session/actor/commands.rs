@@ -297,9 +297,39 @@ impl SessionActor {
             C::GetServers { gid } => {
                 let _ = reply.send(self.get_servers(&gid).await);
             }
+            C::PrepareBitTorrent => {
+                self.prepare_discovery();
+                let _ = reply.send(Ok(CommandReply::Accepted));
+            }
             C::NotifyNetworkChange => {
                 taiji_io::dns::SharedDns::shared_default().network_changed();
                 let _ = reply.send(Ok(CommandReply::Accepted));
+            }
+            C::GetMagnetResolution { gid } => {
+                let result = self.resolve_gid(&gid).and_then(|gid| {
+                    self.magnet_services
+                        .resolution(gid)
+                        .map(|resolution| {
+                            let mut snapshot = resolution.snapshot();
+                            if snapshot.state != crate::magnet::ResolutionState::Ready {
+                                snapshot.state = match self.queue.find(gid) {
+                                    Some(Location::ReservedPaused) => {
+                                        crate::magnet::ResolutionState::Paused
+                                    }
+                                    Some(Location::Reserved) => {
+                                        crate::magnet::ResolutionState::Queued
+                                    }
+                                    Some(Location::Result) => {
+                                        crate::magnet::ResolutionState::Failed
+                                    }
+                                    _ => snapshot.state,
+                                };
+                            }
+                            CommandReply::MagnetResolution(snapshot)
+                        })
+                        .ok_or_else(|| SessionError::failed("magnet diagnostics are unavailable"))
+                });
+                let _ = reply.send(result);
             }
             C::GetTorrentMetadata { gid } => {
                 let result = self.get_torrent_metadata(&gid);

@@ -93,6 +93,7 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
             "numSynthesizing": g.num_synthesizing.to_string(),
         })),
         CommandReply::Options(map) => Ok(crate::aria2::option::serialize_options(&map)),
+        CommandReply::MagnetResolution(snapshot) => Ok(super::resolution::encode(snapshot)),
         CommandReply::TorrentMetadata {
             data,
             awaiting_selection,

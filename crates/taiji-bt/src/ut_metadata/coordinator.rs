@@ -25,6 +25,7 @@ pub struct SharedMetadataSpec {
 }
 
 pub struct MetadataCoordinator {
+    first_block: std::sync::OnceLock<Instant>,
     expected: ExpectedInfoHash,
     state: Mutex<State>,
 }
@@ -69,6 +70,7 @@ impl MetadataCoordinator {
     pub fn new(expected: ExpectedInfoHash) -> Self {
         Self {
             expected,
+            first_block: std::sync::OnceLock::new(),
             state: Mutex::new(State::default()),
         }
     }
@@ -157,6 +159,11 @@ impl MetadataCoordinator {
             ExpectedInfoHash::V2(expected) => <[u8; 32]>::from(Sha256::digest(bytes)) == expected,
         }
     }
+    /// Monotonic reception time of the first accepted metadata block.
+    pub fn first_block_at(&self) -> Option<Instant> {
+        self.first_block.get().copied()
+    }
+
     pub fn peer_progress(&self, peer: u64) -> u64 {
         self.lock().peers.get(&peer).map_or(0, |p| p.received)
     }
@@ -396,6 +403,7 @@ impl SharedMetadataPeer {
             return Ok(DataOutcome::Untracked);
         }
         group.assembler.insert(index, data)?;
+        self.coordinator.first_block.get_or_init(|| now);
         group.leases[index].clear();
         group.sources.insert(source);
         let remaining = group.assembler.missing_indices().len();

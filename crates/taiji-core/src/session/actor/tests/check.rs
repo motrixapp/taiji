@@ -1005,14 +1005,13 @@ async fn pause_all_covers_parked_check_pending_members() {
 }
 
 /// unpauseAll clears leftover parked-face intents (review-fix regression,
-/// the mirror of pause-all): under budget 1 + three members — at the
-/// unpauseAll landing t1 has already requeued paused per its intent
-/// (the reserved face, flipped by the reserved loop), t2 is in flight
-/// (the checking face, covered by the existing loop), and **t3 is still
-/// parked** (budget 1 is fully held by t2) — only the parked-face sweep
-/// can clear its intent: partial bitmap -> requeue unpaused -> download-
-/// side reactivation (dead tracker stays active). Pre-fix t3's intent
-/// survived -> requeue paused left it stuck in the waiting queue.
+/// the mirror of pause-all): budget 1 initially puts one member in
+/// flight and two in check_pending. After pauseAll, at least one member
+/// must requeue paused before unpauseAll clears the remaining intents.
+/// Holder teardown lends idle download slots to the check pool, so the
+/// other members may already be in flight when unpauseAll arrives.
+/// Every candidate must finish checking and become runnable, whether it
+/// gets a download slot before the holders restart or waits behind them.
 ///
 /// Fixed: the intermittence was in-flight pause requests landing late
 /// (teardown completion after the unpauseAll sweep) and resurrecting
@@ -1127,9 +1126,8 @@ async fn unpause_all_clears_parked_check_pending_intent() {
             Ok(CommandReply::Gid(_))
         ));
     }
-    // One in flight + two parked (the unpauseAll shape needs a member
-    // still parked at that moment — with budget 1 the third member only
-    // promotes after the second's completion).
+    // One in flight + two parked before pauseAll changes the holders
+    // and, consequently, the elastic check budget.
     let mut split = false;
     for _ in 0..600 {
         let parked = tell_waiting(&handle)
@@ -1172,37 +1170,43 @@ async fn unpause_all_clears_parked_check_pending_intent() {
         call(&handle, SessionCommand::UnpauseAll).await,
         Ok(CommandReply::Accepted)
     ));
-    // Terminal: all three members requeued unpaused — queued behind
-    // the full download pool (the holders hold both slots; the
-    // download-side reactivation itself is queued, not active). No
-    // member stays paused in the waiting queue (the pre-fix face
-    // leaves the member that was still parked at unpauseAll stuck
-    // paused — the stalled assert trips on the residue).
+    // Terminal: each candidate finished checking and is runnable.
+    // PauseAll also stopped the holders: a candidate can take a released
+    // slot before a holder restarts. Requiring all candidates in Waiting
+    // would reject that legitimate Active + Waiting split forever.
+    // Checking also projects as Active, so explicitly require the check
+    // pool to be drained before accepting the active candidates.
     // 4500×20ms = 90s: the resume wave (recheck + reactivation of five
     // members) exceeded both the historical 12s and a 30s budget on
     // loaded shared CI runners where the whole suite runs concurrently.
     let mut resumed = false;
     for _ in 0..4500 {
+        // Sample the drained check pool before the status lists. The
+        // reverse order could accept a stale checking-as-Active view
+        // whose completion just requeued it paused between RPC calls.
+        let stat = global_stat(&handle).await;
         let waiting = tell_waiting(&handle).await;
+        let active = tell_active(&handle).await;
         let stalled = waiting
             .iter()
             .any(|v| gids.contains(&v.gid) && v.status == StatusKind::Paused);
-        let unpaused = waiting
-            .iter()
-            .filter(|v| gids.contains(&v.gid) && v.status == StatusKind::Waiting)
-            .count();
-        // <= 2, not == 2: on slow hosts a holder can finish its
-        // verification between polls and leave the meter before this
-        // triple condition is observed — the regression surface is the
-        // stuck-pause residue, not the exact meter reading.
-        if num_active(&handle).await <= 2 && !stalled && unpaused == 3 {
-            resumed = true;
-            break;
-        }
+        let all_runnable = gids.iter().all(|gid| {
+            waiting
+                .iter()
+                .any(|v| v.gid == *gid && v.status == StatusKind::Waiting)
+                || active
+                    .iter()
+                    .any(|v| v.gid == *gid && v.status == StatusKind::Active)
+        });
+        assert!(stat.num_active <= 2, "download pool exceeded its budget");
         assert!(
             tell_stopped_gids(&handle).await.is_empty(),
             "zero results on the verification path"
         );
+        if stat.num_checking == 0 && !stalled && all_runnable {
+            resumed = true;
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     if !resumed {
@@ -1210,10 +1214,17 @@ async fn unpause_all_clears_parked_check_pending_intent() {
         // the final queue/meter state so a recurrence on CI shows
         // WHICH member stayed parked and in what status.
         let waiting = tell_waiting(&handle).await;
+        let active = tell_active(&handle).await;
+        let stat = global_stat(&handle).await;
         eprintln!(
-            "unpause_all timeout diagnostics: num_active={} waiting={:?}",
-            num_active(&handle).await,
+            "unpause_all timeout diagnostics: num_active={} num_checking={} waiting={:?} active={:?}",
+            stat.num_active,
+            stat.num_checking,
             waiting
+                .iter()
+                .map(|v| (v.gid.to_string(), v.status))
+                .collect::<Vec<_>>(),
+            active
                 .iter()
                 .map(|v| (v.gid.to_string(), v.status))
                 .collect::<Vec<_>>()

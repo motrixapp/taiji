@@ -47,7 +47,7 @@ use taiji_bt::peer_wire::Reserved;
 use taiji_bt::tracker::TrackerOptions;
 use taiji_bt::tracker::actor::{
     TrackerActorConfig, TrackerActorEvent, TrackerCommand, UDP_INBOUND_CAPACITY,
-    UDP_OUTBOUND_CAPACITY, UdpTransport, spawn_tracker_actor,
+    UDP_OUTBOUND_CAPACITY, UdpTransport, spawn_tracker_actor_with_dns,
 };
 use taiji_io::rate_limit::{LimiterSet, Throttled};
 use taiji_io::udp_demux::DemuxConfig;
@@ -980,6 +980,12 @@ async fn discover_and_fetch(
     face_by_hash: &(dyn Fn(&[u8; 20]) -> Option<usize> + Sync),
 ) -> Result<MetadataPhase, String> {
     let phase_started = std::time::Instant::now();
+    let dns = cfg
+        .services
+        .as_ref()
+        .map_or_else(taiji_io::dns::SharedDns::shared_default, |services| {
+            services.dns()
+        });
     let mut network = if let Some(services) = &cfg.services {
         let (network, lease) = services.open(cfg, faces, md_token).await?;
         if dht.is_none() {
@@ -1069,7 +1075,7 @@ async fn discover_and_fetch(
         let (actor_out_tx, carrier_out_rx) = mpsc::channel(UDP_OUTBOUND_CAPACITY);
         let (carrier_in_tx, actor_in_rx) = mpsc::channel(UDP_INBOUND_CAPACITY);
         tokio::spawn(udp_carrier(carrier_out_rx, carrier_in_tx));
-        let actor_cmd = spawn_tracker_actor(
+        let actor_cmd = spawn_tracker_actor_with_dns(
             TrackerActorConfig {
                 info_hash: face.info_hash,
                 peer_id: cfg.peer_id,
@@ -1104,6 +1110,7 @@ async fn discover_and_fetch(
                 outbound: actor_out_tx,
                 inbound: actor_in_rx,
             },
+            Arc::clone(&dns),
         );
         match actor_cmd {
             Ok(cmd) => actor_cmds.push(cmd),
@@ -1134,9 +1141,9 @@ async fn discover_and_fetch(
             if cfg.services.is_none() {
                 let boot = async {
                     let entry_points = if let Some(endpoint) = &cfg.dht_entry_point_override {
-                        resolve_bootstrap_override(endpoint).await
+                        resolve_bootstrap_override(endpoint, &dns).await
                     } else {
-                        resolve_entry_points(&cfg.dht_entry_points).await
+                        resolve_entry_points_with(&cfg.dht_entry_points, &dns).await
                     };
                     dht.bootstrap(entry_points).await
                 };
@@ -1527,20 +1534,8 @@ fn queue_metadata_peer(
     }
 }
 
-/// Resolve the DHT bootstrap entry points (explicit entries first;
-/// otherwise the hardcoded routers). Production uses the shared resolver
-/// service's process-default instance (injected via
-/// [`resolve_entry_points_with`]).
-async fn resolve_entry_points(explicit: &[std::net::SocketAddr]) -> Vec<std::net::SocketAddr> {
-    resolve_entry_points_with(explicit, &taiji_io::dns::SharedDns::shared_default()).await
-}
-
-/// Injection face of [`resolve_entry_points`] (the test seam:
-/// `SharedDns::with_resolver` builds an isolated stub — no real DNS).
-/// DNS goes through the shared resolver (a TTL cache + a 30s timeout
-/// backstop inside the resolver stack's TimeoutResolver — a hanging
-/// resolution can no longer stall the startup chain indefinitely);
-/// failed nodes are skipped with a debug log (semantics preserved).
+/// Resolve bootstrap names through the same service as metadata trackers.
+/// Explicit addresses bypass DNS. Each source has a bounded startup budget.
 async fn resolve_entry_points_with(
     explicit: &[std::net::SocketAddr],
     dns: &taiji_io::dns::SharedDns,
@@ -1577,7 +1572,10 @@ async fn resolve_entry_points_with(
     out
 }
 
-async fn resolve_bootstrap_override(endpoint: &str) -> Vec<std::net::SocketAddr> {
+async fn resolve_bootstrap_override(
+    endpoint: &str,
+    dns: &taiji_io::dns::SharedDns,
+) -> Vec<std::net::SocketAddr> {
     if let Ok(address) = endpoint.parse::<std::net::SocketAddr>() {
         return if address.is_ipv4() {
             vec![address]
@@ -1591,7 +1589,6 @@ async fn resolve_bootstrap_override(endpoint: &str) -> Vec<std::net::SocketAddr>
     let Ok(port) = port.parse::<u16>() else {
         return Vec::new();
     };
-    let dns = taiji_io::dns::SharedDns::shared_default();
     match tokio::time::timeout(
         Duration::from_secs(3),
         dns.resolve_for_transport(host, port),

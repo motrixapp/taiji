@@ -881,6 +881,77 @@ pub(crate) fn render(
         );
     }
 
+    // Work counters distinguish caller cache misses from actual OS queries.
+    for (name, kind, help, value) in [
+        (
+            "taiji_dns_backend_queries_total",
+            "counter",
+            "Logical backend DNS lookups started after request coalescing.",
+            snap.dns_backend_queries_total,
+        ),
+        (
+            "taiji_dns_coalesced_total",
+            "counter",
+            "Callers joined to an existing shared DNS lookup.",
+            snap.dns_coalesced_total,
+        ),
+        (
+            "taiji_dns_negative_hits_total",
+            "counter",
+            "Callers served by short-lived negative DNS cache entries.",
+            snap.dns_negative_hits_total,
+        ),
+        (
+            "taiji_dns_capacity_rejected_total",
+            "counter",
+            "DNS requests rejected by bounded admission.",
+            snap.dns_capacity_rejected_total,
+        ),
+        (
+            "taiji_dns_system_queries_total",
+            "counter",
+            "Physical system resolver calls actually started.",
+            snap.dns_system_queries_total,
+        ),
+        (
+            "taiji_dns_system_coalesced_total",
+            "counter",
+            "Callers joined to an existing physical system lookup.",
+            snap.dns_system_coalesced_total,
+        ),
+        (
+            "taiji_dns_system_active",
+            "gauge",
+            "Physical system resolver calls still running, including timed-out callers.",
+            snap.dns_system_active,
+        ),
+        (
+            "taiji_dns_system_queued",
+            "gauge",
+            "Distinct system lookups waiting for a physical resolver permit.",
+            snap.dns_system_queued,
+        ),
+    ] {
+        out.push_str("# HELP ");
+        out.push_str(name);
+        out.push(' ');
+        out.push_str(help);
+        out.push('\n');
+        out.push_str("# TYPE ");
+        out.push_str(name);
+        out.push(' ');
+        out.push_str(kind);
+        out.push('\n');
+        write_sample(
+            &mut out,
+            Sample {
+                name,
+                labels: &[],
+                value: value.to_string(),
+            },
+        );
+    }
+
     // ---- HTTP transport families (the io shared layer via the core
     // snapshot aggregation seam; all labels fixed enums). errors counts
     // per failed request (retries/source switches amplify it — a retry
@@ -1864,6 +1935,14 @@ mod tests {
     #[test]
     fn dns_family_projects_into_metrics() {
         let mut snap = MetricsSnapshot {
+            dns_backend_queries_total: 1,
+            dns_coalesced_total: 2,
+            dns_negative_hits_total: 3,
+            dns_capacity_rejected_total: 4,
+            dns_system_queries_total: 5,
+            dns_system_coalesced_total: 6,
+            dns_system_active: 7,
+            dns_system_queued: 8,
             dns_lookups_hit_total: 3,
             dns_lookups_miss_total: 7,
             dns_lookups_error_total: 2,
@@ -1885,6 +1964,14 @@ mod tests {
 
         let out = render(&snap, &TorrentStateCounts::default(), "taiji/0.1.0", 0);
         let expect: &[&str] = &[
+            "taiji_dns_backend_queries_total 1",
+            "taiji_dns_coalesced_total 2",
+            "taiji_dns_negative_hits_total 3",
+            "taiji_dns_capacity_rejected_total 4",
+            "taiji_dns_system_queries_total 5",
+            "taiji_dns_system_coalesced_total 6",
+            "taiji_dns_system_active 7",
+            "taiji_dns_system_queued 8",
             "# TYPE taiji_dns_lookups_total counter",
             "taiji_dns_lookups_total{result=\"hit\"} 3",
             "taiji_dns_lookups_total{result=\"miss\"} 7",

@@ -11,8 +11,15 @@
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex, RwLock};
+
+// CLOEXEC only closes SQLite descriptors at exec. A concurrently spawned
+// child can briefly inherit another test's source DB before exec, and the
+// importer correctly reports that child as a live holder. Source fixture
+// connections take a read lease until close; spawning takes a write lease
+// until exec completes. Child execution and the tests remain concurrent.
+static SOURCE_FDS: RwLock<()> = RwLock::new(());
 
 /// Test-only Result unwrap helper (lints ban unwrap/expect).
 fn ok<T, E: std::fmt::Display>(r: Result<T, E>, what: &str) -> T {
@@ -122,6 +129,8 @@ fn build_http_ctrl(piece_length: u32, total_length: u64, bitfield: &[u8]) -> Vec
 /// user_version=1) seeded with one BT task (serialized carries
 /// dir + pause=true; bitfield 0xC0; upload 4096).
 fn seed_fork_db(path: &Path, gid: &str, ih: &[u8; 20], dir: &str) {
+    // Declared first so the connection closes before the lease is released.
+    let _source_fds = ok(SOURCE_FDS.read(), "lease source fixture fds");
     let conn = ok(rusqlite::Connection::open(path), "open fork fixture");
     ok(
         conn.execute_batch(
@@ -166,19 +175,29 @@ fn seed_fork_db(path: &Path, gid: &str, ih: &[u8; 20], dir: &str) {
 
 /// Run `taiji import <args>`; returns (exit code, stdout).
 fn run_import(args: &[String]) -> (i32, String) {
-    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let out = ok(
-        Command::new(env!("CARGO_BIN_EXE_taiji"))
-            .arg("import")
-            .args(&refs)
-            .stderr(Stdio::inherit())
-            .output(),
-        "run taiji import",
-    );
-    (
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-    )
+    let (code, out, err) = run_import_captured(args);
+    eprint!("{err}");
+    (code, out)
+}
+
+fn import_output(command: &mut Command) -> Output {
+    let child = {
+        let _source_fds = ok(SOURCE_FDS.write(), "isolate child spawn from source fds");
+        ok(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn(),
+            "spawn taiji import",
+        )
+    };
+    ok(child.wait_with_output(), "wait for taiji import")
+}
+
+fn source_db_bytes(path: &Path) -> Vec<u8> {
+    let _source_fds = ok(SOURCE_FDS.read(), "lease source fixture fds");
+    ok(std::fs::read(path), "read source fixture")
 }
 
 /// Run `taiji import <args>` capturing stderr (the assertion surface
@@ -186,12 +205,10 @@ fn run_import(args: &[String]) -> (i32, String) {
 /// stderr).
 fn run_import_captured(args: &[String]) -> (i32, String, String) {
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let out = ok(
+    let out = import_output(
         Command::new(env!("CARGO_BIN_EXE_taiji"))
             .arg("import")
-            .args(&refs)
-            .output(),
-        "run taiji import",
+            .args(&refs),
     );
     (
         out.status.code().unwrap_or(-1),
@@ -582,6 +599,7 @@ type HttpRowSnapshot = (
 /// `isPauseRequested() ? "paused" : "waiting"`; `active` is a
 /// tellStatus projection word and never enters this column).
 fn seed_fork_db_http(path: &Path, rows: &[HttpSeedRow<'_>]) {
+    let _source_fds = ok(SOURCE_FDS.read(), "lease source fixture fds");
     let conn = ok(rusqlite::Connection::open(path), "open fork fixture");
     ok(
         conn.execute_batch(
@@ -832,17 +850,8 @@ fn http_face_import_second_import_and_path_conflict() {
     rename_args.push(target2.display().to_string());
     rename_args.push("--on-path-conflict".to_string());
     rename_args.push("rename".to_string());
-    let refs: Vec<&str> = rename_args.iter().map(|s| s.as_str()).collect();
-    let out = ok(
-        Command::new(env!("CARGO_BIN_EXE_taiji"))
-            .arg("import")
-            .args(&refs)
-            .stderr(Stdio::inherit())
-            .output(),
-        "run rename import",
-    );
-    assert_eq!(out.status.code(), Some(0));
-    let out = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (code, out) = run_import(&rename_args);
+    assert_eq!(code, 0);
     assert!(
         out.contains("2 planned"),
         "the rename decision lands both tasks: {out}"
@@ -955,7 +964,7 @@ fn same_path_and_fork_shaped_target_are_rejected() {
         &ih,
         dl.to_str().unwrap_or("."),
     );
-    let fork_bytes = ok(std::fs::read(&fork_db), "read fork bytes");
+    let fork_bytes = source_db_bytes(&fork_db);
 
     // -- case A: literally the same path --
     let args = vec![
@@ -971,7 +980,7 @@ fn same_path_and_fork_shaped_target_are_rejected() {
         "the rejection reason goes to stderr: {err}"
     );
     assert_eq!(
-        ok(std::fs::read(&fork_db), "reread fork"),
+        source_db_bytes(&fork_db),
         fork_bytes,
         "the rejection path leaves the fork db untouched"
     );
@@ -988,7 +997,7 @@ fn same_path_and_fork_shaped_target_are_rejected() {
     assert_eq!(code, 1, "a spelling-variant same path is rejected too");
     assert!(err.contains("same database file"), "{err}");
     assert_eq!(
-        ok(std::fs::read(&fork_db), "reread fork"),
+        source_db_bytes(&fork_db),
         fork_bytes,
         "the rejection path leaves the fork db untouched"
     );
@@ -1061,6 +1070,7 @@ fn dedup_kv_read_failure_fails_tasks_instead_of_silent_reimport() {
         )],
     );
     {
+        let _source_fds = ok(SOURCE_FDS.read(), "lease source fixture fds");
         let conn = ok(rusqlite::Connection::open(&fork_db), "reopen fork db");
         ok(
             conn.execute(
@@ -1173,7 +1183,7 @@ fn run_import_with_envs(args: &[String], envs: &[(&str, &Path)]) -> (i32, String
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_taiji"));
     cmd.arg("import").args(&refs).envs(envs.iter().copied());
-    let out = ok(cmd.output(), "run taiji import");
+    let out = import_output(&mut cmd);
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -1233,14 +1243,17 @@ fn live_fork_fd_holder_refuses_import_reporting_pid() {
 
     // Live holder: a child process holds the db file via stdin (visible to
     // the kernel right after spawn).
-    let holder = ok(std::fs::File::open(&fork_db), "open holder fd");
-    let mut child = ok(
-        std::process::Command::new("sleep")
-            .arg("60")
-            .stdin(Stdio::from(holder))
-            .spawn(),
-        "spawn fd holder",
-    );
+    let mut child = {
+        let _source_fds = ok(SOURCE_FDS.write(), "isolate holder spawn from source fds");
+        let holder = ok(std::fs::File::open(&fork_db), "open holder fd");
+        let mut command = Command::new("sleep");
+        command.arg("60").stdin(Stdio::from(holder));
+        let child = ok(command.spawn(), "spawn fd holder");
+        // Close the parent-side stdin fd before releasing the write
+        // lease. Only the child keeps this intentionally live source fd.
+        drop(command);
+        child
+    };
     let child_pid = child.id().to_string();
 
     // Layer-2 refusal: reports the pid, exit 1 (pre-check rejection).

@@ -17,6 +17,7 @@
 //!
 //! Upstream anchor mapping: docs/design/tracker.md
 
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,7 +26,7 @@ use std::time::Duration;
 // Rng renamed); StdRng is built with make_rng
 // (SeedableRng::from_os_rng was removed).
 use rand::RngExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, warn};
 
 use std::time::Instant;
@@ -34,7 +35,7 @@ use super::announce_list::{AnnounceList, AnnounceTier, TierEvent};
 use super::dns::{HostResolver, ResolveFamily, SharedDns};
 use super::http::{HttpAnnounce, OwnedAnnounceParams, TrackerOptions, apply_interval_settings};
 use super::scrape::{ScrapeCache, build_scrape_url, parse_scrape_response};
-use super::udp::{UdpAction, UdpEvent, UdpReply, UdpRequest, UdpTrackerClient};
+use super::udp::{UdpAction, UdpError, UdpEvent, UdpReply, UdpRequest, UdpTrackerClient};
 use super::{DEFAULT_NUMWANT, PeerAddr, PeerAddr6, ScrapeStats, TrackerError};
 
 /// Command channel capacity (mpsc(16)).
@@ -57,6 +58,10 @@ const RESULT_CHANNEL_CAPACITY: usize = ANNOUNCE_MAX_IN_FLIGHT * 2 + 8;
 /// Polling granularity (an implementation detail, not a protocol
 /// constant; tests drive with smaller values).
 const TICK: Duration = Duration::from_secs(1);
+const CONNECT_STAGGER: Duration = Duration::from_millis(250);
+const CONNECT_PROBE_TIMEOUT: Duration = super::udp::RESEND_DELAY;
+const CONNECT_PROBES: usize = 2;
+const UDP_ADDRESS_CANDIDATES: usize = 32;
 
 /// Failure backoff cap = libtorrent `tracker_retry_delay_max`
 /// (`src/announce_entry.cpp` `minutes32 constexpr tracker_retry_delay_max{60}`).
@@ -239,6 +244,14 @@ pub struct UdpTransport {
 
 /// Internal announce/scrape outcomes.
 enum AnnounceOutcome {
+    V6Probe {
+        token: u64,
+        available: bool,
+        completed_at: Instant,
+    },
+    UdpUnavailable {
+        token: u64,
+    },
     Http {
         /// The slot identity token at issue time (results land by token —
         /// duplicate-URL slots and stale results after a table rebuild
@@ -248,6 +261,7 @@ enum AnnounceOutcome {
         result: Result<super::http::AnnounceResponse, TrackerError>,
     },
     ScrapeHttp {
+        token: u64,
         result: Result<Vec<([u8; 20], ScrapeStats)>, TrackerError>,
     },
     /// UDP domain pre-resolution returning to the actor (announce side).
@@ -260,23 +274,65 @@ enum AnnounceOutcome {
     /// family, never across families).
     UdpAnnounceResolve {
         token: u64,
-        event: TierEvent,
         url: String,
         host: String,
         port: u16,
         family: ResolveFamily,
-        result: Result<IpAddr, String>,
+        result: Result<Vec<IpAddr>, String>,
     },
-    /// UDP domain pre-resolution returning (scrape side; an attached
-    /// surface with no slot ownership).
+    /// UDP scrape resolution returning under its independent operation token.
     UdpScrapeResolve {
+        token: u64,
         url: String,
         host: String,
         port: u16,
         hashes: Vec<[u8; 20]>,
         family: ResolveFamily,
-        result: Result<IpAddr, String>,
+        result: Result<Vec<IpAddr>, String>,
     },
+}
+
+/// One logical announce owns DNS, connection probes and exactly one active
+/// announce. Moving to another address never resets this deadline or payload.
+#[derive(Debug)]
+struct UdpAttempt {
+    deadline: Instant,
+    request: UdpRequest,
+    candidates: VecDeque<SocketAddr>,
+    candidates_ready: bool,
+    probes: Vec<SocketAddr>,
+    next_probe_at: Instant,
+    winner: Option<SocketAddr>,
+}
+
+struct ScrapeAttempt {
+    udp: bool,
+    deadline: Instant,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+type V6ProbeFactory = Arc<dyn Fn() -> futures::future::BoxFuture<'static, bool> + Send + Sync>;
+
+struct V6ProbeFlight {
+    token: u64,
+    result: watch::Receiver<Option<bool>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+enum V6Gate {
+    Ready(bool),
+    Pending(watch::Receiver<Option<bool>>),
+}
+
+async fn await_v6_probe(mut result: watch::Receiver<Option<bool>>) -> bool {
+    loop {
+        if let Some(available) = *result.borrow() {
+            return available;
+        }
+        if result.changed().await.is_err() {
+            return false;
+        }
+    }
 }
 
 /// Per-tracker independent announce state (the libtorrent
@@ -325,8 +381,12 @@ struct TrackerSlot {
     /// `ae->trackerid`; the aria2 port had one global value, made
     /// per-tracker under parallel semantics).
     tracker_id: Option<String>,
-    /// UDP remote (replies route by addr after issue; None = HTTP).
+    /// Winning UDP endpoint; replies must also match this attempt's owner token.
     udp_addr: Option<SocketAddr>,
+    last_udp_addr: Option<SocketAddr>,
+    udp_cursor: usize,
+    udp_attempt: Option<UdpAttempt>,
+    pending_task: Option<tokio::task::JoinHandle<()>>,
     /// UDP carrier family: None = an HTTP slot (or an unparseable URL —
     /// it fails as invalid-url at issue time); Some = a UDP per-family
     /// face (domain URLs expand to v4+v6 faces, literal IPs are
@@ -386,9 +446,10 @@ pub struct TrackerActor {
     halt: bool,
     halted_emitted: bool,
     udp: UdpTrackerClient,
-    /// UDP domain resolution shared service (resolver + TTL cache;
-    /// default = the process-wide default instance, tests swap in a
-    /// separate one via [`Self::with_resolver`]). Cache reads are
+    udp_closed: bool,
+    scrapes: HashMap<u64, ScrapeAttempt>,
+    /// Shared DNS for UDP and HTTP (default = the process-wide instance;
+    /// integrations inject the same service through [`Self::with_dns`]). Cache reads are
     /// per-family projections inside the tick (short lock critical
     /// sections); resolution happens in spawned tasks through the service
     /// — **whole-list backfill happens only inside the service** (the
@@ -400,6 +461,8 @@ pub struct TrackerActor {
     /// v6 availability cache (available, probed at) (TTL
     /// [`V6_PROBE_TTL`]; None = not probed).
     v6_gate_cache: Option<(bool, Instant)>,
+    v6_probe_factory: V6ProbeFactory,
+    v6_probe_flight: Option<V6ProbeFlight>,
     rng: rand::rngs::StdRng,
     scrape_cache: ScrapeCache,
     http: HttpAnnounce,
@@ -496,6 +559,10 @@ fn build_tables(
                     interval: TrackerActor::default_interval(),
                     tracker_id: None,
                     udp_addr: None,
+                    last_udp_addr: None,
+                    udp_cursor: 0,
+                    udp_attempt: None,
+                    pending_task: None,
                     udp_family: family,
                     silent_failure: silent,
                     attempt_at: None,
@@ -567,9 +634,15 @@ impl TrackerActor {
             halt: false,
             halted_emitted: false,
             udp: UdpTrackerClient::new(),
+            udp_closed: false,
+            scrapes: HashMap::new(),
             dns: SharedDns::shared_default(),
             v6_probe_override: None,
             v6_gate_cache: None,
+            v6_probe_factory: Arc::new(|| {
+                Box::pin(async { crate::dht::security::probe_source_ip(true).await.is_some() })
+            }),
+            v6_probe_flight: None,
             rng: rand::make_rng::<rand::rngs::StdRng>(),
             scrape_cache: ScrapeCache::new(Duration::from_secs(15 * 60)),
             last_ok_url: None,
@@ -600,6 +673,76 @@ impl TrackerActor {
         self
     }
 
+    /// Inject one service into HTTP and UDP so lookups/cache/limits are shared.
+    pub fn with_dns(mut self, dns: Arc<SharedDns>) -> Result<Self, TrackerError> {
+        self.http = HttpAnnounce::with_dns(&self.cfg.options, Arc::clone(&dns))?;
+        self.dns = dns;
+        Ok(self)
+    }
+
+    fn next_token(&mut self) -> u64 {
+        self.token_seq = self.token_seq.wrapping_add(1);
+        self.token_seq
+    }
+
+    fn cancel_slot(&mut self, i: usize) {
+        self.udp.cancel_owner(self.slots[i].token);
+        self.slots[i].udp_attempt = None;
+        if let Some(task) = self.slots[i].pending_task.take() {
+            task.abort();
+        }
+    }
+
+    fn clear_operations(&mut self) {
+        if let Some(flight) = self.v6_probe_flight.take() {
+            flight.task.abort();
+        }
+        for slot in &mut self.slots {
+            slot.udp_attempt = None;
+            slot.updating = false;
+            slot.udp_addr = None;
+            slot.last_udp_addr = None;
+            if let Some(task) = slot.pending_task.take() {
+                task.abort();
+            }
+        }
+        for (_, attempt) in self.scrapes.drain() {
+            if let Some(task) = attempt.task {
+                task.abort();
+            }
+        }
+        self.udp.clear();
+        self.last_ok_url = None;
+    }
+
+    fn reserve_scrape(&mut self, now: Instant, udp: bool) -> Option<u64> {
+        if self.scrapes.len() >= ANNOUNCE_MAX_IN_FLIGHT {
+            return None;
+        }
+        let token = self.next_token();
+        self.scrapes.insert(
+            token,
+            ScrapeAttempt {
+                udp,
+                deadline: now + self.cfg.options.bt_tracker_timeout,
+                task: None,
+            },
+        );
+        Some(token)
+    }
+
+    fn finish_scrape(&mut self, token: u64) -> bool {
+        self.udp.cancel_owner(token);
+        if let Some(attempt) = self.scrapes.remove(&token) {
+            if let Some(task) = attempt.task {
+                task.abort();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Inject a v6 availability override (test seam): `Some(b)` forces
     /// the gate value (locking behavior on no-real-network,
     /// no-global-v6 environments); `None` (default) = a production
@@ -609,37 +752,46 @@ impl TrackerActor {
         self
     }
 
-    /// v6 carrier availability (the gate; async — measures when the TTL
-    /// expires). The production convention =
-    /// `crate::dht::security::probe_source_ip(true)` (v6 = a time-limited
-    /// TCP connect probe); no global v6 -> false — "no probe -> skip the
-    /// v6 face". Called only on tokio-driven issue/command paths (the
-    /// probe needs a runtime; tests bypass via
-    /// [`Self::with_v6_probe_override`]).
-    async fn v6_gate(&mut self, now: Instant) -> bool {
+    /// Read the cached availability or join one owned background probe.
+    /// The actor never awaits the TCP probe: only individual v6 operations
+    /// wait on this channel, under their original operation deadlines.
+    fn v6_gate(&mut self, now: Instant) -> V6Gate {
         if let Some(forced) = self.v6_probe_override {
-            return forced;
+            return V6Gate::Ready(forced);
         }
         if let Some((ok, at)) = self.v6_gate_cache
-            && now.duration_since(at) < V6_PROBE_TTL
+            && now.saturating_duration_since(at) < V6_PROBE_TTL
         {
-            return ok;
+            return V6Gate::Ready(ok);
         }
-        let ok = crate::dht::security::probe_source_ip(true).await.is_some();
-        self.v6_gate_cache = Some((ok, now));
-        ok
-    }
-
-    /// Synchronous read of v6 availability (the latest probe/override
-    /// value; not probed = false). For synchronous chains such as
-    /// finish_success -> scrape — when an announce just succeeded on the
-    /// v6 carrier this is the gate's fresh measurement (seconds old);
-    /// the Scrape command entry refreshes via [`Self::v6_gate`] first.
-    fn v6_gate_cached(&self) -> bool {
-        match self.v6_probe_override {
-            Some(forced) => forced,
-            None => self.v6_gate_cache.is_some_and(|(ok, _)| ok),
+        if let Some(flight) = &self.v6_probe_flight {
+            if let Some(available) = *flight.result.borrow() {
+                return V6Gate::Ready(available);
+            }
+            return V6Gate::Pending(flight.result.clone());
         }
+        let token = self.next_token();
+        let (ready, result) = watch::channel(None);
+        let probe = (self.v6_probe_factory)();
+        let result_tx = self.result_tx.clone();
+        let task = tokio::spawn(async move {
+            let available = probe.await;
+            let completed_at = Instant::now();
+            let _ = ready.send(Some(available));
+            let _ = result_tx
+                .send(AnnounceOutcome::V6Probe {
+                    token,
+                    available,
+                    completed_at,
+                })
+                .await;
+        });
+        self.v6_probe_flight = Some(V6ProbeFlight {
+            token,
+            result: result.clone(),
+            task,
+        });
+        V6Gate::Pending(result)
     }
 
     /// `left = total - completed`.
@@ -824,8 +976,10 @@ impl TrackerActor {
             tier.event()
         };
         let url = self.slots[i].url.clone();
+        let token = self.next_token();
         {
             let slot = &mut self.slots[i];
+            slot.token = token;
             slot.updating = true;
             slot.attempt_at = Some(now);
             slot.udp_addr = None;
@@ -853,77 +1007,78 @@ impl TrackerActor {
             event = event.event_str(), "announce attempt");
         match parsed.scheme {
             super::http::Scheme::Udp => {
-                // Per-family face: literal IP pass-through (used only
-                // when the family matches; the isNumericHost pass-through
-                // shape of aria2 NameResolveCommand.cc) -> the per-family
-                // cache (a hit issues no query) -> on a miss, spawn a
-                // per-family resolve task that returns via the result
-                // channel (a non-blocking tick; the same decoupling as
-                // NameResolveCommand.cc's independent command that only
-                // addRequests onSuccess). The slot keeps `updating` and
-                // holds in-flight budget (resolve concurrency is bounded
-                // by the same cap); results land by token, the same path
-                // as HTTP.
                 let Some(family) = self.slot_family_or_fail(i, now) else {
                     return;
                 };
-                // v6 carrier gate: no global v6 locally -> skip the v6
-                // face (probe_source_ip(true); a blind v6 announce without
-                // a probe is forbidden). Fails as "unavailable" — booked
-                // through finish_failure (backoff + the terminal-sequence
-                // walk count so the halt sequence can converge); the
-                // attached v6 face is silent (silent_failure).
-                if family == ResolveFamily::V6 && !self.v6_gate(now).await {
-                    self.finish_failure(
-                        i,
-                        "unavailable",
-                        "no global ipv6 (probe_source_ip); v6 carrier skipped".into(),
-                        now,
-                    );
+                if self.udp_closed {
+                    self.finish_failure(i, "network", "udp tracker transport closed".into(), now);
                     return;
                 }
-                let literal = parsed
+                let request = self.udp_announce_request(i, event);
+                self.slots[i].udp_attempt = Some(UdpAttempt {
+                    deadline: now + self.cfg.options.bt_tracker_timeout,
+                    request,
+                    candidates: VecDeque::new(),
+                    candidates_ready: false,
+                    probes: Vec::new(),
+                    next_probe_at: now,
+                    winner: None,
+                });
+                let gate = if family == ResolveFamily::V6 {
+                    match self.v6_gate(now) {
+                        V6Gate::Ready(true) => None,
+                        V6Gate::Ready(false) => {
+                            self.finish_failure(
+                                i,
+                                "unavailable",
+                                "no global ipv6 (probe_source_ip); v6 carrier skipped".into(),
+                                now,
+                            );
+                            return;
+                        }
+                        V6Gate::Pending(result) => Some(result),
+                    }
+                } else {
+                    None
+                };
+                let resolved = parsed
                     .host
                     .parse::<IpAddr>()
                     .ok()
-                    .filter(|ip| ResolveFamily::of_ip(*ip) == family);
-                let resolved =
-                    literal.or_else(|| self.dns.cached_family(&parsed.host, family, now));
-                match resolved {
-                    Some(ip) => {
-                        self.issue_udp_announce(i, ip, parsed.port, event, now);
-                        self.drain_udp(now).await;
-                    }
-                    None => {
-                        let dns = self.dns.clone();
-                        let result_tx = self.result_tx.clone();
-                        let host = parsed.host.clone();
-                        let port = parsed.port;
-                        let family_arg = family;
-                        let token = self.slots[i].token;
-                        let resolve_url = url.clone();
-                        tokio::spawn(async move {
-                            // Resolve through the shared service: a cache
-                            // hit (including the whole list just
-                            // backfilled by the other face) issues no
-                            // query; a miss -> a whole-list query +
-                            // whole-list backfill inside the service (the
-                            // actor has no write path) -> the per-family
-                            // projection.
-                            let result = dns.resolve_family(host.clone(), family_arg).await;
+                    .filter(|ip| ResolveFamily::of_ip(*ip) == family)
+                    .map(|ip| vec![ip])
+                    .or_else(|| self.dns.cached_family_list(&parsed.host, family, now))
+                    .filter(|_| gate.is_none());
+                if let Some(ips) = resolved {
+                    self.begin_udp_candidates(i, ips, parsed.port, now);
+                } else {
+                    let dns = self.dns.clone();
+                    let result_tx = self.result_tx.clone();
+                    let host = parsed.host.clone();
+                    let port = parsed.port;
+                    let resolve_url = url.clone();
+                    let task = tokio::spawn(async move {
+                        if let Some(gate) = gate
+                            && !await_v6_probe(gate).await
+                        {
                             let _ = result_tx
-                                .send(AnnounceOutcome::UdpAnnounceResolve {
-                                    token,
-                                    event,
-                                    url: resolve_url,
-                                    host,
-                                    port,
-                                    family: family_arg,
-                                    result,
-                                })
+                                .send(AnnounceOutcome::UdpUnavailable { token })
                                 .await;
-                        });
-                    }
+                            return;
+                        }
+                        let result = dns.resolve_family_list(host.clone(), family).await;
+                        let _ = result_tx
+                            .send(AnnounceOutcome::UdpAnnounceResolve {
+                                token,
+                                url: resolve_url,
+                                host,
+                                port,
+                                family,
+                                result,
+                            })
+                            .await;
+                    });
+                    self.slots[i].pending_task = Some(task);
                 }
             }
             super::http::Scheme::Http | super::http::Scheme::Https => {
@@ -943,7 +1098,7 @@ impl TrackerActor {
                 let http = self.http.clone();
                 let result_tx = self.result_tx.clone();
                 let token = self.slots[i].token;
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let result = http.announce_owned(&owned).await;
                     let _ = result_tx
                         .send(AnnounceOutcome::Http {
@@ -953,6 +1108,7 @@ impl TrackerActor {
                         })
                         .await;
                 });
+                self.slots[i].pending_task = Some(task);
             }
         }
     }
@@ -978,53 +1134,13 @@ impl TrackerActor {
         }
     }
 
-    /// Build and register the UDP announce request (remote already
-    /// resolved; literal IPs and domain resolution results share this
-    /// sink). v4/v6 carriers have equal standing (the BEP15 frame surface
-    /// is family-agnostic — the former v6 rejection path is removed); a
-    /// resolved family not matching the face's requested family = a
-    /// resolution-layer fault, settled as the retryable class "dns". If
-    /// the same UDP endpoint already has an announce in flight -> yield
-    /// this round (no duplicate announce to one tracker; retry next
-    /// tick).
-    fn issue_udp_announce(
-        &mut self,
-        i: usize,
-        ip: IpAddr,
-        port: u16,
-        event: TierEvent,
-        now: Instant,
-    ) {
-        let Some(family) = self.slot_family_or_fail(i, now) else {
-            return;
-        };
-        if ResolveFamily::of_ip(ip) != family {
-            self.finish_failure(
-                i,
-                "dns",
-                format!(
-                    "udp tracker host resolution returned {} address for requested {} face",
-                    ResolveFamily::of_ip(ip).as_str(),
-                    family.as_str()
-                ),
-                now,
-            );
-            return;
-        }
-        let addr = SocketAddr::new(ip, port);
-        if self
-            .slots
-            .iter()
-            .any(|s| s.updating && s.udp_addr == Some(addr))
-        {
-            let slot = &mut self.slots[i];
-            slot.updating = false;
-            slot.attempt_at = None;
-            slot.next_due = Some(now + TICK);
-            return;
-        }
-        // Request construction per DefaultBtAnnounce.cc.
-        let mut req = UdpRequest::announce(addr, self.cfg.info_hash, self.random_key());
+    fn udp_announce_request(&mut self, i: usize, event: TierEvent) -> UdpRequest {
+        let mut req = UdpRequest::announce(
+            SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0),
+            self.cfg.info_hash,
+            self.random_key(),
+        );
+        req.owner = self.slots[i].token;
         req.peer_id = self.cfg.peer_id;
         req.downloaded = self.view.session_downloaded();
         req.left = self.left();
@@ -1033,21 +1149,233 @@ impl TrackerActor {
             TierEvent::Started | TierEvent::StartedAfterCompletion => UdpEvent::Started,
             TierEvent::Stopped => UdpEvent::Stopped,
             TierEvent::Completed => UdpEvent::Completed,
-            TierEvent::Downloading | TierEvent::Seeding | TierEvent::Halted => UdpEvent::None,
+            _ => UdpEvent::None,
         };
         req.numwant = self.numwant() as i32;
         req.port = self.cfg.listen_port;
-        let slot = &mut self.slots[i];
-        slot.udp_addr = Some(addr);
-        self.udp.add_request(req);
+        req
     }
 
-    /// Register a same-endpoint UDP scrape (remote already resolved;
-    /// v4/v6 carriers have equal standing — family = the carrier's remote
-    /// family, the BEP15 scrape frame is family-agnostic).
-    fn add_udp_scrape(&mut self, ip: IpAddr, port: u16, hashes: Vec<[u8; 20]>) {
-        self.udp
-            .add_request(UdpRequest::scrape(SocketAddr::new(ip, port), hashes));
+    fn begin_udp_candidates(&mut self, i: usize, ips: Vec<IpAddr>, port: u16, now: Instant) {
+        let Some(family) = self.slots[i].udp_family else {
+            return;
+        };
+        if ips.is_empty() || ips.iter().any(|ip| ResolveFamily::of_ip(*ip) != family) {
+            self.finish_failure(
+                i,
+                "dns",
+                "no address in the requested tracker family".into(),
+                now,
+            );
+            return;
+        }
+        let preferred = self.slots[i].last_udp_addr;
+        let mut candidates = VecDeque::new();
+        for ip in ips {
+            let addr = SocketAddr::new(ip, port);
+            if !candidates.contains(&addr) {
+                candidates.push_back(addr);
+                if candidates.len() == UDP_ADDRESS_CANDIDATES {
+                    break;
+                }
+            }
+        }
+        if !candidates.is_empty() {
+            candidates.rotate_left(self.slots[i].udp_cursor % candidates.len());
+        }
+        if let Some(addr) = preferred
+            && let Some(index) = candidates.iter().position(|candidate| *candidate == addr)
+        {
+            candidates.remove(index);
+            candidates.push_front(addr);
+        }
+        if let Some(attempt) = &mut self.slots[i].udp_attempt {
+            attempt.candidates = candidates;
+            attempt.candidates_ready = true;
+        }
+        self.advance_udp_attempt(i, now);
+    }
+
+    fn udp_slot(&self, owner: u64) -> Option<usize> {
+        self.slots
+            .iter()
+            .position(|slot| slot.updating && slot.token == owner && slot.udp_attempt.is_some())
+    }
+
+    fn on_udp_connected(&mut self, req: &UdpRequest, now: Instant) {
+        let Some(i) = self.udp_slot(req.owner) else {
+            return;
+        };
+        let valid = self.slots[i].udp_attempt.as_ref().is_some_and(|a| {
+            a.winner.is_none() && now < a.deadline && a.probes.contains(&req.remote)
+        });
+        if !valid {
+            return;
+        }
+        self.udp.cancel_owner(req.owner);
+        let slot = &mut self.slots[i];
+        slot.udp_addr = Some(req.remote);
+        if let Some(attempt) = &mut slot.udp_attempt {
+            attempt.winner = Some(req.remote);
+            // A cancelled competing probe remains eligible if the winner's
+            // ANNOUNCE later times out; no parallel announce is left alive.
+            for addr in attempt.probes.drain(..) {
+                if addr != req.remote {
+                    attempt.candidates.push_back(addr);
+                }
+            }
+            let mut announce = attempt.request.clone();
+            announce.remote = req.remote;
+            self.udp.add_request(announce);
+        }
+    }
+
+    fn advance_udp_attempt(&mut self, i: usize, now: Instant) {
+        let token = self.slots[i].token;
+        let slot = &mut self.slots[i];
+        let Some(attempt) = slot.udp_attempt.as_mut() else {
+            return;
+        };
+        if now >= attempt.deadline {
+            self.finish_failure(
+                i,
+                "timeout",
+                "udp tracker operation deadline exceeded".into(),
+                now,
+            );
+            return;
+        }
+        if attempt.winner.is_some() {
+            return;
+        }
+        // Keep the normal retry budget when no further address is available.
+        // With more candidates, replace at most one exhausted probe per stagger.
+        // Queueing consumes the total deadline, but only a successful carrier
+        // send starts a probe's network timeout.
+        if now >= attempt.next_probe_at
+            && !attempt.candidates.is_empty()
+            && attempt.probes.len() == CONNECT_PROBES
+            && let Some(index) = attempt.probes.iter().position(|addr| {
+                self.udp
+                    .connect_sent_at(token, *addr)
+                    .is_some_and(|sent_at| {
+                        now.saturating_duration_since(sent_at) >= CONNECT_PROBE_TIMEOUT
+                    })
+            })
+        {
+            let addr = attempt.probes.remove(index);
+            self.udp.cancel_owner_at(token, addr);
+        }
+        if now >= attempt.next_probe_at
+            && attempt.probes.len() < CONNECT_PROBES
+            && let Some(addr) = attempt.candidates.pop_front()
+        {
+            attempt.probes.push(addr);
+            slot.udp_cursor = slot.udp_cursor.wrapping_add(1);
+            attempt.next_probe_at = now + CONNECT_STAGGER;
+            let probe = UdpRequest::connect(addr, token);
+            if self.udp.connected(addr, now) {
+                self.on_udp_connected(&probe, now);
+            } else {
+                self.udp.add_request(probe);
+            }
+        }
+        if self.slots[i].udp_attempt.as_ref().is_some_and(|a| {
+            a.candidates_ready
+                && a.winner.is_none()
+                && a.probes.is_empty()
+                && a.candidates.is_empty()
+        }) {
+            self.finish_failure(i, "timeout", "all udp tracker addresses failed".into(), now);
+        }
+    }
+
+    fn on_udp_failure(&mut self, req: UdpRequest, now: Instant) {
+        if req.action == UdpAction::Scrape {
+            self.finish_scrape(req.owner);
+            return;
+        }
+        let Some(i) = self.udp_slot(req.owner) else {
+            return;
+        };
+        if req.failure() == Some(UdpError::Tracker) {
+            self.finish_failure(
+                i,
+                "tracker-reason",
+                "udp tracker rejected request".into(),
+                now,
+            );
+            return;
+        }
+        if req.action == UdpAction::Announce {
+            if self.slots[i].udp_addr != Some(req.remote) {
+                return;
+            }
+            self.udp.cancel_owner(req.owner);
+            self.udp.invalidate_connection(req.remote);
+            self.slots[i].last_udp_addr = None;
+            if let Some(a) = &mut self.slots[i].udp_attempt {
+                a.winner = None;
+                a.next_probe_at = now;
+            }
+            self.slots[i].udp_addr = None;
+        } else if req.action == UdpAction::Connect {
+            if let Some(a) = &mut self.slots[i].udp_attempt {
+                if a.winner.is_some() {
+                    return;
+                }
+                a.probes.retain(|addr| *addr != req.remote);
+                a.next_probe_at = now;
+            }
+        }
+        self.advance_udp_attempt(i, now);
+    }
+
+    fn add_udp_scrape(&mut self, ip: IpAddr, port: u16, hashes: Vec<[u8; 20]>, now: Instant) {
+        let gate = if ip.is_ipv6() {
+            match self.v6_gate(now) {
+                V6Gate::Ready(true) => None,
+                V6Gate::Ready(false) => return,
+                V6Gate::Pending(result) => Some(result),
+            }
+        } else {
+            None
+        };
+        let Some(token) = self.reserve_scrape(now, true) else {
+            return;
+        };
+        if let Some(gate) = gate {
+            let result_tx = self.result_tx.clone();
+            let task = tokio::spawn(async move {
+                let result = if await_v6_probe(gate).await {
+                    Ok(vec![ip])
+                } else {
+                    Err("no global ipv6 (probe_source_ip)".into())
+                };
+                let _ = result_tx
+                    .send(AnnounceOutcome::UdpScrapeResolve {
+                        token,
+                        url: format!("udp://{}", SocketAddr::new(ip, port)),
+                        host: ip.to_string(),
+                        port,
+                        hashes,
+                        family: ResolveFamily::V6,
+                        result,
+                    })
+                    .await;
+            });
+            if let Some(attempt) = self.scrapes.get_mut(&token) {
+                attempt.task = Some(task);
+            }
+        } else {
+            self.queue_udp_scrape(token, ip, port, hashes);
+        }
+    }
+
+    fn queue_udp_scrape(&mut self, token: u64, ip: IpAddr, port: u16, hashes: Vec<[u8; 20]>) {
+        let mut request = UdpRequest::scrape(SocketAddr::new(ip, port), hashes);
+        request.owner = token;
+        self.udp.add_request(request);
     }
 
     /// Announce failure settle (+ TrackerWatcherCommand.cc). The result
@@ -1066,6 +1394,7 @@ impl TrackerActor {
     /// a v6-only tracker's failures would be invisible and the halt
     /// sequence could not converge.
     fn finish_failure(&mut self, i: usize, class: &'static str, reason: String, now: Instant) {
+        self.cancel_slot(i);
         let url = self.slots[i].url.clone();
         let face = self.slots[i]
             .udp_family
@@ -1132,6 +1461,9 @@ impl TrackerActor {
     /// override semantics (aria2 userDefinedInterval) are kept
     /// verbatim.
     fn finish_success(&mut self, i: usize, now: Instant) {
+        let endpoint = self.slots[i].udp_addr;
+        self.slots[i].last_udp_addr = endpoint;
+        self.cancel_slot(i);
         let url = self.slots[i].url.clone();
         let period = if self.user_interval > 0 {
             self.user_interval
@@ -1155,7 +1487,11 @@ impl TrackerActor {
         if self.cfg.private {
             self.private_active = Some(i);
         }
-        self.issue_scrape(url, family, now);
+        if let Some(addr) = endpoint {
+            self.add_udp_scrape(addr.ip(), addr.port(), self.cfg.scrape_hashes.clone(), now);
+        } else {
+            self.issue_scrape(url, family, now);
+        }
     }
 
     /// Batched same-host scrape (HTTP=BEP48 / UDP=BEP15). Under parallel
@@ -1176,15 +1512,10 @@ impl TrackerActor {
         };
         match parsed.scheme {
             super::http::Scheme::Udp => {
-                // Literal IP: family = the literal family (a v6 literal
-                // passes the gate too — when announce just succeeded on
-                // that carrier the cache is necessarily open; the Scrape
-                // command entry refreshes it).
+                // Literal IPs use the same asynchronous availability gate;
+                // a fresh successful v6 announce normally hits its cache.
                 if let Ok(ip) = parsed.host.parse::<IpAddr>() {
-                    if ResolveFamily::of_ip(ip) == ResolveFamily::V6 && !self.v6_gate_cached() {
-                        return;
-                    }
-                    self.add_udp_scrape(ip, parsed.port, hashes);
+                    self.add_udp_scrape(ip, parsed.port, hashes, now);
                     return;
                 }
                 // None (the Scrape command entry, outside the HTTP
@@ -1196,23 +1527,41 @@ impl TrackerActor {
                     None => requested.extend([ResolveFamily::V4, ResolveFamily::V6]),
                 }
                 for f in requested {
-                    if f == ResolveFamily::V6 && !self.v6_gate_cached() {
+                    let gate = if f == ResolveFamily::V6 {
+                        match self.v6_gate(now) {
+                            V6Gate::Ready(true) => None,
+                            V6Gate::Ready(false) => continue,
+                            V6Gate::Pending(result) => Some(result),
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(ip) = self.dns.cached_family(&parsed.host, f, now)
+                        && gate.is_none()
+                    {
+                        self.add_udp_scrape(ip, parsed.port, hashes.clone(), now);
                         continue;
                     }
-                    if let Some(ip) = self.dns.cached_family(&parsed.host, f, now) {
-                        self.add_udp_scrape(ip, parsed.port, hashes.clone());
+                    let Some(token) = self.reserve_scrape(now, true) else {
                         continue;
-                    }
+                    };
                     let dns = self.dns.clone();
                     let result_tx = self.result_tx.clone();
                     let host = parsed.host.clone();
                     let port = parsed.port;
                     let scrape_url = url.clone();
                     let hashes = hashes.clone();
-                    tokio::spawn(async move {
-                        let result = dns.resolve_family(host.clone(), f).await;
+                    let task = tokio::spawn(async move {
+                        let result = if let Some(gate) = gate
+                            && !await_v6_probe(gate).await
+                        {
+                            Err("no global ipv6 (probe_source_ip)".into())
+                        } else {
+                            dns.resolve_family_list(host.clone(), f).await
+                        };
                         let _ = result_tx
                             .send(AnnounceOutcome::UdpScrapeResolve {
+                                token,
                                 url: scrape_url,
                                 host,
                                 port,
@@ -1222,22 +1571,33 @@ impl TrackerActor {
                             })
                             .await;
                     });
+                    if let Some(attempt) = self.scrapes.get_mut(&token) {
+                        attempt.task = Some(task);
+                    }
                 }
             }
             super::http::Scheme::Http | super::http::Scheme::Https => {
                 let Ok(scrape_url) = build_scrape_url(&url, &hashes) else {
                     return;
                 };
+                let Some(token) = self.reserve_scrape(now, false) else {
+                    return;
+                };
                 let http = self.http.clone();
                 let result_tx = self.result_tx.clone();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let result = async {
                         let body = http.get_body(&scrape_url).await?;
                         parse_scrape_response(&body)
                     }
                     .await;
-                    let _ = result_tx.send(AnnounceOutcome::ScrapeHttp { result }).await;
+                    let _ = result_tx
+                        .send(AnnounceOutcome::ScrapeHttp { token, result })
+                        .await;
                 });
+                if let Some(attempt) = self.scrapes.get_mut(&token) {
+                    attempt.task = Some(task);
+                }
             }
         }
     }
@@ -1311,31 +1671,155 @@ impl TrackerActor {
         self.finish_success(i, now);
     }
 
-    /// The in-flight UDP announce slot (replies/timeouts route by
-    /// remote).
-    fn updating_udp_slot(&self, addr: SocketAddr) -> Option<usize> {
-        self.slots
+    fn close_udp(&mut self, now: Instant) {
+        self.udp_closed = true;
+        if let Some(flight) = self.v6_probe_flight.take() {
+            flight.task.abort();
+        }
+        for i in 0..self.slots.len() {
+            if self.slots[i].updating && self.slots[i].udp_family.is_some() {
+                self.finish_failure(i, "network", "udp tracker transport closed".into(), now);
+            }
+        }
+        let owners: Vec<_> = self
+            .scrapes
             .iter()
-            .position(|s| s.updating && s.udp_addr == Some(addr))
+            .filter(|(_, a)| a.udp)
+            .map(|(owner, _)| *owner)
+            .collect();
+        for owner in owners {
+            self.finish_scrape(owner);
+        }
+        self.udp.clear();
     }
 
-    /// UDP maintenance: emit frames + retransmit/timeout checks (the
-    /// [`super::udp`] port layer).
-    async fn drain_udp(&mut self, now: Instant) {
-        while let Some((addr, frame)) = self.udp.create_request(&mut self.rng, now) {
-            if self.transport.outbound.send((addr, frame)).await.is_err() {
-                break;
+    /// Wake for actionable candidate work, independently of the idle tick.
+    /// A full carrier can leave both probes unsent: their stale stagger time
+    /// must not become a continuously-ready wakeup or a network timeout.
+    fn next_udp_wake(&self) -> Option<Instant> {
+        let mut wake = self.scrapes.values().map(|attempt| attempt.deadline).min();
+        for slot in &self.slots {
+            let Some(attempt) = &slot.udp_attempt else {
+                continue;
+            };
+            wake = Some(wake.map_or(attempt.deadline, |at| at.min(attempt.deadline)));
+            if attempt.winner.is_some() || attempt.candidates.is_empty() {
+                continue;
             }
-            self.udp.request_sent(now);
+            let probe_at = if attempt.probes.len() < CONNECT_PROBES {
+                Some(attempt.next_probe_at)
+            } else {
+                attempt
+                    .probes
+                    .iter()
+                    .filter_map(|addr| self.udp.connect_sent_at(slot.token, *addr))
+                    .map(|sent_at| (sent_at + CONNECT_PROBE_TIMEOUT).max(attempt.next_probe_at))
+                    .min()
+            };
+            if let Some(probe_at) = probe_at {
+                wake = Some(wake.map_or(probe_at, |at| at.min(probe_at)));
+            }
         }
-        for req in self.udp.handle_timeout(now) {
-            if req.action == UdpAction::Announce
-                && let Some(i) = self.updating_udp_slot(req.remote)
-            {
-                // A UDP timeout = that tracker's announce failed (the
-                // TrackerWatcherCommand.cc success()=false path).
-                self.finish_failure(i, "timeout", "udp announce timeout".into(), now);
+        wake
+    }
+
+    /// Maintain deadlines even while the carrier is backpressured.
+    async fn drain_udp(&mut self, now: Instant) {
+        for i in 0..self.slots.len() {
+            if self.slots[i].updating {
+                self.advance_udp_attempt(i, now);
             }
+        }
+        let expired: Vec<_> = self
+            .scrapes
+            .iter()
+            .filter(|(_, a)| now >= a.deadline)
+            .map(|(token, _)| *token)
+            .collect();
+        for token in expired {
+            self.finish_scrape(token);
+        }
+        for request in self.udp.handle_timeout(now) {
+            self.on_udp_failure(request, now);
+        }
+        while let Some((addr, frame)) = self.udp.create_request(&mut self.rng, now) {
+            match self.transport.outbound.try_send((addr, frame)) {
+                Ok(()) => self.udp.request_sent(now),
+                Err(mpsc::error::TrySendError::Full(_)) => break,
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.close_udp(now);
+                    break;
+                }
+            }
+        }
+        for request in self.udp.take_failures() {
+            self.on_udp_failure(request, now);
+        }
+    }
+
+    fn on_udp_packet(&mut self, from: SocketAddr, data: &[u8], now: Instant) {
+        let expired: Vec<_> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| {
+                slot.updating && slot.udp_attempt.as_ref().is_some_and(|a| now >= a.deadline)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for index in expired {
+            self.finish_failure(
+                index,
+                "timeout",
+                "udp tracker operation deadline exceeded".into(),
+                now,
+            );
+        }
+        match self.udp.receive_reply(from, data, now) {
+            Ok(Some(UdpReply::Connected(req))) => self.on_udp_connected(&req, now),
+            Ok(Some(UdpReply::Announce(req))) => {
+                if let Some(i) = self.udp_slot(req.owner)
+                    && self.slots[i].udp_addr == Some(req.remote)
+                {
+                    self.on_udp_announce_reply(i, &req, now);
+                }
+            }
+            Ok(Some(UdpReply::Scrape(req))) => {
+                let within_budget = self
+                    .scrapes
+                    .get(&req.owner)
+                    .is_some_and(|a| now < a.deadline);
+                if self.finish_scrape(req.owner)
+                    && within_budget
+                    && let Some(entries) = req.scrape_reply()
+                {
+                    for e in entries {
+                        self.record_scrape(
+                            e.info_hash,
+                            ScrapeStats {
+                                complete: e.seeders.max(0) as u64,
+                                downloaded: e.completed.max(0) as u64,
+                                incomplete: e.leechers.max(0) as u64,
+                            },
+                            now,
+                        );
+                    }
+                }
+            }
+            Ok(Some(UdpReply::Error { request, message })) => {
+                if request.action == UdpAction::Scrape {
+                    self.finish_scrape(request.owner);
+                } else if let Some(i) = self.udp_slot(request.owner) {
+                    self.finish_failure(
+                        i,
+                        "tracker-reason",
+                        format!("udp tracker error: {message}"),
+                        now,
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => debug!(target: "taiji::bt::tracker", %error, "bad udp tracker packet"),
         }
     }
 
@@ -1349,155 +1833,155 @@ impl TrackerActor {
         });
     }
 
+    fn on_outcome(&mut self, outcome: AnnounceOutcome, now: Instant) {
+        match outcome {
+            AnnounceOutcome::V6Probe {
+                token,
+                available,
+                completed_at,
+            } => {
+                if self
+                    .v6_probe_flight
+                    .as_ref()
+                    .is_some_and(|flight| flight.token == token)
+                {
+                    self.v6_probe_flight = None;
+                    self.v6_gate_cache = Some((available, completed_at));
+                }
+            }
+            AnnounceOutcome::UdpUnavailable { token } => {
+                if let Some(i) = self.udp_slot(token) {
+                    self.finish_failure(
+                        i,
+                        "unavailable",
+                        "no global ipv6 (probe_source_ip); v6 carrier skipped".into(),
+                        now,
+                    );
+                }
+            }
+            AnnounceOutcome::Http { token, url, result } => {
+                match self
+                    .slots
+                    .iter()
+                    .position(|s| s.token == token && s.updating)
+                {
+                    Some(i) => match result {
+                        Ok(resp) => self.on_http_response(i, &resp, now),
+                        Err(e) => {
+                            let class = e.class();
+                            self.finish_failure(i, class, e.reason(), now)
+                        }
+                    },
+                    None => debug!(
+                        target: "taiji::bt::tracker", %url, token,
+                        "stale announce result dropped (no matching in-flight slot)"
+                    ),
+                }
+            }
+            AnnounceOutcome::ScrapeHttp { token, result } => {
+                let within_budget = self.scrapes.get(&token).is_some_and(|a| now < a.deadline);
+                if self.finish_scrape(token) && within_budget {
+                    match result {
+                        Ok(entries) => {
+                            for (h, stats) in entries {
+                                self.record_scrape(h, stats, now);
+                            }
+                        }
+                        Err(e) => {
+                            debug!(target: "taiji::bt::tracker", %e, "scrape failed");
+                        }
+                    }
+                }
+            }
+            // UDP domain pre-resolution returning (per family): the
+            // announce side lands by slot token (the same path as
+            // HTTP; a token miss = a stale post-rebuild result,
+            // dropped not mislabeled); Ok issues the announce
+            // directly (the cache was already backfilled whole-list
+            // inside the shared service — the actor has no write
+            // path), Err = the retryable class "dns" (the network
+            // class of aria2 NameResolveCommand.cc), not invalid-url
+            // (permanent); backoff goes through finish_failure,
+            // freeing the slot immediately (an attached v6 face is
+            // silent — see finish_failure).
+            AnnounceOutcome::UdpAnnounceResolve {
+                token,
+                url,
+                host,
+                port,
+                family,
+                result,
+            } => match self
+                .slots
+                .iter()
+                .position(|s| s.token == token && s.updating)
+            {
+                Some(i) => match result {
+                    Ok(ips) => {
+                        self.slots[i].pending_task = None;
+                        self.begin_udp_candidates(i, ips, port, now);
+                    }
+                    Err(e) => {
+                        self.finish_failure(
+                            i,
+                            "dns",
+                            format!("udp tracker host resolution failed: {e}"),
+                            now,
+                        );
+                    }
+                },
+                None => debug!(
+                    target: "taiji::bt::tracker", %url, %host, token, family = family.as_str(),
+                    "stale udp resolve result dropped (no matching in-flight slot)"
+                ),
+            },
+            // Scrapes own a separate token, deadline and cancellation handle.
+            // A stale resolver completion cannot create a new transaction.
+            AnnounceOutcome::UdpScrapeResolve {
+                token,
+                url,
+                host,
+                port,
+                hashes,
+                family,
+                result,
+            } => {
+                if self.scrapes.contains_key(&token) {
+                    match result {
+                        Ok(ips) => {
+                            if let Some(attempt) = self.scrapes.get_mut(&token) {
+                                attempt.task = None;
+                            }
+                            if let Some(ip) = ips
+                                .into_iter()
+                                .find(|ip| ResolveFamily::of_ip(*ip) == family)
+                            {
+                                self.queue_udp_scrape(token, ip, port, hashes);
+                            } else {
+                                self.finish_scrape(token);
+                            }
+                        }
+                        Err(e) => {
+                            self.finish_scrape(token);
+                            debug!(target: "taiji::bt::tracker", %url, %host, family = family.as_str(), class = "dns", reason = %e, "udp scrape host resolution failed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// One step of the driver (called on each tick; tests may call it
     /// directly). Order: results settle (failure fast-forward — results
     /// are processed before the wave issues, so DNS/invalid-url failures
     /// free their slot immediately) -> UDP maintenance -> noMoreAnnounce
     /// -> the parallel wave issues (all due slots drain within the cap).
     pub async fn tick(&mut self, now: Instant) {
-        // UDP inbound (replies route to in-flight slots by remote).
         while let Ok((from, data)) = self.transport.inbound.try_recv() {
-            match self.udp.receive_reply(from, &data, now) {
-                Ok(Some(UdpReply::Announce(req))) => {
-                    if let Some(i) = self.updating_udp_slot(req.remote) {
-                        self.on_udp_announce_reply(i, &req, now);
-                    }
-                }
-                Ok(Some(UdpReply::Scrape(req))) => {
-                    if let Some(entries) = req.scrape_reply() {
-                        for e in entries {
-                            self.record_scrape(
-                                e.info_hash,
-                                ScrapeStats {
-                                    complete: e.seeders.max(0) as u64,
-                                    downloaded: e.completed.max(0) as u64,
-                                    incomplete: e.leechers.max(0) as u64,
-                                },
-                                now,
-                            );
-                        }
-                    }
-                }
-                Ok(Some(UdpReply::Error { message })) => {
-                    if let Some(i) = self.updating_udp_slot(from) {
-                        self.finish_failure(
-                            i,
-                            "tracker-reason",
-                            format!("udp tracker error: {message}"),
-                            now,
-                        );
-                    }
-                }
-                Ok(Some(UdpReply::Connected)) | Ok(None) => {}
-                Err(e) => {
-                    debug!(target: "taiji::bt::tracker", %e, "bad udp tracker packet");
-                }
-            }
+            self.on_udp_packet(from, &data, now);
         }
-        // HTTP announce/scrape results. Announces land by the **slot
-        // identity token taken at issue time** (URL first-matching is
-        // ambiguous under parallel waves for duplicate-URL slots — both
-        // results would land on the first slot, the second would stick in
-        // updating forever, in_flight would leak, and the wave could be
-        // wedged by a repeated tr=; the UDP side already routes by remote
-        // addr, HTTP now aligns). A token miss = a stale result from a
-        // table rebuild, dropped rather than mislabeling a new-table
-        // slot.
         while let Ok(outcome) = self.result_rx.try_recv() {
-            match outcome {
-                AnnounceOutcome::Http { token, url, result } => {
-                    match self
-                        .slots
-                        .iter()
-                        .position(|s| s.token == token && s.updating)
-                    {
-                        Some(i) => match result {
-                            Ok(resp) => self.on_http_response(i, &resp, now),
-                            Err(e) => {
-                                let class = e.class();
-                                self.finish_failure(i, class, e.reason(), now)
-                            }
-                        },
-                        None => debug!(
-                            target: "taiji::bt::tracker", %url, token,
-                            "stale announce result dropped (no matching in-flight slot)"
-                        ),
-                    }
-                }
-                AnnounceOutcome::ScrapeHttp { result } => match result {
-                    Ok(entries) => {
-                        for (h, stats) in entries {
-                            self.record_scrape(h, stats, now);
-                        }
-                    }
-                    Err(e) => {
-                        debug!(target: "taiji::bt::tracker", %e, "scrape failed");
-                    }
-                },
-                // UDP domain pre-resolution returning (per family): the
-                // announce side lands by slot token (the same path as
-                // HTTP; a token miss = a stale post-rebuild result,
-                // dropped not mislabeled); Ok issues the announce
-                // directly (the cache was already backfilled whole-list
-                // inside the shared service — the actor has no write
-                // path), Err = the retryable class "dns" (the network
-                // class of aria2 NameResolveCommand.cc), not invalid-url
-                // (permanent); backoff goes through finish_failure,
-                // freeing the slot immediately (an attached v6 face is
-                // silent — see finish_failure).
-                AnnounceOutcome::UdpAnnounceResolve {
-                    token,
-                    event,
-                    url,
-                    host,
-                    port,
-                    family,
-                    result,
-                } => match self
-                    .slots
-                    .iter()
-                    .position(|s| s.token == token && s.updating)
-                {
-                    Some(i) => match result {
-                        Ok(ip) => {
-                            self.issue_udp_announce(i, ip, port, event, now);
-                            self.drain_udp(now).await;
-                        }
-                        Err(e) => {
-                            self.finish_failure(
-                                i,
-                                "dns",
-                                format!("udp tracker host resolution failed: {e}"),
-                                now,
-                            );
-                        }
-                    },
-                    None => debug!(
-                        target: "taiji::bt::tracker", %url, %host, token, family = family.as_str(),
-                        "stale udp resolve result dropped (no matching in-flight slot)"
-                    ),
-                },
-                // Scrape side: no slot ownership; Ok issues the scrape
-                // directly (cache backfill happens inside the shared
-                // service), Err only debug logs.
-                AnnounceOutcome::UdpScrapeResolve {
-                    url,
-                    host,
-                    port,
-                    hashes,
-                    family,
-                    result,
-                } => match result {
-                    Ok(ip) => {
-                        self.add_udp_scrape(ip, port, hashes);
-                    }
-                    Err(e) => debug!(
-                        target: "taiji::bt::tracker", %url, %host,
-                        family = family.as_str(), class = "dns", reason = %e,
-                        "udp scrape host resolution failed"
-                    ),
-                },
-            }
+            self.on_outcome(outcome, now);
         }
         // UDP maintenance (resend/timeout).
         self.drain_udp(now).await;
@@ -1536,6 +2020,9 @@ impl TrackerActor {
             };
             self.issue_announce(i, now).await;
         }
+        // Flush this wave immediately, including literal/cache-hit requests
+        // created after the first maintenance pass.
+        self.drain_udp(now).await;
     }
 
     /// Read-only snapshot of the scrape cache (the data source for the
@@ -1563,7 +2050,8 @@ impl TrackerActor {
                 if self.cfg.options.local_ipv6 != address {
                     let mut options = self.cfg.options;
                     options.local_ipv6 = address;
-                    if let Ok(http) = HttpAnnounce::new(&options) {
+                    if let Ok(http) = HttpAnnounce::with_dns(&options, self.dns.clone()) {
+                        self.clear_operations();
                         self.http = http;
                         self.cfg.options = options;
                         self.private_active = None;
@@ -1575,6 +2063,7 @@ impl TrackerActor {
             }
             TrackerCommand::SetListenPort { port } => {
                 if port != 0 && self.cfg.listen_port != port {
+                    self.clear_operations();
                     self.cfg.listen_port = port;
                     self.private_active = None;
                     let (tiers, slots) = build_tables(&self.cfg.tiers, &mut self.token_seq);
@@ -1583,6 +2072,7 @@ impl TrackerActor {
                 }
             }
             TrackerCommand::SetTrackers { tiers, reply } => {
+                self.clear_operations();
                 self.cfg.tiers = tiers;
                 // Rebuild the tier event table + per-tracker slot table
                 // (all never-attempted -> the next tick announces per the
@@ -1606,10 +2096,24 @@ impl TrackerActor {
             }
             TrackerCommand::Scrape { reply } => {
                 if let Some(url) = self.last_ok_url.clone() {
-                    // Refresh the UDP v6 face gate first (the
-                    // synchronous read feeds issue_scrape).
-                    self.v6_gate(Instant::now()).await;
-                    self.issue_scrape(url, None, Instant::now());
+                    let endpoints: Vec<_> = self
+                        .slots
+                        .iter()
+                        .filter(|slot| slot.url == url)
+                        .filter_map(|slot| slot.last_udp_addr)
+                        .collect();
+                    if endpoints.is_empty() {
+                        self.issue_scrape(url, None, Instant::now());
+                    } else {
+                        for endpoint in endpoints {
+                            self.add_udp_scrape(
+                                endpoint.ip(),
+                                endpoint.port(),
+                                self.cfg.scrape_hashes.clone(),
+                                Instant::now(),
+                            );
+                        }
+                    }
                 }
                 let _ = reply.send(Ok(()));
             }
@@ -1617,20 +2121,40 @@ impl TrackerActor {
         true
     }
 
-    /// Main loop: exits when all command handles drop (the interval tick
-    /// drives the periodic semantics).
+    /// Keep the idle maintenance interval coarse. Active candidate probes and
+    /// deadlines have their own wakeup; commands and completions flush work
+    /// immediately. Dropping all command handles cancels owned operations.
     pub async fn run(mut self) {
         let mut tick = tokio::time::interval(TICK);
         loop {
+            let wake_at = self.next_udp_wake();
+            let wake = async move {
+                match wake_at {
+                    Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 cmd = self.cmd_rx.recv() => {
-                    let Some(cmd) = cmd else { return; };
+                    let Some(cmd) = cmd else { self.clear_operations(); return; };
                     if !self.handle_command(cmd, Instant::now()).await {
                         return;
                     }
+                    self.tick(Instant::now()).await;
+                }
+                _ = wake => {
+                    self.tick(Instant::now()).await;
                 }
                 _ = tick.tick() => {
                     self.tick(Instant::now()).await;
+                }
+                packet = self.transport.inbound.recv(), if !self.udp_closed => {
+                    if let Some((from, data)) = packet { self.on_udp_packet(from, &data, Instant::now()); }
+                    else { self.close_udp(Instant::now()); }
+                    self.tick(Instant::now()).await;
+                }
+                outcome = self.result_rx.recv() => {
+                    if let Some(outcome) = outcome { self.on_outcome(outcome, Instant::now()); self.tick(Instant::now()).await; }
                 }
             }
         }
@@ -1647,6 +2171,20 @@ pub fn spawn_tracker_actor(
 ) -> Result<mpsc::Sender<TrackerCommand>, TrackerError> {
     let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
     let actor = TrackerActor::new(cfg, view, cmd_rx, event_tx, transport)?;
+    tokio::spawn(actor.run());
+    Ok(cmd_tx)
+}
+
+/// Spawn with the same DNS service used by metadata bootstrap and transports.
+pub fn spawn_tracker_actor_with_dns(
+    cfg: TrackerActorConfig,
+    view: Arc<dyn SwarmView>,
+    event_tx: mpsc::Sender<TrackerActorEvent>,
+    transport: UdpTransport,
+    dns: Arc<SharedDns>,
+) -> Result<mpsc::Sender<TrackerCommand>, TrackerError> {
+    let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+    let actor = TrackerActor::new(cfg, view, cmd_rx, event_tx, transport)?.with_dns(dns)?;
     tokio::spawn(actor.run());
     Ok(cmd_tx)
 }
@@ -4358,5 +4896,969 @@ mod tests {
             ),
             "a single-face slot's failure is reported as usual (the halt sequence can converge)"
         );
+    }
+    struct AddressListResolver(Vec<IpAddr>);
+
+    impl HostResolver for AddressListResolver {
+        fn resolve(&self, _host: String) -> ResolverFuture {
+            let result = self
+                .0
+                .first()
+                .copied()
+                .ok_or_else(|| "empty test DNS".to_string());
+            Box::pin(std::future::ready(result))
+        }
+
+        fn resolve_list(&self, _host: String) -> super::super::dns::ListResolverFuture {
+            Box::pin(std::future::ready(Ok(self.0.clone())))
+        }
+    }
+
+    fn udp_response(frame: &[u8], action: UdpAction, body: &[u8]) -> Vec<u8> {
+        let mut reply = (action as i32).to_be_bytes().to_vec();
+        reply.extend_from_slice(&frame[12..16]);
+        reply.extend_from_slice(body);
+        reply
+    }
+
+    async fn address_actor(
+        ips: &[&str],
+        timeout: Duration,
+    ) -> (
+        TrackerActor,
+        mpsc::Receiver<(SocketAddr, Vec<u8>)>,
+        mpsc::Sender<(SocketAddr, Vec<u8>)>,
+    ) {
+        let dns = Arc::new(SharedDns::with_resolver(Arc::new(AddressListResolver(
+            ips.iter()
+                .map(|ip| ip.parse().unwrap_or_else(|e| panic!("test IP: {e:?}")))
+                .collect(),
+        ))));
+        dns.resolve_family_list("race.example".into(), ResolveFamily::V4)
+            .await
+            .unwrap_or_else(|e| panic!("warm DNS: {e:?}"));
+        let (_cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (event_tx, _events) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (transport, out, input) = mk_transport();
+        let mut cfg = config(vec![(0, "udp://race.example:1337/announce".into())]);
+        cfg.options.bt_tracker_timeout = timeout;
+        let actor = TrackerActor::new(cfg, Arc::new(FixedView), cmd_rx, event_tx, transport)
+            .unwrap_or_else(|e| panic!("actor: {e:?}"))
+            .with_dns(dns)
+            .unwrap_or_else(|e| panic!("DNS injection: {e:?}"))
+            .with_v6_probe_override(Some(false));
+        (actor, out, input)
+    }
+
+    #[tokio::test]
+    async fn udp_address_race_uses_one_announce_and_scrapes_winner() {
+        let (mut actor, mut out, input) = address_actor(
+            &["127.0.0.2", "127.0.0.1", "127.0.0.3"],
+            Duration::from_secs(30),
+        )
+        .await;
+        let now = Instant::now();
+        actor.tick(now).await;
+        let first = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("first CONNECT: {e:?}"));
+        assert_eq!(first.0.ip().to_string(), "127.0.0.2");
+        actor.tick(now + Duration::from_millis(249)).await;
+        assert!(out.try_recv().is_err(), "probes are staggered");
+        let win_at = now + Duration::from_millis(250);
+        actor.tick(win_at).await;
+        let second = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("second CONNECT without waiting 15s: {e:?}"));
+        assert_eq!(second.0.ip().to_string(), "127.0.0.1");
+        input
+            .send((
+                second.0,
+                udp_response(&second.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("reply: {e:?}"));
+        actor.tick(win_at).await;
+        let announce = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("winner ANNOUNCE: {e:?}"));
+        assert_eq!(announce.0, second.0);
+        assert_eq!(&announce.1[8..12], &1i32.to_be_bytes());
+        // Late successful CONNECT from the cancelled loser must not announce.
+        input
+            .send((
+                first.0,
+                udp_response(&first.1, UdpAction::Connect, &8u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("late reply: {e:?}"));
+        actor.tick(win_at).await;
+        assert!(out.try_recv().is_err());
+        // Zero peers is still a successful tracker result, never IP failure.
+        input
+            .send((
+                second.0,
+                udp_response(&announce.1, UdpAction::Announce, &[0; 12]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("announce reply: {e:?}"));
+        actor.tick(win_at).await;
+        let scrape = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("automatic SCRAPE: {e:?}"));
+        assert_eq!(scrape.0, second.0);
+        assert_eq!(&scrape.1[8..12], &2i32.to_be_bytes());
+        assert_eq!(actor.in_flight(), 0);
+        assert_eq!(actor.slots[0].last_udp_addr, Some(second.0));
+        input
+            .send((
+                second.0,
+                udp_response(&scrape.1, UdpAction::Scrape, &[0; 12]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("scrape reply: {e:?}"));
+        actor.tick(win_at).await;
+        assert!(actor.scrapes.is_empty());
+        assert!(
+            out.try_recv().is_err(),
+            "one logical operation sends one ANNOUNCE"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_announce_timeout_rotates_with_original_deadline() {
+        let (mut actor, mut out, input) = address_actor(
+            &["127.0.0.1", "127.0.0.2", "127.0.0.3"],
+            Duration::from_secs(20),
+        )
+        .await;
+        let now = Instant::now();
+        actor.tick(now).await;
+        let first = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("first CONNECT: {e:?}"));
+        input
+            .send((
+                first.0,
+                udp_response(&first.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("reply: {e:?}"));
+        actor.tick(now).await;
+        let old_announce = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("first ANNOUNCE: {e:?}"));
+        actor.tick(now + Duration::from_secs(5)).await;
+        let resend = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("ANNOUNCE retransmit: {e:?}"));
+        assert_eq!(old_announce, resend, "same transaction while it is live");
+        actor.tick(now + Duration::from_secs(15)).await;
+        let next = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("next address CONNECT: {e:?}"));
+        assert_ne!(next.0, first.0);
+        assert_eq!(&next.1[8..12], &0i32.to_be_bytes());
+        // A late response from the abandoned endpoint cannot finish the slot.
+        input
+            .send((
+                first.0,
+                udp_response(&old_announce.1, UdpAction::Announce, &[0; 12]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("late announce: {e:?}"));
+        actor.tick(now + Duration::from_secs(15)).await;
+        assert_eq!(actor.in_flight(), 1);
+        input
+            .send((
+                next.0,
+                udp_response(&next.1, UdpAction::Connect, &10u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("second connect reply: {e:?}"));
+        actor.tick(now + Duration::from_secs(15)).await;
+        let next_announce = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("second ANNOUNCE: {e:?}"));
+        assert_eq!(next_announce.0, next.0);
+        actor.tick(now + Duration::from_secs(20)).await;
+        assert_eq!(
+            actor.in_flight(),
+            0,
+            "rotating IP must not renew the original deadline"
+        );
+        assert!(actor.udp.is_empty());
+        assert_eq!(actor.slots[0].fails, 1);
+    }
+
+    #[tokio::test]
+    async fn udp_twelve_blackholes_release_cap_for_thirteenth_tracker() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (event_tx, _events) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (transport, mut out, input) = mk_transport();
+        let tiers = (1..=13)
+            .map(|port| (0, format!("udp://127.0.0.1:{}/announce", 10000 + port)))
+            .collect();
+        let mut actor = TrackerActor::new(
+            config(tiers),
+            Arc::new(FixedView),
+            cmd_rx,
+            event_tx,
+            transport,
+        )
+        .unwrap_or_else(|e| panic!("actor: {e:?}"));
+        let now = Instant::now();
+        actor.tick(now).await;
+        let first: Vec<_> = std::iter::from_fn(|| out.try_recv().ok()).collect();
+        assert_eq!(first.len(), ANNOUNCE_MAX_IN_FLIGHT);
+        assert_eq!(actor.in_flight(), 12);
+        actor.tick(now + Duration::from_secs(5)).await;
+        assert_eq!(std::iter::from_fn(|| out.try_recv().ok()).count(), 12);
+        actor.tick(now + Duration::from_secs(15)).await;
+        let healthy = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("thirteenth CONNECT after failed wave: {e:?}"));
+        assert_eq!(healthy.0.port(), 10013);
+        assert!(
+            actor.slots[..12]
+                .iter()
+                .all(|slot| !slot.updating && slot.fails == 1)
+        );
+        assert_eq!(actor.in_flight(), 1);
+        input
+            .send((
+                healthy.0,
+                udp_response(&healthy.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("healthy CONNECT reply: {e:?}"));
+        actor.tick(now + Duration::from_secs(15)).await;
+        let announce = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("healthy ANNOUNCE: {e:?}"));
+        input
+            .send((
+                healthy.0,
+                udp_response(&announce.1, UdpAction::Announce, &[0; 12]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("healthy ANNOUNCE reply: {e:?}"));
+        actor.tick(now + Duration::from_secs(15)).await;
+        assert_eq!(actor.in_flight(), 0);
+        assert_eq!(actor.slots[12].fails, 0);
+        assert_eq!(actor.slots[12].last_udp_addr, Some(healthy.0));
+    }
+
+    #[tokio::test]
+    async fn udp_reconfiguration_rejects_old_same_remote_transaction() {
+        let (mut actor, mut out, input) =
+            address_actor(&["127.0.0.1"], Duration::from_secs(30)).await;
+        let now = Instant::now();
+        actor.tick(now).await;
+        let old = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("old CONNECT: {e:?}"));
+        let old_owner = actor.slots[0].token;
+        actor
+            .handle_command(TrackerCommand::SetListenPort { port: 6999 }, now)
+            .await;
+        actor.tick(now).await;
+        let new = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("new CONNECT: {e:?}"));
+        assert_ne!(actor.slots[0].token, old_owner);
+        assert_ne!(&old.1[12..16], &new.1[12..16]);
+        input
+            .send((
+                old.0,
+                udp_response(&old.1, UdpAction::Connect, &8u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("old reply: {e:?}"));
+        actor.tick(now).await;
+        assert!(
+            out.try_recv().is_err(),
+            "old transaction cannot use the new slot"
+        );
+        input
+            .send((
+                new.0,
+                udp_response(&new.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("new reply: {e:?}"));
+        actor.tick(now).await;
+        let announce = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("new ANNOUNCE: {e:?}"));
+        assert_eq!(&announce.1[96..98], &6999u16.to_be_bytes());
+        assert_eq!(&announce.1[..8], &9u64.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn udp_backpressure_and_closed_transport_settle_without_blocking() {
+        let (mut actor, mut out, _input) =
+            address_actor(&["127.0.0.1", "127.0.0.2"], Duration::from_secs(2)).await;
+        while actor
+            .transport
+            .outbound
+            .try_send((
+                "127.0.0.1:9"
+                    .parse()
+                    .unwrap_or_else(|e| panic!("endpoint: {e:?}")),
+                vec![1],
+            ))
+            .is_ok()
+        {}
+        let now = Instant::now();
+        tokio::time::timeout(Duration::from_millis(100), actor.tick(now))
+            .await
+            .unwrap_or_else(|e| panic!("full channel must not block actor: {e:?}"));
+        assert_eq!(actor.in_flight(), 1);
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            actor.tick(now + Duration::from_secs(2)),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("deadline maintenance cannot block: {e:?}"));
+        assert_eq!(actor.in_flight(), 0);
+        assert!(actor.udp.is_empty());
+        assert!(
+            std::iter::from_fn(|| out.try_recv().ok()).all(|(_, frame)| frame == [1]),
+            "no unsent frame was counted as delivered"
+        );
+        drop(out);
+        actor.force_ready(now + Duration::from_secs(3));
+        actor.tick(now + Duration::from_secs(3)).await;
+        assert_eq!(actor.in_flight(), 0);
+        assert!(actor.udp_closed);
+        assert!(actor.udp.is_empty());
+    }
+
+    struct PendingResolver;
+    impl HostResolver for PendingResolver {
+        fn resolve(&self, _host: String) -> ResolverFuture {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_pending_dns_consumes_original_budget_without_premature_exhaustion() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (event_tx, _events) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let (transport, mut out, _input) = mk_transport();
+        let mut cfg = config(vec![(0, "udp://pending.example:1337/announce".into())]);
+        cfg.options.bt_tracker_timeout = Duration::from_secs(2);
+        let mut actor = TrackerActor::new(cfg, Arc::new(FixedView), cmd_rx, event_tx, transport)
+            .unwrap_or_else(|e| panic!("actor: {e:?}"))
+            .with_resolver(Arc::new(PendingResolver))
+            .with_v6_probe_override(Some(false));
+        let now = Instant::now();
+        actor.tick(now).await;
+        actor.tick(now + Duration::from_secs(1)).await;
+        assert_eq!(
+            actor.in_flight(),
+            1,
+            "DNS is pending, not an exhausted address list"
+        );
+        actor.tick(now + Duration::from_secs(2)).await;
+        assert_eq!(actor.in_flight(), 0);
+        assert!(actor.slots[0].pending_task.is_none());
+        assert!(actor.udp.is_empty());
+        assert!(out.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn udp_more_than_two_candidates_replaces_exhausted_probe_only() {
+        let (mut actor, mut out, input) = address_actor(
+            &["127.0.0.1", "127.0.0.2", "127.0.0.3"],
+            Duration::from_secs(30),
+        )
+        .await;
+        let now = Instant::now();
+        actor.tick(now).await;
+        let first = out.try_recv().unwrap_or_else(|e| panic!("first: {e}"));
+        actor.tick(now + Duration::from_millis(250)).await;
+        let second = out.try_recv().unwrap_or_else(|e| panic!("second: {e}"));
+        actor.tick(now + Duration::from_secs(4)).await;
+        assert!(out.try_recv().is_err(), "no third concurrent probe");
+        actor.tick(now + Duration::from_secs(5)).await;
+        let third = out.try_recv().unwrap_or_else(|e| panic!("third: {e}"));
+        assert_eq!(third.0.ip().to_string(), "127.0.0.3");
+        assert!(
+            out.try_recv().is_err(),
+            "expired first probe was cancelled, not resent"
+        );
+        assert_eq!(
+            actor.slots[0].udp_attempt.as_ref().map(|a| a.probes.len()),
+            Some(2)
+        );
+        input
+            .send((
+                first.0,
+                udp_response(&first.1, UdpAction::Connect, &8u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("late first: {e}"));
+        actor.tick(now + Duration::from_secs(5)).await;
+        assert!(out.try_recv().is_err());
+        input
+            .send((
+                second.0,
+                udp_response(&second.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("second reply: {e}"));
+        actor.tick(now + Duration::from_secs(5)).await;
+        let announce = out.try_recv().unwrap_or_else(|e| panic!("announce: {e}"));
+        assert_eq!(announce.0, second.0);
+        assert_eq!(&announce.1[8..12], &1i32.to_be_bytes());
+        assert!(out.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn udp_tracker_business_rejection_does_not_rotate_ip() {
+        let (mut actor, mut out, input) =
+            address_actor(&["127.0.0.1", "127.0.0.2"], Duration::from_secs(30)).await;
+        let now = Instant::now();
+        actor.tick(now).await;
+        let connect = out.try_recv().unwrap_or_else(|e| panic!("connect: {e}"));
+        input
+            .send((
+                connect.0,
+                udp_response(&connect.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("connect reply: {e}"));
+        actor.tick(now).await;
+        let announce = out.try_recv().unwrap_or_else(|e| panic!("announce: {e}"));
+        input
+            .send((
+                announce.0,
+                udp_response(&announce.1, UdpAction::Error, b"torrent not registered"),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("error reply: {e}"));
+        actor.tick(now).await;
+        assert_eq!(actor.in_flight(), 0);
+        assert_eq!(actor.slots[0].fails, 1);
+        assert!(actor.udp.is_empty());
+        assert!(
+            out.try_recv().is_err(),
+            "a business error is not an unhealthy IP"
+        );
+    }
+    #[tokio::test]
+    async fn udp_backpressure_does_not_discard_unsent_healthy_first_address() {
+        let (mut actor, mut out, input) = address_actor(
+            &["127.0.0.1", "127.0.0.2", "127.0.0.3"],
+            Duration::from_secs(30),
+        )
+        .await;
+        let blocker = "127.0.0.1:9"
+            .parse()
+            .unwrap_or_else(|e| panic!("blocker: {e}"));
+        while actor
+            .transport
+            .outbound
+            .try_send((blocker, vec![1]))
+            .is_ok()
+        {}
+        let now = Instant::now();
+        actor.tick(now).await;
+        actor.tick(now + Duration::from_millis(250)).await;
+        // Both probes remain queued beyond the network probe timeout. The
+        // first address is healthy; only actual transmission starts its timer.
+        let resumed = now + Duration::from_secs(6);
+        tokio::time::timeout(Duration::from_millis(100), actor.tick(resumed))
+            .await
+            .unwrap_or_else(|e| panic!("blocked actor: {e}"));
+        assert!(
+            std::iter::from_fn(|| out.try_recv().ok())
+                .all(|(addr, frame)| addr == blocker && frame == [1])
+        );
+        actor.tick(resumed).await;
+        let healthy = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("healthy CONNECT: {e}"));
+        let blackhole = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("blackhole CONNECT: {e}"));
+        assert_eq!(
+            healthy.0.ip().to_string(),
+            "127.0.0.1",
+            "the queued first address must survive backpressure"
+        );
+        assert_eq!(blackhole.0.ip().to_string(), "127.0.0.2");
+        assert_eq!(&healthy.1[8..12], &0i32.to_be_bytes());
+        assert!(
+            out.try_recv().is_err(),
+            "third candidate is not sent prematurely"
+        );
+        let reply_at = resumed + Duration::from_secs(4);
+        actor.tick(reply_at).await;
+        assert!(
+            out.try_recv().is_err(),
+            "replacement waits for actual send time"
+        );
+        input
+            .send((
+                healthy.0,
+                udp_response(&healthy.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("healthy CONNECT reply: {e}"));
+        actor.tick(reply_at).await;
+        let announce = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("healthy ANNOUNCE: {e}"));
+        assert_eq!(announce.0, healthy.0);
+        assert_eq!(&announce.1[8..12], &1i32.to_be_bytes());
+        assert!(out.try_recv().is_err(), "one valid ANNOUNCE");
+        input
+            .send((
+                healthy.0,
+                udp_response(&announce.1, UdpAction::Announce, &[0; 12]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("healthy ANNOUNCE reply: {e}"));
+        actor.tick(reply_at).await;
+        assert_eq!(actor.in_flight(), 0);
+        assert_eq!(actor.slots[0].fails, 0);
+        assert_eq!(actor.slots[0].last_udp_addr, Some(healthy.0));
+        let scrape = out
+            .try_recv()
+            .unwrap_or_else(|e| panic!("healthy SCRAPE: {e}"));
+        assert_eq!(scrape.0, healthy.0);
+        assert_eq!(&scrape.1[8..12], &2i32.to_be_bytes());
+    }
+    async fn run_packet(
+        out: &mut mpsc::Receiver<(SocketAddr, Vec<u8>)>,
+        budget: Duration,
+    ) -> (SocketAddr, Vec<u8>) {
+        tokio::time::timeout(budget, out.recv())
+            .await
+            .unwrap_or_else(|e| panic!("packet deadline: {e}"))
+            .unwrap_or_else(|| panic!("outbound closed"))
+    }
+
+    #[tokio::test]
+    async fn udp_run_staggers_second_connect_without_waiting_for_maintenance_tick() {
+        let (mut actor, mut out, input) =
+            address_actor(&["127.0.0.2", "127.0.0.1"], Duration::from_secs(10)).await;
+        let (commands, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        actor.cmd_rx = command_rx;
+        let task = tokio::spawn(actor.run());
+        let first = run_packet(&mut out, Duration::from_millis(500)).await;
+        let first_at = Instant::now();
+        let second = run_packet(&mut out, Duration::from_millis(800)).await;
+        let stagger = first_at.elapsed();
+        assert!(
+            stagger >= Duration::from_millis(200),
+            "probe did not stagger: {stagger:?}"
+        );
+        assert_eq!(first.0.ip().to_string(), "127.0.0.2");
+        assert_eq!(second.0.ip().to_string(), "127.0.0.1");
+        assert_eq!(&first.1[8..12], &0i32.to_be_bytes());
+        assert_eq!(&second.1[8..12], &0i32.to_be_bytes());
+        input
+            .send((
+                second.0,
+                udp_response(&second.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("CONNECT reply: {e}"));
+        let announce = run_packet(&mut out, Duration::from_millis(500)).await;
+        assert_eq!(announce.0, second.0);
+        assert_eq!(&announce.1[8..12], &1i32.to_be_bytes());
+        input
+            .send((
+                first.0,
+                udp_response(&first.1, UdpAction::Connect, &8u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("late CONNECT: {e}"));
+        input
+            .send((
+                second.0,
+                udp_response(&announce.1, UdpAction::Announce, &[0; 12]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("ANNOUNCE reply: {e}"));
+        let scrape = run_packet(&mut out, Duration::from_millis(500)).await;
+        assert_eq!(scrape.0, second.0);
+        assert_eq!(&scrape.1[8..12], &2i32.to_be_bytes());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), out.recv())
+                .await
+                .is_err(),
+            "cancelled loser must not ANNOUNCE"
+        );
+        drop(commands);
+        tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .unwrap_or_else(|e| panic!("shutdown deadline: {e}"))
+            .unwrap_or_else(|e| panic!("actor: {e}"));
+    }
+
+    #[tokio::test]
+    async fn udp_run_drains_new_command_without_waiting_for_maintenance_tick() {
+        let (mut actor, mut out, _input) =
+            address_actor(&["127.0.0.1"], Duration::from_secs(10)).await;
+        let (reply, _reply_rx) = oneshot::channel();
+        actor
+            .handle_command(
+                TrackerCommand::SetTrackers {
+                    tiers: vec![],
+                    reply,
+                },
+                Instant::now(),
+            )
+            .await;
+        let (commands, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        actor.cmd_rx = command_rx;
+        let task = tokio::spawn(actor.run());
+        tokio::time::sleep(Duration::from_millis(30)).await; // let the immediate maintenance tick pass
+        let (reply, reply_rx) = oneshot::channel();
+        commands
+            .send(TrackerCommand::SetTrackers {
+                tiers: vec![(0, "udp://race.example:1337/announce".into())],
+                reply,
+            })
+            .await
+            .unwrap_or_else(|e| panic!("command: {e}"));
+        reply_rx
+            .await
+            .unwrap_or_else(|e| panic!("acknowledgement: {e}"))
+            .unwrap_or_else(|e| panic!("set trackers: {e}"));
+        let connect = run_packet(&mut out, Duration::from_millis(500)).await;
+        assert_eq!(connect.0.ip().to_string(), "127.0.0.1");
+        assert_eq!(&connect.1[8..12], &0i32.to_be_bytes());
+        drop(commands);
+        tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .unwrap_or_else(|e| panic!("shutdown deadline: {e}"))
+            .unwrap_or_else(|e| panic!("actor: {e}"));
+    }
+
+    #[tokio::test]
+    async fn udp_run_full_outbound_does_not_busy_poll_past_probe_time() {
+        let (mut actor, mut out, _input) = address_actor(
+            &["127.0.0.1", "127.0.0.2", "127.0.0.3"],
+            Duration::from_secs(10),
+        )
+        .await;
+        let (commands, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        actor.cmd_rx = command_rx;
+        let blocker = "127.0.0.1:9"
+            .parse()
+            .unwrap_or_else(|e| panic!("blocker: {e}"));
+        while actor
+            .transport
+            .outbound
+            .try_send((blocker, vec![1]))
+            .is_ok()
+        {}
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = polls.clone();
+        let mut run = Box::pin(actor.run());
+        let task = tokio::spawn(std::future::poll_fn(move |cx| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::future::Future::poll(run.as_mut(), cx)
+        }));
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let poll_count = polls.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            poll_count < 64,
+            "full outbound repeatedly woke an already-due probe: {poll_count} polls"
+        );
+        drop(commands);
+        tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .unwrap_or_else(|e| panic!("shutdown deadline: {e}"))
+            .unwrap_or_else(|e| panic!("actor: {e}"));
+        assert!(
+            std::iter::from_fn(|| out.try_recv().ok())
+                .all(|(addr, frame)| addr == blocker && frame == [1])
+        );
+    }
+    struct ProbeDropFlag(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for ProbeDropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn controlled_v6_probe(
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        gate: Arc<tokio::sync::Semaphore>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    ) -> V6ProbeFactory {
+        Arc::new(move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let gate = gate.clone();
+            let lifetime = ProbeDropFlag(dropped.clone());
+            Box::pin(async move {
+                let _lifetime = lifetime;
+                let permit = gate
+                    .acquire_owned()
+                    .await
+                    .unwrap_or_else(|e| panic!("probe gate: {e}"));
+                permit.forget();
+                true
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn udp_run_blocked_v6_probe_keeps_v4_deadlines_and_commands_responsive() {
+        for expired_cache in [false, true] {
+            let (mut actor, mut out, input) = address_actor(
+                &["127.0.0.2", "127.0.0.1", "::1"],
+                Duration::from_millis(650),
+            )
+            .await;
+            let (reply, _reply_rx) = oneshot::channel();
+            actor
+                .handle_command(
+                    TrackerCommand::SetTrackers {
+                        tiers: vec![
+                            (0, "udp://race.example:1337/announce".into()),
+                            (1, "udp://[::2]:1338/announce".into()),
+                        ],
+                        reply,
+                    },
+                    Instant::now(),
+                )
+                .await;
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            actor.v6_probe_override = None;
+            actor.v6_probe_factory = controlled_v6_probe(calls.clone(), gate, dropped.clone());
+            if expired_cache {
+                actor.v6_gate_cache = Some((true, Instant::now() - V6_PROBE_TTL));
+            }
+            let (commands, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+            actor.cmd_rx = command_rx;
+            let (events, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+            actor.event_tx = events;
+            let task = tokio::spawn(actor.run());
+            let first = run_packet(&mut out, Duration::from_millis(400)).await;
+            let second = run_packet(&mut out, Duration::from_millis(500)).await;
+            assert_eq!(first.0.ip().to_string(), "127.0.0.2");
+            assert_eq!(second.0.ip().to_string(), "127.0.0.1");
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "both IPv6 faces share one physical probe"
+            );
+            input
+                .send((
+                    second.0,
+                    udp_response(&second.1, UdpAction::Connect, &9u64.to_be_bytes()),
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("v4 CONNECT: {e}"));
+            let announce = run_packet(&mut out, Duration::from_millis(250)).await;
+            assert_eq!(announce.0, second.0);
+            assert_eq!(&announce.1[8..12], &1i32.to_be_bytes());
+            input
+                .send((
+                    second.0,
+                    udp_response(&announce.1, UdpAction::Announce, &[0; 12]),
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("v4 ANNOUNCE: {e}"));
+            let automatic = run_packet(&mut out, Duration::from_millis(250)).await;
+            assert_eq!(&automatic.1[8..12], &2i32.to_be_bytes());
+            input
+                .send((
+                    second.0,
+                    udp_response(&automatic.1, UdpAction::Scrape, &[0; 12]),
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("automatic SCRAPE: {e}"));
+            // Scrape commands must not reintroduce the old synchronous probe wait.
+            let (reply, reply_rx) = oneshot::channel();
+            commands
+                .send(TrackerCommand::Scrape { reply })
+                .await
+                .unwrap_or_else(|e| panic!("scrape command: {e}"));
+            tokio::time::timeout(Duration::from_millis(250), reply_rx)
+                .await
+                .unwrap_or_else(|e| panic!("scrape ack deadline: {e}"))
+                .unwrap_or_else(|e| panic!("scrape ack: {e}"))
+                .unwrap_or_else(|e| panic!("scrape result: {e}"));
+            let manual = run_packet(&mut out, Duration::from_millis(250)).await;
+            assert_eq!(manual.0, second.0);
+            assert_eq!(&manual.1[8..12], &2i32.to_be_bytes());
+            input
+                .send((
+                    second.0,
+                    udp_response(&manual.1, UdpAction::Scrape, &[0; 12]),
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("manual SCRAPE: {e}"));
+            tokio::time::timeout(Duration::from_millis(800), async {
+                loop {
+                    if let Some(TrackerActorEvent::AnnounceFailed { url, reason }) =
+                        event_rx.recv().await
+                        && url.contains("[::2]")
+                    {
+                        assert!(
+                            reason.contains("deadline"),
+                            "probe wait shares original deadline: {reason}"
+                        );
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|e| panic!("v6 attempt deadline blocked by probe: {e}"));
+            assert!(
+                out.try_recv().is_err(),
+                "unverified IPv6 must not send packets"
+            );
+            let (reply, reply_rx) = oneshot::channel();
+            commands
+                .send(TrackerCommand::SetTrackers {
+                    tiers: vec![],
+                    reply,
+                })
+                .await
+                .unwrap_or_else(|e| panic!("cancel command: {e}"));
+            tokio::time::timeout(Duration::from_millis(250), reply_rx)
+                .await
+                .unwrap_or_else(|e| panic!("cancel ack deadline: {e}"))
+                .unwrap_or_else(|e| panic!("cancel ack: {e}"))
+                .unwrap_or_else(|e| panic!("cancel result: {e}"));
+            drop(commands);
+            tokio::time::timeout(Duration::from_millis(250), task)
+                .await
+                .unwrap_or_else(|e| panic!("shutdown deadline: {e}"))
+                .unwrap_or_else(|e| panic!("actor: {e}"));
+            tokio::task::yield_now().await;
+            assert!(
+                dropped.load(std::sync::atomic::Ordering::SeqCst),
+                "owned probe is cancelled on reconfiguration/shutdown"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn v6_probe_shares_completion_caches_ttl_and_rejects_cancelled_result() {
+        let (mut actor, _out, _input) =
+            address_actor(&["127.0.0.1"], Duration::from_secs(10)).await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        actor.v6_probe_override = None;
+        actor.v6_probe_factory = controlled_v6_probe(calls.clone(), gate.clone(), dropped);
+        let now = Instant::now();
+        let V6Gate::Pending(first) = actor.v6_gate(now) else {
+            panic!("first probe pending")
+        };
+        let V6Gate::Pending(second) = actor.v6_gate(now) else {
+            panic!("second joins probe")
+        };
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        gate.add_permits(1);
+        assert!(await_v6_probe(first).await && await_v6_probe(second).await);
+        let outcome = actor
+            .result_rx
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("probe completion"));
+        actor.on_outcome(outcome, Instant::now());
+        let (_, completed_at) = actor
+            .v6_gate_cache
+            .unwrap_or_else(|| panic!("cached probe"));
+        assert!(matches!(
+            actor.v6_gate(completed_at + V6_PROBE_TTL - Duration::from_millis(1)),
+            V6Gate::Ready(true)
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            actor.v6_gate(completed_at + V6_PROBE_TTL),
+            V6Gate::Pending(_)
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let old_token = actor
+            .v6_probe_flight
+            .as_ref()
+            .map(|f| f.token)
+            .unwrap_or_else(|| panic!("probe token"));
+        actor.clear_operations();
+        actor.on_outcome(
+            AnnounceOutcome::V6Probe {
+                token: old_token,
+                available: false,
+                completed_at: Instant::now(),
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            actor.v6_gate_cache,
+            Some((true, completed_at)),
+            "cancelled generation cannot overwrite the cache"
+        );
+    }
+    #[tokio::test]
+    async fn udp_run_v6_waiters_resume_only_after_shared_probe_succeeds() {
+        let (mut actor, mut out, input) =
+            address_actor(&["127.0.0.1", "::1"], Duration::from_secs(3)).await;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        actor.v6_probe_override = None;
+        actor.v6_probe_factory = controlled_v6_probe(
+            calls.clone(),
+            gate.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let (commands, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        actor.cmd_rx = command_rx;
+        let task = tokio::spawn(actor.run());
+        let v4 = run_packet(&mut out, Duration::from_millis(400)).await;
+        assert!(v4.0.is_ipv4());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), out.recv())
+                .await
+                .is_err(),
+            "IPv6 must wait for measured availability"
+        );
+        gate.add_permits(1);
+        let v6 = run_packet(&mut out, Duration::from_millis(400)).await;
+        assert!(v6.0.is_ipv6());
+        assert_eq!(&v6.1[8..12], &0i32.to_be_bytes());
+        input
+            .send((
+                v6.0,
+                udp_response(&v6.1, UdpAction::Connect, &9u64.to_be_bytes()),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("v6 CONNECT reply: {e}"));
+        let announce = run_packet(&mut out, Duration::from_millis(400)).await;
+        assert_eq!(announce.0, v6.0);
+        assert_eq!(&announce.1[8..12], &1i32.to_be_bytes());
+        input
+            .send((
+                v6.0,
+                udp_response(&announce.1, UdpAction::Announce, &[0; 12]),
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("v6 ANNOUNCE reply: {e}"));
+        let scrape = run_packet(&mut out, Duration::from_millis(400)).await;
+        assert_eq!(scrape.0, v6.0);
+        assert_eq!(&scrape.1[8..12], &2i32.to_be_bytes());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "successful announce and scrape reuse the probe result"
+        );
+        drop(commands);
+        tokio::time::timeout(Duration::from_millis(400), task)
+            .await
+            .unwrap_or_else(|e| panic!("shutdown deadline: {e}"))
+            .unwrap_or_else(|e| panic!("actor: {e}"));
     }
 }

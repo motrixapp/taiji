@@ -49,6 +49,22 @@ taiji http <URL…> -d <dir> [-o 文件名] [--checksum sha-256=<hex>]
 python3 scripts/http_5gb_resume_demo.py   # 对应 ≥5GiB 判据运行
 ```
 
+## DNS 与 Tracker 地址恢复
+
+HTTP、FTP、tracker 和 DHT 引导共享系统 DNS 解析与有界缓存。同域并发请求
+合并为一次查询。成功结果缓存 5 分钟，失败缓存 2 秒，超时缓存 1 秒；调用取消
+或本地容量不足不会被缓存为域名失败。解析保留操作系统的 hosts 文件和 VPN
+DNS 设置。
+
+UDP tracker 的地址不可达时会尝试其他地址，只有 CONNECT 成功的端点才会
+收到 ANNOUNCE，切换地址不会延长整次尝试的超时。DNS 和地址恢复有助于发现
+节点，但没有可达节点持有所需元数据时，仍然无法获取种子。
+IPv6 可达性检查在后台运行，IPv6 路由无响应不会阻塞 IPv4 tracker 请求或取消。
+
+超时的系统解析可能继续在操作系统中运行。taiji 最多允许 32 个活跃解析、
+256 个活跃或排队的域名，并将它们与其他阻塞 I/O 隔离。`/metrics` 的 DNS
+指标区分缓存命中、并发合并、后端查询和实际系统活动，不包含域名标签。
+
 ## 下载与做种
 
 ```sh

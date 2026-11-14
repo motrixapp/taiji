@@ -1,185 +1,44 @@
-//! Host → [`IpAddr`] resolution surface: an injectable resolver seam, a
-//! TTL cache, a resolution-timeout decorator, and per-address-family
-//! resolution (A/AAAA paths).
+//! Shared DNS for HTTP, FTP, trackers and DHT bootstrap.
 //!
-//! Lives in taiji-io because the transport crate's responsibility
-//! statement includes DNS: the shared resolution layer belongs here. The
-//! first and main consumer is the BT UDP tracker (domain-form
-//! announce/scrape URLs); HTTP/HTTPS download, HTTP tracker announce, FTP
-//! control connections, and both DHT bootstrap sites are all wired to the
-//! shared layer (error classification via [`error_chain_is_dns`]).
-//! Previously a udp:// host had to be a literal IP and every domain-form
-//! tracker URL failed as invalid-url. Tests inject stub resolvers;
-//! hitting real DNS in tests is banned.
+//! [`SharedDns`] merges concurrent same-host requests and caches complete
+//! address lists. Positive and short-lived negative entries share a bounded
+//! cache. Hostname case is normalized; a final dot is preserved because it
+//! changes system search-domain semantics. Address-family projection never
+//! turns an absent AAAA record into a host-wide failure that hides valid A.
+//!
+//! [`SystemResolver`] preserves the OS resolver and scoped/VPN DNS behavior.
+//! Its physical flight table and semaphore bound queued/running system calls.
+//! The semaphore permit and cleanup guard live inside the blocking closure;
+//! cancelling a waiter cannot falsely release a running getaddrinfo call.
+//! Timeouts abandon logical waits, not OS calls. Retries join an outstanding
+//! physical call and cannot duplicate it; stale answers are discarded before
+//! a new cohort retries within its own remaining deadline.
+//!
+//! Metrics keep cache hit/miss and caller error/latency semantics separate
+//! from owned backend queries, coalesced calls and actual system occupancy.
+//! Tests inject resolvers and blocking gates; they never query real DNS.
 //!
 //! Upstream anchor mapping: docs/design/io.md
-//!
-//! # Per-family resolution
-//!
-//! The BEP15 carrier family equals the transport family: peers come back
-//! packed at the 6/18-byte stride of the family the announce was sent
-//! over (libtorrent `src/udp_tracker_connection.cpp`,
-//! `ip_stride = aux::is_v6(m_target) ? 18 : 6`). [`ResolveFamily`] +
-//! [`HostResolver::resolve_family`] therefore resolve A records for V4
-//! requests and AAAA for V6 requests with **no cross-family fallback** —
-//! a fallback would misalign the carrier family from the resolution
-//! intent (a V4 request getting a v6 carrier, or a V6 request a v4
-//! carrier). The single-address view [`HostResolver::resolve`] (v4-first)
-//! keeps its semantics: it is the default-implementation base for V4
-//! requests and the compatibility seam for existing callers/tests. The
-//! v4-first preference exists only in the single-address view
-//! [`pick_addr`]; the per-family view has no preference order (family is
-//! a request parameter, not a routing preference).
-//!
-//! # Resolution timeout (decorator)
-//!
-//! tokio `spawn_blocking` cannot cancel a hung getaddrinfo (it can hang
-//! for tens of seconds when the OS resolver configuration is broken or
-//! the DNS server is dead) — the timeout backstop is the
-//! [`TimeoutResolver`] decorator wrapped over a [`HostResolver`] at the
-//! injection seam (default deadline [`DNS_TIMEOUT`] = 30s, anchored to
-//! the reference `--dns-timeout` default; see the constant docs).
-//!
-//! # Shared resolution service ([`SharedDns`]) and transport bridging
-//!
-//! Several transport faces (HTTP/HTTPS download, HTTP tracker announce,
-//! UDP tracker, FTP control connections, both DHT bootstrap sites) share
-//! one "resolver + TTL cache" pair. [`SharedDns`] is a constructible
-//! service (`resolver: Arc<dyn HostResolver>` + cache; the lock is held
-//! only in short read-snapshot/write-entry critical sections and
-//! **never across an await**). Cache-write invariant: inserts happen only
-//! inside the shared resolver and always as whole lists (`Vec<IpAddr>`) —
-//! callers get read-only projections with no separate write path.
-//! Production wiring takes the process-wide default instance
-//! ([`SharedDns::shared_default`], OnceLock — resolver stack =
-//! [`TimeoutResolver`] around [`TokioHostResolver`]); tests build
-//! independent instances via [`SharedDns::with_resolver`] (no hard
-//! singleton: the OnceLock default can be neither swapped nor reset, and
-//! independent instances keep caches isolated across tests so stub
-//! counts can be asserted both ways).
-//!
-//! [`SharedDns::resolve_for_transport`] is the **single bridging source**
-//! for transport adapter layers (the reqwest `Resolve` adapter shell
-//! etc.): literal-IP passthrough, cache lookup, timeout (via the
-//! [`TimeoutResolver`] decorator inside the resolver stack), and port
-//! synthesis all happen here; the type-preserving boxing helper
-//! [`box_resolve_error`] shares that source (adapter layers must not
-//! `to_string()` — upper-layer error classification depends on the
-//! source-chain downcast passing types through). Port contract: cache
-//! entries store only [`IpAddr`] (**no port-carrying surface** —
-//! reqwest/hyper-util reuse a nonzero port on the returned address, so a
-//! SocketAddr-shaped cache would leak the first connect's port into later
-//! requests); each face synthesizes its own port — the reqwest face
-//! always passes 0 (hyper-util fills port 0 per scheme convention, and an
-//! explicit URL port overrides), other faces pass the real port. Adapter
-//! shells (newtypes in consumer crates) only bridge calls and convert
-//! types (orphan rule: `impl reqwest::dns::Resolve` must live in the
-//! type's crate; the bridging logic stays single-sourced here).
-//!
-//! # Hard invariants (shared-cache behavior)
-//!
-//! - Faces wired to the shared service gain an application-level cache of
-//!   ≤[`HOST_CACHE_TTL`] (5min): DNS change convergence moves from the OS
-//!   cache TTL to max(5min, OS TTL).
-//! - A connect failure after a cache hit neither evicts nor rotates bad
-//!   IPs: the HTTP face gets hyper's Happy Eyeballs over the address
-//!   list, but the UDP tracker projects a single address with **no list
-//!   fallback — a dead IP stays pinned for the full TTL**.
-//! - A cached list with no record for the requested family (host has only
-//!   A records, a V6 face asks) hits an empty projection and returns Err
-//!   **without re-querying** — the whole list is the resolver's
-//!   authoritative answer, and within the TTL a re-query returns the same
-//!   value (the "no record for that family" answer is pinned for the TTL
-//!   too).
-//! - Concurrent misses on one host may each query once (the first
-//!   backfill settles it; steady state is one query per TTL). No
-//!   single-flight merging — the complexity is not worth the gain.
-//! - Dual-stack hosts drop from 2 queries to 1: one whole-list resolver
-//!   query ([`HostResolver::resolve_list`]) + per-family projections.
-//! - The hang-failure point for HTTP/FTP faces moves earlier from
-//!   connect_timeout (default 60s) to 30s (a tightening, not a
-//!   relaxation); leftover blocking-thread occupancy outlives the
-//!   timeout — see the [`TimeoutResolver`] note.
-//!
-//! # Blocking discipline
-//!
-//! The default implementation goes through [`tokio::net::lookup_host`]
-//! (getaddrinfo on the tokio blocking pool); callers (tracker actor, DHT
-//! bootstrap tasks, ...) await inside spawned tasks and never block the
-//! tick.
-//!
-//! # Metrics (process-level registry injection)
-//!
-//! Four feed points (types in [`crate::metrics::DnsMetrics`]; the
-//! registry instance is constructible and injectable — production wiring
-//! via [`SharedDns::production`] binds the process default registry
-//! [`crate::metrics::registry_default`], tests inject independent
-//! instances via [`SharedDns::with_registry`] /
-//! [`SharedDns::with_timeout_resolver`]):
-//!
-//! - `taiji_dns_lookups_total{result=hit|miss|error|timeout}` — fed at
-//!   [`SharedDns::list_cached_or_resolve`], the single source for all
-//!   faces (HTTP/FTP bridging, UDP tracker, and DHT bootstrap all pass
-//!   through). hit/miss count **cache behavior**, error/timeout count
-//!   **resolution outcomes** — a miss followed by a failed resolve
-//!   **double-counts** (miss plus error or timeout, one each; a timeout
-//!   counts as timeout, not error). Timeout classification happens at the
-//!   [`TimeoutResolver`] layer: the timeout fact is self-produced there
-//!   and carried through the typed classification exit, **never text
-//!   matching**.
-//! - `taiji_dns_resolve_seconds` (histogram) — observed at the same
-//!   function's exit (cache hits contribute near-zero samples; failure
-//!   samples include the 30s timeout backstop bound, landing in the last
-//!   bucket).
-//! - `taiji_dns_family_mix_total{mix=v4_only|v6_only|dual}` — at the
-//!   resolver's list production point (cache hits do not recount).
-//! - `taiji_dns_events_total{kind=evict_ttl|evict_capacity}` — at the two
-//!   [`HostCache`] eviction points (TTL expiry cleared on the read path /
-//!   capacity eviction of the oldest entry on insert).
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
-use tracing::{debug, info};
 
 use crate::metrics::{DnsCacheEvent, DnsFamilyMix, DnsLookupResult, MetricsRegistry};
 
-/// Classifies resolution failures (the crate-internal metric-classification
-/// seam): the timeout fact is self-produced by [`TimeoutResolver`]'s typed
-/// exit ([`ClassifiedFailure::TimedOut`]); inner failures pass through
-/// unchanged. The trait's `String` error surface is untouched —
-/// classification folds only at this layer, and
-/// [`ClassifiedFailure::into_trait_err`] restores the exact string of the
-/// pre-existing path.
-pub(crate) enum ClassifiedFailure {
-    Failed(String),
-    TimedOut(Duration),
-}
+mod shared;
+mod system;
+pub use shared::{DnsPolicy, SharedDns};
+pub use system::{BlockingHostLookup, SystemDnsPolicy, SystemResolver, TokioHostResolver};
 
-impl ClassifiedFailure {
-    /// Restores the historical trait-surface message (the timeout form is
-    /// verbatim-identical to the existing [`TimeoutResolver`]
-    /// `resolve_list` decorator).
-    fn into_trait_err(self) -> String {
-        match self {
-            ClassifiedFailure::Failed(e) => e,
-            ClassifiedFailure::TimedOut(d) => {
-                format!("dns resolution timed out after {d:?}")
-            }
-        }
-    }
-}
-
-/// Typed whole-list resolution future (the non-object-safe form of
-/// [`TimeoutResolver::resolve_list_classified`] — crate-internal, keeps
-/// the trait surface untouched).
-pub(crate) type ClassifiedListFuture =
-    Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, ClassifiedFailure>> + Send>>;
+/// Typed resolver seam; opaque string resolvers use its default adapter.
+pub type ClassifiedListFuture =
+    Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, ResolveError>> + Send>>;
 
 /// Address-family composition of a resolver list (non-empty premise —
 /// guaranteed by `resolve_list`'s Ok contract; callers guard with the
@@ -194,9 +53,8 @@ fn family_mix_of(list: &[IpAddr]) -> DnsFamilyMix {
     }
 }
 
-/// host→IpAddr cache TTL (default ≥5min; the same order as common short
-/// A record TTLs — re-querying on expiry lets a DNS change converge
-/// within one TTL).
+/// Application positive-cache TTL. System getaddrinfo does not expose DNS
+/// record TTLs; reads do not extend this fixed lifetime.
 pub const HOST_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// host→IpAddr cache capacity cap (default 256; beyond it the oldest by
 /// insertion order is evicted).
@@ -255,9 +113,13 @@ impl ResolveFamily {
 /// v6 exists, the first v6 (callers then use the v6 carrier face for
 /// that address family).
 ///
-/// Errors are retryable (network class): callers back off with class
-/// "dns"; negative results are not cached.
+/// Errors retain the string seam for existing callers; the typed list method
+/// preserves timeout, capacity and cancellation facts for the shared service.
 pub trait HostResolver: Send + Sync + 'static {
+    /// Forget an outstanding physical generation if the backend maintains one.
+    /// Existing system work is not forcibly stopped; its answer must be ignored.
+    fn invalidate_host(&self, _host: &str) {}
+
     fn resolve(&self, host: String) -> ResolverFuture;
 
     /// Per-family resolution: the result family must equal the requested
@@ -297,7 +159,7 @@ pub trait HostResolver: Send + Sync + 'static {
     /// [`Self::resolve_family`] and merge (V4 first); it targets injected
     /// stubs (existing stubs gain the whole-list face with zero
     /// changes), while the production resolver ([`TokioHostResolver`])
-    /// overrides it with a single whole-list `lookup_host` — the real
+    /// overrides it with one whole-list system `ToSocketAddrs` query — the real
     /// 2→1 win comes from that override. Error semantics: any one family
     /// succeeding is `Ok` (the other family failing only means no
     /// records of that family); both failing = Err (the V4-side error is
@@ -309,11 +171,12 @@ pub trait HostResolver: Send + Sync + 'static {
         Box::pin(async move {
             let mut addrs = Vec::new();
             let mut err = None;
-            match v4.await {
+            let (v4, v6) = tokio::join!(v4, v6);
+            match v4 {
                 Ok(ip) => addrs.push(ip),
                 Err(e) => err = Some(e),
             }
-            if let Ok(ip) = v6.await {
+            if let Ok(ip) = v6 {
                 addrs.push(ip);
             }
             if addrs.is_empty() {
@@ -323,54 +186,11 @@ pub trait HostResolver: Send + Sync + 'static {
             }
         })
     }
-}
-
-/// Default implementation: tokio DNS (getaddrinfo on the blocking pool;
-/// banned in tests — inject a stub, see the test-DNS ban above).
-pub struct TokioHostResolver;
-
-impl HostResolver for TokioHostResolver {
-    fn resolve(&self, host: String) -> ResolverFuture {
-        Box::pin(async move {
-            // Port 0 only satisfies the ToSocketAddrs parameter; it is
-            // not used in the result.
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await
-                .map_err(|e| e.to_string())?
-                .collect();
-            pick_addr(&addrs)
-        })
-    }
-
-    fn resolve_family(&self, host: String, family: ResolveFamily) -> ResolverFuture {
-        Box::pin(async move {
-            // Port 0 only satisfies the ToSocketAddrs parameter; it is
-            // not used in the result.
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await
-                .map_err(|e| e.to_string())?
-                .collect();
-            pick_addr_family(&addrs, family)
-        })
-    }
-
-    fn resolve_list(&self, host: String) -> ListResolverFuture {
-        Box::pin(async move {
-            // One getaddrinfo call returns the whole list (both families
-            // in a single query — the default impl's two per-family
-            // queries collapse to 1 here); port 0 only satisfies the
-            // ToSocketAddrs parameter, and the result keeps IpAddr (the
-            // cache carries no port).
-            let addrs: Vec<IpAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await
-                .map_err(|e| e.to_string())?
-                .map(|sa| sa.ip())
-                .collect();
-            if addrs.is_empty() {
-                return Err("no address resolved".to_string());
-            }
-            Ok(addrs)
-        })
+    /// Preserve error classes when the implementation knows them. The default
+    /// keeps string failures opaque; caching never guesses NXDOMAIN by text.
+    fn resolve_list_classified(&self, host: String) -> ClassifiedListFuture {
+        let future = self.resolve_list(host);
+        Box::pin(async move { future.await.map_err(ResolveError::Failed) })
     }
 }
 
@@ -387,12 +207,9 @@ impl HostResolver for TokioHostResolver {
 /// independently attachable/detachable at the seam; that is the direct
 /// reason for its placement.
 ///
-/// Semantics: the timeout cancels the caller's await but **not** the
-/// in-flight getaddrinfo on the tokio blocking pool — the thread stays
-/// occupied until the syscall returns (concurrent hangs accumulate in
-/// the blocking pool; the tokio default pool cap of 512 backstops it).
-/// The benefit: a hung resolution no longer blocks the caller forever
-/// (the backstop given that spawn_blocking has no cancellation).
+/// Timeout ends the logical wait. SystemResolver keeps a physical flight and
+/// its permit until the actual syscall returns; repeated timed-out calls do
+/// not create more same-host blocking work.
 pub struct TimeoutResolver {
     inner: Arc<dyn HostResolver>,
     timeout: Duration,
@@ -420,28 +237,12 @@ impl TimeoutResolver {
     pub fn with_timeout(inner: Arc<dyn HostResolver>, timeout: Duration) -> Self {
         Self { inner, timeout }
     }
-
-    /// Typed whole-list resolution (the crate-internal metric
-    /// classification seam; the trait `String` surface is untouched —
-    /// see [`ClassifiedFailure`]): the timeout fact is self-produced by
-    /// this layer (the decorator) as [`ClassifiedFailure::TimedOut`];
-    /// inner failures pass through as [`ClassifiedFailure::Failed`].
-    /// [`SharedDns`] uses this exit to classify
-    /// `lookups{result=error|timeout}` — timeout detection never
-    /// text-matches.
-    pub(crate) fn resolve_list_classified(&self, host: String) -> ClassifiedListFuture {
-        let fut = self.inner.resolve_list(host);
-        let timeout = self.timeout;
-        Box::pin(async move {
-            match tokio::time::timeout(timeout, fut).await {
-                Ok(inner) => inner.map_err(ClassifiedFailure::Failed),
-                Err(_) => Err(ClassifiedFailure::TimedOut(timeout)),
-            }
-        })
-    }
 }
 
 impl HostResolver for TimeoutResolver {
+    fn invalidate_host(&self, host: &str) {
+        self.inner.invalidate_host(host);
+    }
     fn resolve(&self, host: String) -> ResolverFuture {
         let fut = self.inner.resolve(host);
         let timeout = self.timeout;
@@ -462,30 +263,26 @@ impl HostResolver for TimeoutResolver {
         })
     }
 
-    /// The whole-list path is timeout-protected too (overridden rather
-    /// than reached indirectly through the default impl's
-    /// `resolve_family` — the default impl would split the inner call
-    /// into two per-family queries, losing
-    /// [`TokioHostResolver::resolve_list`]'s single whole-list query;
-    /// this wraps the inner `resolve_list` in one deadline).
     fn resolve_list(&self, host: String) -> ListResolverFuture {
-        let fut = self.inner.resolve_list(host);
+        let future = self.resolve_list_classified(host);
+        Box::pin(async move { future.await.map_err(|error| error.into_trait_err()) })
+    }
+
+    fn resolve_list_classified(&self, host: String) -> ClassifiedListFuture {
+        let future = self.inner.resolve_list_classified(host);
         let timeout = self.timeout;
         Box::pin(async move {
-            tokio::time::timeout(timeout, fut)
+            tokio::time::timeout(timeout, future)
                 .await
-                .unwrap_or_else(|_| Err(format!("dns resolution timed out after {timeout:?}")))
+                .unwrap_or(Err(ResolveError::Timeout(timeout)))
         })
     }
 }
 
 /// Typed resolution-boundary error (the taiji-io error surface).
 ///
-/// Exists only at the boundary layer of the shared resolution service
-/// (transport adapters / connection wrappers / error classification),
-/// **not** in the [`HostResolver`] trait — the trait error surface stays
-/// `String` (the injection seam needs zero migration; existing stubs and
-/// assertions are untouched by the typing).
+/// The typed HostResolver list seam and transport wrappers preserve this
+/// payload. Older string-based resolvers use the trait's default adapter.
 ///
 /// Value semantics (Clone/PartialEq/Eq): carried as the typed payload of
 /// transport-layer error enums (e.g. the taiji-http FTP DNS-failure
@@ -501,6 +298,19 @@ pub enum ResolveError {
     /// inner detail).
     #[error("dns resolution failed: {0}")]
     Failed(String),
+    #[error("dns resolver capacity exhausted")]
+    Capacity,
+    #[error("dns resolution cancelled")]
+    Cancelled,
+}
+
+impl ResolveError {
+    fn into_trait_err(self) -> String {
+        match self {
+            Self::Failed(message) => message,
+            other => other.to_string(),
+        }
+    }
 }
 
 /// Error-chain DNS attribution core (single source, reqwest-free):
@@ -625,7 +435,9 @@ fn text_matches(lower: &str, markers: &[&str]) -> bool {
 /// resolves to the safe side).
 pub fn dns_persistence_of(err: &ResolveError) -> DnsPersistence {
     match err {
-        ResolveError::Timeout(_) => DnsPersistence::Transient,
+        ResolveError::Timeout(_) | ResolveError::Capacity | ResolveError::Cancelled => {
+            DnsPersistence::Transient
+        }
         ResolveError::Failed(msg) => persistence_by_text(msg),
     }
 }
@@ -753,291 +565,6 @@ pub fn box_resolve_error(err: ResolveError) -> Box<dyn std::error::Error + Send 
     Box::new(err)
 }
 
-/// Shared resolution service: a constructible "resolver + TTL cache"
-/// combination shared by multiple transport faces (cache-write
-/// invariant and behavior notes in the module docs).
-///
-/// - Lock discipline: the cache is accessed in short `StdMutex`
-///   critical sections (read snapshot / whole-list backfill), **never
-///   across an await** (the resolution await happens outside the lock);
-///   shared across tasks via `Arc<Self>` (spawned tasks clone the Arc
-///   and read the cache without messaging back).
-/// - Clock: real [`Instant`] internally (the reqwest `Resolve` face has
-///   no clock parameter); synthetic-clock tests converge in the
-///   [`HostCache`] unit-test layer.
-/// - Instances: production takes the process-wide default
-///   [`Self::shared_default`] (OnceLock — resolver stack =
-///   [`TimeoutResolver`] around [`TokioHostResolver`], the production
-///   shape of the decorator-on-seam); tests build independent instances
-///   via [`Self::with_resolver`] (cache isolation + assertable stub
-///   counts — no hard singleton, which could be neither swapped nor
-///   reset).
-/// - Metrics: the four DNS feed points live in this service (module
-///   docs, "Metrics"); production binds the process default registry
-///   [`crate::metrics::registry_default`], tests inject independent
-///   registries via [`Self::with_registry`] /
-///   [`Self::with_timeout_resolver`] (no bare global counters — zero
-///   parallel-test pollution).
-pub struct SharedDns {
-    resolver: Arc<dyn HostResolver>,
-    /// Typed timeout seam: held when the resolver stack contains a
-    /// [`TimeoutResolver`] (production wiring / explicit injection via
-    /// [`Self::with_timeout_resolver`]) for non-text classification of
-    /// timeout facts (metrics); an opaque trait object injected via
-    /// [`Self::with_resolver`] has no such seam — its failures all
-    /// classify as `error` (the honest reading: no timeout fact is
-    /// readable on that stack).
-    timed: Option<Arc<TimeoutResolver>>,
-    cache: StdMutex<HostCache>,
-    metrics: Arc<MetricsRegistry>,
-}
-
-impl std::fmt::Debug for SharedDns {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Hand-written: the resolver is a `dyn HostResolver` trait
-        // object and the cache a live mutex (Debug must not lock) —
-        // both omitted; the timeout seam and metrics registry are shown.
-        f.debug_struct("SharedDns")
-            .field("timed", &self.timed)
-            .field("metrics", &self.metrics)
-            .finish()
-    }
-}
-
-impl SharedDns {
-    /// Constructs with an injected resolver (test seam: an independent
-    /// stub instance sharing nothing with the process default). Metrics
-    /// bind a **brand-new independent registry** (private to this
-    /// instance — existing caller behavior unchanged, zero cross-test
-    /// pollution).
-    pub fn with_resolver(resolver: Arc<dyn HostResolver>) -> Self {
-        Self::with_registry(resolver, Arc::new(MetricsRegistry::new()))
-    }
-
-    /// Injected resolver + metrics registry (the metric-assertion seam:
-    /// tests read counts back from an independent registry; when the
-    /// resolver stack lacks the timeout decorator, failures all classify
-    /// as `lookups{result=error}`).
-    pub fn with_registry(resolver: Arc<dyn HostResolver>, metrics: Arc<MetricsRegistry>) -> Self {
-        Self {
-            resolver,
-            timed: None,
-            cache: StdMutex::new(HostCache::with_metrics(
-                HOST_CACHE_TTL,
-                HOST_CACHE_CAPACITY,
-                metrics.clone(),
-            )),
-            metrics,
-        }
-    }
-
-    /// Injected typed timeout stack + metrics registry (the timeout
-    /// classification seam: `lookups{result=timeout}` is classified via
-    /// [`TimeoutResolver::resolve_list_classified`]'s typed exit — never
-    /// text matching).
-    pub fn with_timeout_resolver(
-        timed: Arc<TimeoutResolver>,
-        metrics: Arc<MetricsRegistry>,
-    ) -> Self {
-        Self {
-            resolver: timed.clone(),
-            timed: Some(timed),
-            cache: StdMutex::new(HostCache::with_metrics(
-                HOST_CACHE_TTL,
-                HOST_CACHE_CAPACITY,
-                metrics.clone(),
-            )),
-            metrics,
-        }
-    }
-
-    /// Production resolver stack: [`TimeoutResolver`] (30s, the
-    /// reference `--dns-timeout` default) around [`TokioHostResolver`] —
-    /// the decorator-on-seam wiring shape (not built in; composed at the
-    /// production wiring site, see its docs); metrics bind the process
-    /// default registry.
-    pub fn production() -> Self {
-        Self::with_timeout_resolver(
-            Arc::new(TimeoutResolver::new(Arc::new(TokioHostResolver))),
-            crate::metrics::registry_default(),
-        )
-    }
-
-    /// Process-wide default instance (lazily built in a OnceLock; the
-    /// production wiring point — HTTP transport builder, tracker reqwest
-    /// builder, tracker actor, ... — all take this, sharing one cache).
-    pub fn shared_default() -> Arc<Self> {
-        static DEFAULT: OnceLock<Arc<SharedDns>> = OnceLock::new();
-        DEFAULT.get_or_init(|| Arc::new(Self::production())).clone()
-    }
-
-    /// Whole-list cache snapshot (short lock critical section, no
-    /// await).
-    fn cached_list(&self, host: &str) -> Option<Vec<IpAddr>> {
-        crate::lock(&self.cache).get_list(host, Instant::now())
-    }
-
-    /// Per-family projection read (the actor tick consumption face;
-    /// short lock critical section). A present list with no record for
-    /// the family = `None` ("a hit is authoritative" for that projection
-    /// — [`Self::resolve_family`] returns Err rather than re-querying).
-    pub fn cached_family(&self, host: &str, family: ResolveFamily, now: Instant) -> Option<IpAddr> {
-        crate::lock(&self.cache).get_family(host, family, now)
-    }
-
-    /// Query core: a cache hit returns a whole-list snapshot; a miss
-    /// runs a resolver whole-list query (timeout via the
-    /// [`TimeoutResolver`] inside the resolver stack) and on success
-    /// backfills **the whole list** (the only write path; negatives are
-    /// not cached). Concurrent misses on one host may each query once
-    /// (no merging — see the module docs).
-    ///
-    /// Metric feed points (single source for all faces — both the
-    /// `resolve_family` and `resolve_for_transport` consumers go through
-    /// here):
-    /// - `lookups{result}`: hit = hit; miss = miss; a miss followed by a
-    ///   failed resolve = error **or** timeout (double count — miss plus
-    ///   error|timeout, one each; timeout is classified via
-    ///   [`TimeoutResolver`]'s typed exit, never text matching);
-    /// - `resolve_seconds`: observed at this function's exit (hits
-    ///   contribute near-zero samples; failure samples include the
-    ///   timeout backstop bound);
-    /// - `family_mix{mix}`: attributed at the resolver's list production
-    ///   point by family composition (cache hits do not recount).
-    ///
-    /// # The four DNS log points (reference-aligned, with a declared
-    /// level adaptation)
-    ///
-    /// aria2 logs all four resolution points at INFO (anchors in
-    /// docs/design/io.md). Here hit/miss/complete drop to debug while
-    /// failure stays info — a deliberate level adaptation: the shared
-    /// layer is the single source for every transport
-    /// (HTTP/FTP/tracker/DHT bootstrap), hit/miss are high-frequency
-    /// events that would flood INFO logs (frequency discipline outranks
-    /// the reference levels; failures are rare and triage-critical, so
-    /// they stay info). Target = `taiji::io::dns` (the
-    /// `taiji::<crate>::<module>` shape).
-    async fn list_cached_or_resolve(&self, host: &str) -> Result<Vec<IpAddr>, String> {
-        const LOG_TARGET: &str = "taiji::io::dns";
-        let started = Instant::now();
-        let dns = self.metrics.dns();
-        if let Some(list) = self.cached_list(host) {
-            dns.note_lookup(DnsLookupResult::Hit);
-            dns.observe_resolve(started.elapsed());
-            // Log point 1/4 (reference cache hit; adapted to debug —
-            // deviation declared above).
-            debug!(target: LOG_TARGET, host, family = ?family_mix_of(&list),
-                elapsed_us = started.elapsed().as_micros() as u64, "dns cache hit");
-            return Ok(list);
-        }
-        dns.note_lookup(DnsLookupResult::Miss);
-        // Log point 2/4 (reference resolving; adapted to debug —
-        // deviation declared above).
-        debug!(target: LOG_TARGET, host, "resolving hostname");
-        let classified = self.resolve_classified(host.to_string()).await;
-        dns.observe_resolve(started.elapsed());
-        let list = match classified {
-            Ok(list) => list,
-            Err(failure) => {
-                let class = match &failure {
-                    ClassifiedFailure::Failed(_) => {
-                        dns.note_lookup(DnsLookupResult::Error);
-                        "error"
-                    }
-                    ClassifiedFailure::TimedOut(_) => {
-                        dns.note_lookup(DnsLookupResult::Timeout);
-                        "timeout"
-                    }
-                };
-                // Log point 4/4 (reference resolution failed; stays
-                // info — rare and triage-critical, level not lowered).
-                // Error class and metric attribution share a source.
-                info!(target: LOG_TARGET, host, class, elapsed_us = started.elapsed().as_micros() as u64,
-                    "dns resolution failed");
-                return Err(failure.into_trait_err());
-            }
-        };
-        if !list.is_empty() {
-            dns.note_family_mix(family_mix_of(&list));
-        }
-        // Log point 3/4 (reference resolution complete; adapted to
-        // debug — deviation declared above).
-        debug!(target: LOG_TARGET, host, family = ?family_mix_of(&list),
-            elapsed_us = started.elapsed().as_micros() as u64, "dns resolution complete");
-        crate::lock(&self.cache).insert_list(host.to_string(), list.clone(), Instant::now());
-        Ok(list)
-    }
-
-    /// Classified resolution (the metric seam): when the stack carries
-    /// the timeout decorator, timeouts classify via the typed exit;
-    /// otherwise (opaque trait object) every failure is `Failed`. The
-    /// trait `String` surface is behaviorally unchanged (wording via
-    /// [`ClassifiedFailure::into_trait_err`] is verbatim-identical to
-    /// the existing path).
-    async fn resolve_classified(&self, host: String) -> Result<Vec<IpAddr>, ClassifiedFailure> {
-        match &self.timed {
-            Some(timed) => timed.resolve_list_classified(host).await,
-            None => self
-                .resolver
-                .resolve_list(host)
-                .await
-                .map_err(ClassifiedFailure::Failed),
-        }
-    }
-
-    /// Per-family resolution (the actor consumption face;
-    /// cache-aware): whole-list query/backfill + per-family projection.
-    /// A cached list with no record for the family → Err (**no
-    /// re-query** — the whole list is the resolver's authoritative
-    /// answer; a re-query within the TTL returns the same value, see
-    /// the module docs).
-    pub async fn resolve_family(
-        &self,
-        host: String,
-        family: ResolveFamily,
-    ) -> Result<IpAddr, String> {
-        let list = self.list_cached_or_resolve(&host).await?;
-        pick_ip_family(&list, family)
-    }
-
-    /// Transport bridge (the **single bridging source** for the reqwest
-    /// `Resolve` adapter shell / the FTP resolution face — adapter
-    /// shells only call and convert types):
-    ///
-    /// - **Literal-IP passthrough** (zero resolution cost, the same
-    ///   shape as aria2 `NameResolveCommand.cc` isNumericHost): on the
-    ///   reqwest/hyper-util path this branch is dead code (hyper-util's
-    ///   `try_parse` short-circuits before the resolver, no behavior
-    ///   change) — kept for direct-call faces (FTP, etc.) to reuse;
-    /// - **port 0 synthesis**: the reqwest face always passes
-    ///   `port = 0` — hyper-util fills port 0 on returned addresses by
-    ///   scheme convention, and an explicit URL port overrides (a
-    ///   nonzero port would be reused, hence cache entries hold only
-    ///   [`IpAddr`] and the port is always synthesized by this function
-    ///   per call-face argument); direct faces pass a real port and use
-    ///   it directly;
-    /// - error surface [`ResolveError`] (information inside the trait
-    ///   `String` boundary passes through unchanged), boxed
-    ///   type-preserving by adapter shells via [`box_resolve_error`].
-    pub async fn resolve_for_transport(
-        &self,
-        host: &str,
-        port: u16,
-    ) -> Result<Vec<SocketAddr>, ResolveError> {
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            return Ok(vec![SocketAddr::new(ip, port)]);
-        }
-        let list = self
-            .list_cached_or_resolve(host)
-            .await
-            .map_err(ResolveError::Failed)?;
-        Ok(list
-            .into_iter()
-            .map(|ip| SocketAddr::new(ip, port))
-            .collect())
-    }
-}
-
 /// Resolution routing: first IPv4 preferred; v6-only → first v6;
 /// empty → Err (retryable). Upstream anchor: aria2
 /// `NameResolveCommand.cc` (see docs/design/io.md).
@@ -1093,45 +620,16 @@ pub fn pick_ip_family(addrs: &[IpAddr], family: ResolveFamily) -> Result<IpAddr,
         })
 }
 
-/// host→`Vec<IpAddr>` cache (TTL [`HOST_CACHE_TTL`] (≥5min), bounded
-/// capacity [`HOST_CACHE_CAPACITY`] (oldest by insertion order evicted).
-/// A hit issues no query; **negative results are not cached** (insertion
-/// happens only after a successful resolve — resolution flapping is not
-/// pinned; retries are driven by caller backoff). Note: a v6-only result
-/// is a positive value and is cached the same way — no further query
-/// within the TTL (a carrier-face rejection is a protocol-plane verdict;
-/// a re-query returns the same), and DNS changes converge via the TTL.
-///
-/// Entries are **per-host whole lists**: `(Vec<IpAddr>, Instant)` —
-/// [`IpAddr`], not `SocketAddr` (**no port-carrying surface**:
-/// reqwest/hyper-util reuse a nonzero port on the returned address, so a
-/// port in the cache would leak the first connect's port into later
-/// requests; each consumer face synthesizes its own port, see
-/// [`SharedDns::resolve_for_transport`]). The per-family view is a list
-/// projection (first address of the family, [`Self::get_family`]); the
-/// single-address view [`Self::get`] (v4-first) keeps its semantics.
-/// **Capacity accounting**: 256 counts **host entries** (one entry per
-/// domain, A+AAAA combined); the earlier per-(host, family) shape spent
-/// two entries per dual-stack host, so after the shape upgrade the same
-/// constant holds twice the physical entries.
-///
-/// **Write invariant**: whole-list insertion ([`Self::insert_list`],
-/// crate-visible) happens only inside the shared resolver [`SharedDns`]
-/// — external callers get read-only projections with no separate write
-/// path (distributed writes would break the "whole list = the resolver's
-/// authoritative answer" cache semantics).
-///
-/// Every method takes `now: Instant` explicitly (callers run
-/// synthetic-clock tests on the same terms — the reqwest `Resolve` face
-/// has no clock parameter; the shared service uses real `Instant`
-/// internally and synthetic-clock tests converge in this layer);
-/// `std`-lock-agnostic implementation (held via [`SharedDns`]'s
-/// `StdMutex` in short critical sections, never across an await).
+/// Complete DNS answers with bounded storage. Positive and negative entries
+/// use the same capacity and ordering; expiry removes both data and its index.
+/// Explicit `now` parameters keep TTL behavior deterministic in unit tests.
+type CachedAnswer = (Result<Vec<IpAddr>, ResolveError>, Instant, Duration);
+
 #[derive(Debug)]
 pub struct HostCache {
     ttl: Duration,
     capacity: usize,
-    entries: HashMap<String, (Vec<IpAddr>, Instant)>,
+    entries: HashMap<String, CachedAnswer>,
     /// Insertion order (oldest evicted; a get hit does not reorder —
     /// "oldest by insertion" rather than strict LRU; either eviction
     /// rule serves, and this implementation takes the simpler one).
@@ -1174,17 +672,29 @@ impl HostCache {
     /// goes to consumers like hyper's Happy Eyeballs). Hit domain and
     /// eviction semantics as in [`Self::get_family`].
     pub fn get_list(&mut self, host: &str, now: Instant) -> Option<Vec<IpAddr>> {
-        let (addrs, inserted_at) = self.entries.get_mut(host)?;
-        if now.duration_since(*inserted_at) >= self.ttl {
-            self.entries.remove(host); // stale order entry is cleaned up by the insert eviction loop
-            if let Some(m) = &self.metrics {
-                // Eviction feed point 1: TTL expiry (lazy clear on the
-                // read path).
-                m.dns().note_cache_event(DnsCacheEvent::EvictTtl);
+        self.get_result(host, now)?.ok()
+    }
+
+    fn get_result(
+        &mut self,
+        host: &str,
+        now: Instant,
+    ) -> Option<Result<Vec<IpAddr>, ResolveError>> {
+        let (result, inserted_at, ttl) = self.entries.get(host)?;
+        if now.saturating_duration_since(*inserted_at) >= *ttl {
+            self.entries.remove(host);
+            self.order.retain(|entry| entry != host);
+            if let Some(metrics) = &self.metrics {
+                metrics.dns().note_cache_event(DnsCacheEvent::EvictTtl);
             }
             return None;
         }
-        Some(addrs.clone())
+        Some(result.clone())
+    }
+
+    fn remove(&mut self, host: &str) {
+        self.entries.remove(host);
+        self.order.retain(|entry| entry != host);
     }
 
     /// Per-family projection read: the **first** address of the family
@@ -1208,39 +718,72 @@ impl HostCache {
         pick_ip(&addrs)
     }
 
-    /// Whole-list backfill (the **only write entry point**,
-    /// crate-visible — called only on [`SharedDns`]'s successful resolve
-    /// path; empty lists are not cached, see the negative-not-cached
-    /// note). An existing entry refreshes its list and timestamp (order
+    /// Positive whole-list backfill. Empty successful lists are not stored.
+    /// An existing entry refreshes its list and timestamp (order
     /// position unchanged); at capacity the oldest by insertion order is
     /// evicted.
     pub(crate) fn insert_list(&mut self, host: String, addrs: Vec<IpAddr>, now: Instant) {
-        if addrs.is_empty() {
+        if !addrs.is_empty() {
+            self.insert_result(host, Ok(addrs), now, self.ttl);
+        }
+    }
+
+    fn insert_result(
+        &mut self,
+        host: String,
+        result: Result<Vec<IpAddr>, ResolveError>,
+        now: Instant,
+        ttl: Duration,
+    ) {
+        if self.capacity == 0 || ttl.is_zero() {
             return;
         }
         if !self.entries.contains_key(&host) {
             while self.entries.len() >= self.capacity {
-                while let Some(oldest) = self.order.pop_front() {
-                    if self.entries.remove(&oldest).is_some() {
-                        if let Some(m) = &self.metrics {
-                            // Eviction feed point 2: capacity eviction
-                            // (an insert evicts the oldest by insertion
-                            // order).
-                            m.dns().note_cache_event(DnsCacheEvent::EvictCapacity);
-                        }
-                        break;
+                if let Some(oldest) = self.order.pop_front() {
+                    self.entries.remove(&oldest);
+                    if let Some(metrics) = &self.metrics {
+                        metrics.dns().note_cache_event(DnsCacheEvent::EvictCapacity);
                     }
+                } else {
+                    break;
                 }
             }
             self.order.push_back(host.clone());
         }
-        self.entries.insert(host, (addrs, now));
+        self.entries.insert(host, (result, now, ttl));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_expiry_reinsertion_and_negative_entries_share_bounded_order() {
+        let ttl = Duration::from_secs(1);
+        let mut cache = HostCache::new(ttl, 2);
+        let mut now = Instant::now();
+        let address = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        for _ in 0..10_000 {
+            cache.insert_list("repeated.test".into(), vec![address], now);
+            now += ttl;
+            assert!(cache.get_result("repeated.test", now).is_none());
+            assert!(cache.order.is_empty());
+        }
+        cache.insert_list("older.test".into(), vec![address], now);
+        cache.insert_list("repeated.test".into(), vec![address], now);
+        cache.insert_result(
+            "negative.test".into(),
+            Err(ResolveError::Failed("temporary".into())),
+            now,
+            ttl,
+        );
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.order.len(), 2);
+        assert_eq!(cache.get_list("repeated.test", now), Some(vec![address]));
+        assert!(cache.get_result("older.test", now).is_none());
+    }
 
     /// Routing table: v4-first takes the first v4 (even if v6 comes
     /// first); v6-only → first v6; empty → Err.
@@ -1297,8 +840,8 @@ mod tests {
         assert_eq!(cache.entries.len(), 0);
         assert_eq!(
             cache.order.len(),
-            1,
-            "stale order entry cleared by the eviction loop"
+            0,
+            "expiration removes ordering state too"
         );
     }
 
@@ -1520,7 +1063,7 @@ mod tests {
             None
         );
         assert_eq!(cache.get("solo.example", t0), Some(v6));
-        // Empty lists are not cached (negatives are not cached).
+        // Empty successful lists are not stored as positive cache entries.
         cache.insert_list("empty.example".to_string(), vec![], t0);
         assert!(cache.get_list("empty.example", t0).is_none());
     }
@@ -1869,8 +1412,7 @@ mod tests {
             "empty projection does not re-query (pinned within TTL)"
         );
 
-        // Negatives are not cached: a failed host re-queries (the
-        // underlying semantics of the backoff retry path).
+        // Failed lookups are cached briefly to suppress repeated bursts.
         let dead = CountingStub::err("nxdomain");
         let dns = SharedDns::with_resolver(Arc::new(dead.clone()));
         for i in 1..=2 {
@@ -1882,7 +1424,11 @@ mod tests {
                 "failure on attempt {i}"
             );
         }
-        assert_eq!(dead.calls(), 2, "negatives not cached, retry re-queries");
+        assert_eq!(
+            dead.calls(),
+            1,
+            "short negative cache coalesces repeated failure"
+        );
     }
 
     /// Transport-bridge literal passthrough (zero resolution — stub
@@ -2435,9 +1981,8 @@ mod tests {
         assert_eq!(r6.snapshot().dns.family_mix_v6_only, 1);
     }
 
-    /// Failure double-count: negatives are not cached → each retry
-    /// counts one miss + error; timeout stays zero (mutually exclusive
-    /// with error); failure samples also enter the histogram.
+    /// Failure outcomes count per caller; a negative hit does not issue a
+    /// backend query or increment cache misses.
     #[tokio::test]
     async fn shared_dns_metrics_error_double_counts_miss_and_error() {
         let registry = Arc::new(MetricsRegistry::new());
@@ -2453,7 +1998,8 @@ mod tests {
             );
         }
         let s = registry.snapshot().dns;
-        assert_eq!(s.lookups_miss, 2, "miss +1 per attempt");
+        assert_eq!(s.lookups_miss, 1, "only the first call misses the cache");
+        assert_eq!(s.negative_hit, 1);
         assert_eq!(
             s.lookups_error, 2,
             "resolution failure +1 per attempt (miss+error double-count semantics)"

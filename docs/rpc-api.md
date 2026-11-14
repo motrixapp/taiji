@@ -198,7 +198,8 @@ guard / attach comparison semantics).
 |---|---|
 | `taiji.createTorrent` | Torrent creation (files/outputDir/pieceLength/format/private/announce) |
 | `taiji.addTracker` / `taiji.removeTracker` | BT task tracker dynamic editing (Plan B, see the next section) |
-| `taiji.moveStorage` / `taiji.renameFile` | Storage migration and renaming |
+| `taiji.moveStorage` | Storage migration: `moveStorage(gid, dir)` moves a task's on-disk payload to `dir` (same-volume atomic rename; cross-volume copy+fsync+unlink via a temp sibling). Families: torrent payload (the multi-file `name` subtree / single file), HTTP `.part`, magnet & .torrent-URL tasks (dir-only swap); media tasks keep the not_supported capability face. Accepted states: waiting/paused (moves immediately), active (auto-quiesce via the changeOption restart path, then moves and reactivates at the front), seeding (seed-pause quiesce, re-enters seeding after the commit); checking/synthesis/results reject. Async acceptance: replies `"OK"` once the move journal (config_json, same row upsert, strictly before any on-disk action) is durable and the quiesce started; completion is observable via `tellStatus` `dir`. Crash safety: the source payload is never destroyed before the commit — a kill at any point is redone idempotently at the next startup (journal close-out); a failed runtime move keeps the journal (retried on restart) and the task continues at the old dir. Empty/blank `dir` = `Illegal argument.`; target nested inside the current dir and in-flight duplicates are refused |
+| `taiji.renameFile` | File renaming — registered but not yet implemented (answers not_supported after GID resolution) |
 | `taiji.banAddr` / `unbanAddr` / `listBans` | Peer ban surface |
 | `taiji.setSchedulerPolicy` / `getSchedulerPolicy` | Scheduling policy |
 | `taiji.setStreamingPlayhead` | Streaming piece-selection playhead |

@@ -1,5 +1,5 @@
-//! Acceptance: v2-only download loop plus hybrid dual-swarm parallelism
-//! (both infohashes download the same bytes at the same time).
+//! Acceptance: v2-only download loop plus hybrid dual-swarm discovery
+//! (both infohashes announce before payload becomes available).
 //!
 //! Per case: build a metainfo locally (BEP 52 structure; the piece-layers
 //! load check must pass) -> fake tracker (records info_hash for the dual
@@ -159,62 +159,112 @@ fn build_hybrid_torrent(content_a: &[u8], content_b: &[u8], announce: &str) -> (
     (torrent, stream)
 }
 
-/// Fake tracker: records the info_hash of every request verbatim
-/// (percent-encoded; the test side compares in percent-encoded form) and
-/// answers with the seeder address.
+/// A tracker lives until the test cancels its token. Only announces count
+/// toward the gate; both hybrid identities must arrive before either gets
+/// peers, otherwise the tiny payload can finish through one face first.
 async fn fake_tracker(
     seeder: SocketAddr,
-    expected_requests: usize,
+    expected_announces: usize,
     seen: Arc<Mutex<HashSet<String>>>,
-) -> SocketAddr {
+    root: &tokio_util::sync::CancellationToken,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .unwrap_or_else(|e| panic!("bind: {e}"));
     let addr = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
-    tokio::spawn(async move {
-        for _ in 0..expected_requests {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                return;
-            };
-            let mut req = Vec::new();
-            let mut chunk = [0u8; 512];
-            loop {
-                if sock.read(&mut chunk).await.unwrap_or(0) == 0 {
-                    break;
-                }
-                req.extend_from_slice(&chunk);
-                if req.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let text = String::from_utf8_lossy(&req).into_owned();
-            if let Some(i) = text.find("info_hash=") {
-                let rest = &text[i + "info_hash=".len()..];
-                let end = rest.find('&').unwrap_or(rest.len());
-                let _ = seen
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(rest[..end].to_string());
-            }
-            let std::net::IpAddr::V4(v4) = seeder.ip() else {
-                panic!("test expects IPv4");
-            };
-            let mut peers = Vec::new();
-            peers.extend_from_slice(&v4.octets());
-            peers.extend_from_slice(&seeder.port().to_be_bytes());
-            let mut raw = Vec::new();
-            raw.extend_from_slice(b"d8:intervali60e5:peers");
-            raw.extend_from_slice(peers.len().to_string().as_bytes());
-            raw.push(b':');
-            raw.extend_from_slice(&peers);
-            raw.push(b'e');
-            let head = format!("HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n", raw.len());
-            let _ = sock.write_all(head.as_bytes()).await;
-            let _ = sock.write_all(&raw).await;
-            let _ = sock.shutdown().await;
-        }
+    let (ready, _) = tokio::sync::watch::channel(false);
+    let fixture = Arc::new(TrackerFixture {
+        seeder,
+        expected_announces,
+        seen,
+        ready,
     });
-    addr
+    let token = root.child_token();
+    let task = tokio::spawn(async move {
+        let mut requests = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => break,
+                accepted = listener.accept() => {
+                    let Ok((socket, _)) = accepted else { break };
+                    let fixture = Arc::clone(&fixture);
+                    requests.spawn(async move { fixture.serve(socket).await });
+                }
+                Some(result) = requests.join_next(), if !requests.is_empty() => {
+                    // A peer may cancel an HTTP request during engine shutdown.
+                    let _ = result.unwrap_or_else(|error| panic!("tracker task: {error}"));
+                }
+            }
+        }
+        requests.shutdown().await;
+    });
+    (addr, task)
+}
+
+struct TrackerFixture {
+    seeder: SocketAddr,
+    expected_announces: usize,
+    seen: Arc<Mutex<HashSet<String>>>,
+    ready: tokio::sync::watch::Sender<bool>,
+}
+
+impl TrackerFixture {
+    async fn serve(&self, mut socket: tokio::net::TcpStream) -> std::io::Result<()> {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 512];
+        while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+            let count = socket.read(&mut chunk).await?;
+            if count == 0 {
+                return Ok(());
+            }
+            request.extend_from_slice(&chunk[..count]);
+            if request.len() > 8192 {
+                return Err(std::io::Error::other("oversized tracker request"));
+            }
+        }
+        let text = String::from_utf8_lossy(&request);
+        let target = text.split_whitespace().nth(1).unwrap_or("");
+        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        let (status, body) = match path {
+            "/announce" => {
+                let hash = query
+                    .split('&')
+                    .find_map(|part| part.strip_prefix("info_hash="))
+                    .filter(|hash| !hash.is_empty())
+                    .ok_or_else(|| std::io::Error::other("announce missing info_hash"))?;
+                let count = {
+                    let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+                    seen.insert(hash.to_string());
+                    seen.len()
+                };
+                if count >= self.expected_announces {
+                    self.ready.send_replace(true);
+                }
+                let mut ready = self.ready.subscribe();
+                ready
+                    .wait_for(|all_announced| *all_announced)
+                    .await
+                    .map_err(std::io::Error::other)?;
+                let std::net::IpAddr::V4(ip) = self.seeder.ip() else {
+                    return Err(std::io::Error::other("test expects IPv4"));
+                };
+                let mut body = b"d8:intervali60e5:peers6:".to_vec();
+                body.extend_from_slice(&ip.octets());
+                body.extend_from_slice(&self.seeder.port().to_be_bytes());
+                body.push(b'e');
+                ("200 OK", body)
+            }
+            "/scrape" => ("200 OK", b"d5:filesdee".to_vec()),
+            _ => ("404 Not Found", Vec::new()),
+        };
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(head.as_bytes()).await?;
+        socket.write_all(&body).await?;
+        socket.shutdown().await
+    }
 }
 
 /// Dual-protocol mini-seeder; routes serving on the handshake info_hash.
@@ -413,6 +463,8 @@ fn tmp_dir(tag: &str) -> std::path::PathBuf {
 /// PerFile addressing + piece-root verification + compact layout on disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn v2_only_downloads_via_truncated_identity() {
+    let root = tokio_util::sync::CancellationToken::new();
+    let _cancel = root.clone().drop_guard();
     let content: Vec<u8> = (0..2 * L as usize).map(|i| (i * 31 % 251) as u8).collect();
     let tmp = tmp_dir("v2only");
 
@@ -423,7 +475,7 @@ async fn v2_only_downloads_via_truncated_identity() {
         .local_addr()
         .unwrap_or_else(|e| panic!("{e}"));
     let seen = Arc::new(Mutex::new(HashSet::new()));
-    let tracker_addr = fake_tracker(seeder_addr, 1, Arc::clone(&seen)).await;
+    let (tracker_addr, tracker_task) = fake_tracker(seeder_addr, 1, Arc::clone(&seen), &root).await;
 
     let torrent = build_v2_only_torrent(&content, &format!("http://{tracker_addr}/announce"));
     let meta = Metainfo::parse(&torrent).unwrap_or_else(|e| panic!("parse: {e}"));
@@ -456,7 +508,6 @@ async fn v2_only_downloads_via_truncated_identity() {
         Arc::new(vec![(file_root, 0, content.len() as u64)]),
     ));
 
-    let root = tokio_util::sync::CancellationToken::new();
     let cfg = taiji_core::engine::engine_config(
         &meta,
         tmp.clone(),
@@ -471,6 +522,9 @@ async fn v2_only_downloads_via_truncated_identity() {
         .await
         .unwrap_or_else(|_| panic!("engine timed out"));
     root.cancel();
+    tracker_task
+        .await
+        .unwrap_or_else(|error| panic!("tracker shutdown: {error}"));
     let end = end.unwrap_or_else(|e| panic!("join: {e}"));
     assert!(matches!(end, EngineEnd::Completed), "got {end:?}");
     let got = std::fs::read(tmp.join("v2.bin")).unwrap_or_else(|e| panic!("{e}"));
@@ -482,13 +536,14 @@ async fn v2_only_downloads_via_truncated_identity() {
     seeder_task.abort();
 }
 
-/// hybrid: dual swarm in parallel — the same seeder takes one connection
-/// under the v1 identity (stream space) and one under the v2 truncated
-/// identity (file-aligned space); the engine downloads on both faces at
-/// once, cross-face propagation avoids duplicate work, the BEP 52 dual
-/// checks pass, and pad zeros never reach disk.
+/// hybrid: both identities announce before the tracker returns peers.
+/// The seeder supports v1 stream space and v2 file-aligned space; shared
+/// progress may satisfy either face. The BEP 52 dual checks pass, and
+/// pad zeros never reach disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hybrid_dual_swarm_downloads_in_parallel() {
+    let root = tokio_util::sync::CancellationToken::new();
+    let _cancel = root.clone().drop_guard();
     let content_a: Vec<u8> = (0..70000).map(|i| (i * 17 % 253) as u8).collect();
     let content_b: Vec<u8> = (0..30000).map(|i| (i * 7 % 249) as u8).collect();
     let tmp = tmp_dir("hybrid");
@@ -500,7 +555,7 @@ async fn hybrid_dual_swarm_downloads_in_parallel() {
         .local_addr()
         .unwrap_or_else(|e| panic!("{e}"));
     let seen = Arc::new(Mutex::new(HashSet::new()));
-    let tracker_addr = fake_tracker(seeder_addr, 2, Arc::clone(&seen)).await;
+    let (tracker_addr, tracker_task) = fake_tracker(seeder_addr, 2, Arc::clone(&seen), &root).await;
 
     let (torrent, stream) = build_hybrid_torrent(
         &content_a,
@@ -543,7 +598,6 @@ async fn hybrid_dual_swarm_downloads_in_parallel() {
         ]),
     ));
 
-    let root = tokio_util::sync::CancellationToken::new();
     let cfg = taiji_core::engine::engine_config(
         &meta,
         tmp.clone(),
@@ -560,6 +614,9 @@ async fn hybrid_dual_swarm_downloads_in_parallel() {
         .await
         .unwrap_or_else(|_| panic!("engine timed out"));
     root.cancel();
+    tracker_task
+        .await
+        .unwrap_or_else(|error| panic!("tracker shutdown: {error}"));
     let end = end.unwrap_or_else(|e| panic!("join: {e}"));
     assert!(matches!(end, EngineEnd::Completed), "got {end:?}");
 
@@ -611,4 +668,64 @@ fn pct(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+async fn tracker_request(addr: SocketAddr, path: &str) -> Vec<u8> {
+    let mut socket = tokio::net::TcpStream::connect(addr)
+        .await
+        .unwrap_or_else(|error| panic!("tracker connect: {error}"));
+    socket
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("tracker write: {error}"));
+    let mut response = Vec::new();
+    socket
+        .read_to_end(&mut response)
+        .await
+        .unwrap_or_else(|error| panic!("tracker read: {error}"));
+    response
+}
+
+#[tokio::test]
+async fn tracker_ignores_empty_connections_and_scrapes() {
+    let root = tokio_util::sync::CancellationToken::new();
+    let _cancel = root.clone().drop_guard();
+    let seen = Arc::new(Mutex::new(HashSet::new()));
+    let (address, tracker_task) = fake_tracker(
+        "127.0.0.1:12345".parse().unwrap_or_else(|e| panic!("{e}")),
+        2,
+        Arc::clone(&seen),
+        &root,
+    )
+    .await;
+    let empty = tokio::net::TcpStream::connect(address)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    drop(empty);
+    let scrape = tracker_request(address, "/scrape?info_hash=first").await;
+    assert!(!scrape.is_empty());
+    assert!(
+        seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+        "scrape is not an announce"
+    );
+    let responses = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            tracker_request(address, "/announce?info_hash=first"),
+            tracker_request(address, "/announce?info_hash=second")
+        )
+    })
+    .await
+    .unwrap_or_else(|_| panic!("both announces must receive a response"));
+    assert!(!responses.0.is_empty() && !responses.1.is_empty());
+    assert_eq!(
+        *seen.lock().unwrap_or_else(|e| e.into_inner()),
+        HashSet::from(["first".to_string(), "second".to_string()]),
+        "only the distinct announce identities count"
+    );
+    root.cancel();
+    tracker_task
+        .await
+        .unwrap_or_else(|error| panic!("tracker shutdown: {error}"));
 }

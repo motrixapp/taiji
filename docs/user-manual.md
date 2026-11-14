@@ -85,6 +85,24 @@ A timed-out system lookup may continue in the OS. taiji bounds these calls to
 I/O. The `/metrics` DNS counters distinguish cache hits, coalesced callers,
 backend queries and actual system activity; they do not expose hostnames.
 
+## Magnet preparation and cache
+
+Motrix prepares enabled DHT discovery asynchronously after connecting to its
+matching taiji engine. File-list resolution has a separate four-task
+queue. The metadata connection budget respects `bt-max-peers` up to 128 attempts
+(128 when unlimited), including pending handshakes, with a 30/s dial rate and a
+24-attempt initial burst. Pending handshakes do not count as connected peers for
+tracker requests.
+
+Verified metadata is reused in memory (128 entries / 16 MiB) and in the session
+database (1024 entries / 64 MiB, at most 16 MiB per entry). Cache records contain
+raw verified info and piece layers; they do not inherit outer tracker URLs,
+credentials, output paths or file selections. Identity and structure are checked
+again after reading disk; invalid cached data falls back to discovery. Removing
+a task does not remove this bounded content cache. Existing retained task
+metadata is also reusable. Schema migration v5 adds the derived cache without
+replacing v4 task rows.
+
 ## Download and Seeding
 
 ```sh

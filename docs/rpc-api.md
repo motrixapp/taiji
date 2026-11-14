@@ -168,6 +168,35 @@ an interrupted request can be replayed after restart. Unselected files are not
 preallocated. A piece shared by selected and unselected files may still require
 bytes outside the selected file for hash verification.
 
+## Magnet discovery preparation and timings
+
+`taiji.prepareBitTorrent()` is an authenticated write method returning `"OK"`
+after accepting background preparation. Calls are coalesced. It prepares the
+shared listener and enabled DHT families without adding a task or announcing an
+infohash. Disabled DHT policy is respected. The acknowledgement does not promise
+bootstrap has completed. Motrix and taiji ship this contract together; no
+feature-name negotiation is required.
+
+`taiji.getMagnetResolution(gid)` is a read-only native method. It returns `attemptId` (16 hex characters), `revision`,
+`elapsedMs`, `state` (`queued`, `resolving`, `ready`, `paused`, or `failed`),
+`cache` (`null`, `memory`, or `persistent`), and `milestones`. State is projected
+from the current task queue in the same read as the timing snapshot.
+Milestones are optional millisecond offsets from acceptance into the session
+queue: `admittedMs`, `firstCandidateMs`, `firstHandshakeMs`, `firstInfoBlockMs`,
+`infoVerifiedMs`, `verificationReadyMs`, `metadataReadyMs`, and
+`selectionCommittedMs`. Missing values mean the event has not been observed;
+cache hits need not have network milestones. Times use one monotonic clock;
+do not subtract timestamps from another process. A new attempt gets a new ID.
+The latest 2048 records are retained in memory; unavailable or aged-out records
+return an explicit error. Existing task status and notification envelopes are
+unchanged. Hosts can read the snapshot when the normal pause notification
+announces that a native file-selection task is ready.
+
+Native selection-barrier tasks use the bounded four-task metadata queue, even
+when payload download slots are occupied. Confirmation re-enters the payload
+queue under the existing task ID. Resolution timeouts should start at admission,
+not while waiting for a metadata slot.
+
 ## Network context notification
 
 `taiji.notifyNetworkChange()` takes no arguments and returns `"OK"`. It is a

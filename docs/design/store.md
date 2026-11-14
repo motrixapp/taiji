@@ -678,6 +678,23 @@ binary must land at `user_version = 4` with the CHECKs present and its
 rows cleared. The v1/v2/v3 SQL texts are never edited (released
 hash-recovery binaries occupy ledger v2); v4 carries its own full DDL.
 
+### Ledger v5: bounded verified metadata cache
+
+v5 adds `metadata_cache` and lookup indexes while preserving existing v4 task
+rows. The cache is derived content, owned by the same PersistWriter connection:
+at most 1024 entries / 64 MiB, with a 16 MiB per-entry limit and LRU eviction.
+Full v1 and v2 identities have separate indexes; hybrid lookups require both.
+On a miss, an indexed lookup can reuse a retained task's metadata BLOB.
+
+The core verifies the original info bytes and complete metainfo structure before
+caching, preserves raw info and validated piece layers, and drops outer trackers,
+web seeds and task settings. Disk hits are verified again in `spawn_blocking`;
+invalid derived entries are evicted without deleting task-owned metadata.
+Cache writes are transactional and unchanged bytes are not rewritten. Hits
+update recency only when reading disk; there is no periodic cache write task.
+Removing a task does not delete its derived cache entry. Cache eviction never
+changes task ownership or file selection.
+
 ### Pre-import backup anchor (`.v1.bak`)
 
 The backup must run before the target's first open/migration so it

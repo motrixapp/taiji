@@ -142,6 +142,29 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
 被预分配；当选中和未选文件共享同一个分块时，为完成哈希验证，仍可能需要
 下载选中文件以外的部分字节。
 
+## 磁链发现预热与分阶段计时
+
+`taiji.prepareBitTorrent()` 是需要认证的写方法，接受后台准备请求后返回
+`"OK"`，并发请求会合并。它准备共享监听器和已启用的 DHT 地址族，不新增任务，
+也不 announce 任何 infohash；遵守关闭 DHT 的设置。返回成功不表示 DHT 引导
+已经完成。Motrix 与 taiji 同步发布这套契约，无需按功能名称协商。
+
+`taiji.getMagnetResolution(gid)` 是原生只读方法。返回 `attemptId`（16 位十六进制）、`revision`、
+`elapsedMs`、`state`（`queued`、`resolving`、`ready`、`paused` 或 `failed`）、
+`cache`（`null`、`memory` 或 `persistent`）和 `milestones`。状态与阶段快照
+在同一次读取中按当前任务队列计算。
+阶段字段为可选的毫秒偏移，起点是本次尝试进入会话队列：`admittedMs`、
+`firstCandidateMs`、`firstHandshakeMs`、`firstInfoBlockMs`、`infoVerifiedMs`、
+`verificationReadyMs`、`metadataReadyMs`、`selectionCommittedMs`。缺省表示尚未
+观察到该阶段；缓存命中可以没有网络阶段。所有时间来自同一单调时钟，不能与
+其他进程的时间戳相减。新尝试使用新 ID。内存保留最近 2048 条记录，不存在或
+已淘汰的记录明确报错。原有任务状态和通知格式保持不变；宿主可在原生文件
+选择任务就绪的暂停通知后读取快照。
+
+原生文件选择屏障任务使用有界的四槽元数据队列，普通下载槽位占满时仍可
+解析。确认后保持同一任务 ID，重新按下载槽位排队。解析超时应从准入开始
+计算，不应消耗在等待元数据槽位期间。
+
 ## 网络上下文通知
 
 `taiji.notifyNetworkChange()` 不接收参数，返回 `"OK"`。这是仅在 taiji 原生

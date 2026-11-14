@@ -30,6 +30,38 @@ windows-latest 跑 store/filetree 子集。模糊测试：`cargo fuzz`（见
 `fuzz/`；目标覆盖 bencode / filetree / peer frame / magnet / µTP / MSE /
 UDP demux / NAT-PMP / IGD XML）。
 
+## 磁链解析延迟对照
+
+`scripts/bench_magnet.py` 使用合成 tracker、元数据 peer 和独立配置测试。
+可选参考端为 libtorrent Python 绑定与 `transmission-daemon`；两者都不是
+taiji 运行依赖。在隔离环境安装 Python 绑定，构建 release 版 taiji 后运行：
+
+```sh
+python scripts/bench_magnet.py --taiji target/release/taiji \
+  --samples 30 --peer-host <本机局域网IPv4> --output /tmp/magnet-comparison
+```
+
+peer 地址必须属于测试机。Transmission 拒绝 tracker 返回的回环 peer，
+跨客户端测试因此使用本机局域网接口；RPC 和 tracker 仍绑定回环地址。
+合成 peer 使用明文 TCP，Transmission 配置为允许明文，libtorrent 在此
+fixture 中关闭 uTP；加密和传输互操作应由相应的独立测试验证。默认 fixture
+不使用公网 swarm 或用户客户端配置，脚本不会安装或启动系统服务。
+
+场景包括健康发现、64 个不回握手的 peer 后才出现可用 peer、24 个不响应的
+HTTP tracker 后才出现可用 tracker，以及元数据分块延迟。`--baseline` 可
+加入旧 taiji 二进制，`--clients` 选择参考端，`--scenarios` 选择场景。
+执行顺序按记录的随机种子交错。输出保留全部超时与错误、每轮计数器、原生
+阶段计时和仅成功样本的延迟分位数。libtorrent 会话是协议引擎参考，不代表
+qBittorrent 整个界面的性能。已有结果不会覆盖，每轮应使用新的输出目录。
+
+显式传入 `--torrent <已知种子文件> --scenarios public-trackers,public-dht`
+可选择公网元数据对照。提交给客户端的只有派生 magnet，不提供本地种子内容；
+DHT-only 场景去掉 tracker 提示。`--warmup 30` 给每个客户端 30 秒空闲发现
+准备时间，不计入解析延迟。taiji 等待文件选择，libtorrent 使用 upload mode。
+Transmission 的 RPC 不能在元数据到达前落实文件排除，因此不参加公网测试；
+合成 fixture 不提供正文数据，仍可用于对照。公网测试启用参考客户端正常的 DHT
+和 uTP 路径。公网与确定性 fixture 的结果分开统计，并保留失败尝试。
+
 ## 发布
 
 - crates.io：永不发布 —— 工作区声明为 `publish = false`；引擎只以二进制

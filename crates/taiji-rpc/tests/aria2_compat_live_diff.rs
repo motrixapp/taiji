@@ -9,14 +9,12 @@
 //! compared one by one — response shape, error codes, error messages, event
 //! names, and option echo values.
 //!
-//! **Zero differences outside the ledger**: every observed difference must
-//! hit a registered id in the deviations ledger
-//! (docs/compat/aria2-v1-deviations.yaml — [`WHITELIST`] below lists the
-//! ids this file may exempt; the registration tests check each against the
-//! embedded ledger, and every ledger `where` anchor must resolve to an
-//! existing repo file); a difference with no matching entry turns the test
-//! red. Reverse governance: a ledger entry whose two sides have converged
-//! (no actual difference) is also red — entry removal requires a PR.
+//! **Zero differences outside the whitelist**: every observed difference must
+//! hit an entry in [`WHITELIST`] below (each entry is checked at compile time
+//! against its anchor text in docs/rpc-api-diff.md); a difference with no
+//! matching entry turns the test red. Reverse governance: a whitelist entry
+//! whose two sides have converged (no actual difference) is also red — entry
+//! removal requires a PR.
 //!
 //! # Explicit skip policy (no fake green)
 //!
@@ -117,166 +115,93 @@ const GID_METHODS: &[&str] = &[
     "changePosition",
 ];
 
-/// The deviations ledger (embedded at compile time): the exemption
-/// source — a difference is allowed only when its id is registered
-/// here (docs/compat/aria2-v1-deviations.yaml; five fixed fields per
-/// entry: id/kind/where/what/refs). Ledger-external differences are
-/// red, and a ledger id whose two sides converge is red (reverse
-/// governance, unchanged).
-const LEDGER: &str = include_str!(concat!(
+/// Declaration doc for differences (embedded at compile time): the source
+/// checked against whitelist anchors.
+const DOC: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../docs/compat/aria2-v1-deviations.yaml"
+    "/../../docs/rpc-api-diff.md"
 ));
 
-/// Floor for the ledger parser (the 2026-11-14 Phase C wiring count; a
-/// whole-section loss must not silently turn the structure check
-/// green). Raise alongside legitimate growth; lower only with a PR.
-const LEDGER_MIN_ENTRIES: usize = 56;
-
-/// The four ledger kinds (docs/compat/aria2-v1-deviations.yaml header).
-const LEDGER_KINDS: &[&str] = &["known-deviation", "taiji-extension", "fold", "test-gating"];
-
-/// One parsed ledger entry (the five fixed fields; `what`/`refs` carry
-/// their folded-scalar continuation lines for containment checks).
-#[derive(Debug, Clone)]
-struct LedgerEntry {
-    id: String,
-    kind: String,
-    where_: String,
-    what: String,
-    refs: String,
-}
-
-/// Minimal ledger parser (std-only, line-scan): entries start at
-/// `- id: ` lines; the `  key: ` fields follow; `>-` folded scalars
-/// collect their indented continuation lines. The structure test below
-/// fails red on any shape drift (missing fields, duplicate/empty ids,
-/// off-enum kinds) — this parser is the machine consumer the ledger
-/// header promises.
-fn parse_ledger() -> Vec<LedgerEntry> {
-    let mut out: Vec<LedgerEntry> = Vec::new();
-    let mut current: Option<LedgerEntry> = None;
-    let mut fold: Option<&'static str> = None;
-    for line in LEDGER.lines() {
-        if let Some(id) = line.strip_prefix("- id: ") {
-            if let Some(entry) = current.take() {
-                out.push(entry);
-            }
-            current = Some(LedgerEntry {
-                id: id.trim().to_string(),
-                kind: String::new(),
-                where_: String::new(),
-                what: String::new(),
-                refs: String::new(),
-            });
-            fold = None;
-            continue;
-        }
-        let Some(entry) = current.as_mut() else {
-            continue;
-        };
-        if let Some(kind) = line.strip_prefix("  kind: ") {
-            entry.kind = kind.trim().to_string();
-            fold = None;
-        } else if let Some(where_) = line.strip_prefix("  where: ") {
-            entry.where_ = where_.trim().trim_matches('"').to_string();
-            fold = None;
-        } else if line == "  what: >-" {
-            fold = Some("what");
-        } else if line == "  refs: >-" {
-            fold = Some("refs");
-        } else if let Some(field) = fold
-            && line.starts_with("    ")
-        {
-            // Folded-scalar continuation (indented under the field).
-            let continuation = line.trim();
-            let target = match field {
-                "what" => &mut entry.what,
-                _ => &mut entry.refs,
-            };
-            if !target.is_empty() {
-                target.push('\n');
-            }
-            target.push_str(continuation);
-        } else if !line.trim().is_empty() {
-            // Any other non-blank line ends the folded scalar.
-            fold = None;
-        }
-    }
-    if let Some(entry) = current.take() {
-        out.push(entry);
-    }
-    out
-}
-
-/// The registered ledger ids (the exemption universe).
-fn ledger_ids() -> Vec<String> {
-    parse_ledger().iter().map(|e| e.id.clone()).collect()
-}
-
-/// Exemption ids (the frozen face this test may exempt): every id must
-/// be registered in the deviations ledger
-/// (docs/compat/aria2-v1-deviations.yaml) — `declared()` checks
-/// membership at runtime, the registration test below checks it for
-/// the whole table at once. The second element is a short human note
-/// (the ledger entry carries the five-field declaration). Live-driven
-/// surfaces are consumed at the call site via `declared()`; reverse
-/// governance (a converged difference is red) is unchanged.
+/// Whitelist (the in-repo check basis for the controlled living doc):
+/// `(entry id, anchor substring in docs/rpc-api-diff.md)`. Governance = PR +
+/// user approval; each id's anchor must appear in the declaration doc (a doc
+/// edit that drops the anchor turns the test red). Entries come in two
+/// kinds: live-driven surfaces (consumed at the call site via `declared()`;
+/// reverse governance = a converged difference is red) and declaration-
+/// surface entries (seam semantics already in rustdoc with no deterministic
+/// fork counterpart — only anchored in the doc to prevent drift, not
+/// promised to be live-driven).
 const WHITELIST: &[(&str, &str)] = &[
+    ("get-version-face", "getVersion"),
+    ("http-output-ready-event", "taiji.onHttpOutputReady"),
+    ("method-face-missing", "Method-face missing entries"),
+    // Fork-specific task-level cookie RPC surface: accepted with Motrix as
+    // the baseline, but committed under canonical `taiji.*` names
+    // (rpc-api-diff §1); compat mode does not project `aria2.*` aliases, so
+    // same-name fork calls still land on "No such method" — this entry
+    // anchors that surface.
     (
-        "getversion-face",
-        "getVersion version prefix + honest feature list",
+        "method-face-missing-adduri-with-cookies",
+        "addUriWithCookies",
     ),
-    (
-        "method-face-missing",
-        "the 4 fork-only sqlite3-family names",
-    ),
-    // Fork-specific task-level cookie surface (rpc-api-diff §1): both
-    // call sites ride the one ledger entry.
-    ("task-cookie-rpc-family", "addUriWithCookies/setTaskCookies"),
-    ("bare-name-acceptance", "bare names accepted (superset)"),
-    ("taiji-extension-methods", "taiji.* extension methods"),
-    (
-        "getglobaloption-echo-subset",
-        "echo direction + accepted-value faces",
-    ),
-    (
-        "echo-taiji-only-budget",
-        "the 38-key taiji-only echo budget",
-    ),
-    (
-        "echo-shared-value-faces",
-        "shared-key value differences (17 keys)",
-    ),
+    ("method-face-missing-set-task-cookies", "setTaskCookies"),
+    ("bare-name-acceptance", "Bare-name acceptance"),
+    ("taiji-extension-methods", "`taiji.*` extension methods"),
+    ("global-echo-subset", "Echo-surface direction"),
+    ("global-echo-taiji-only", "taiji-only echo keys"),
+    ("global-echo-shared-values", "Shared-key value differences"),
     // getOption echo surface (declaration-surface entry): the behavioral
-    // differences are only observed when values are taken live from a
-    // real task; the parameter matrix zero-diff rows are unaffected.
-    ("getoption-echo-face", "getOption echo surface"),
+    // differences (accepted-subset projection, baseline-value projection,
+    // value shape, default handling, final-state domain reads) are only
+    // observed when values are taken live from a real task; the parameter
+    // matrix zero-diff rows are unaffected.
+    ("get-option-echo-face", "`getOption` echo surface"),
+    ("option-invalid-value", "Invalid-value semantics"),
     (
-        "http-option-invalid-tightening",
-        "invalid-value + domain-reject tightening",
+        "option-domain-reject",
+        "explicitly rejected by taiji (`taiji.option.invalid`, no truncation)",
     ),
     ("status-http-subdict", "`http` subdict"),
     ("status-progress-granularity", "Progress accounting basis"),
-    ("status-bt-superset-keys", "BT-face superset keys"),
+    ("status-bt-superset", "BT-face superset keys"),
     ("pre-probe-projection", "Pre-probe projection"),
     ("sftp-deferred", "sftp:// deferred"),
     ("unknown-scheme", "Unknown scheme"),
     ("add-torrent-base64", "addTorrent invalid base64"),
-    // The metalink family (version/boundary/dir-out dedup/out+checksum
-    // strip/same-doc dedup/bt no-hash/partial failure/timeout): one
-    // ledger entry holds the whole seam; the label at each call site
-    // keeps the detail.
-    ("metalink-seam-differences", "the addMetalink seam family"),
+    ("metalink-version", "Version surface"),
+    ("metalink-boundary", "Parsing boundary"),
+    // Declaration-surface entries (expanded seam semantics already in
+    // rustdoc; no deterministic live counterpart — only anchored in the
+    // declaration doc to prevent drift, not driven via `declared()`):
+    (
+        "metalink-dir-out-dedup",
+        "Later entries with the same (dir,out) are skipped",
+    ),
+    (
+        "metalink-caller-out-checksum-stripped",
+        "Caller-supplied out/checksum stripped wholesale",
+    ),
+    (
+        "metalink-same-doc-dedup",
+        "Same-document magnet/metaurl dedup skip",
+    ),
+    (
+        "metalink-bt-plan-no-hash",
+        "BT plans consume no entry hash and carry no out/checksum",
+    ),
+    (
+        "metalink-partial-failure-message",
+        "Partial-failure receipt message wording difference",
+    ),
+    ("metalink-parse-timeout", "taiji.metalink.timeout"),
 ];
 
 /// Echo-drift audit (2026-10-28, dev @ 13dc8855 + fork live run):
 /// every taiji-only `getGlobalOption` key observed in the live differential,
-/// one row per key — `(key, deviations-ledger entry id)`. Each row is
-/// ruled a **legitimate extension** and counted in the budget; the
-/// registration test below keeps every ruling tied to its ledger entry
-/// (the key string must appear in that entry's what/refs stanza — an
-/// unlisted key or a dropped entry turns the test red, the same
+/// one row per key — `(key, anchor substring in docs/rpc-api-diff.md)`.
+/// Each row is ruled a **legitimate extension** and counted in the budget;
+/// the anchor test below keeps every ruling tied to its declaration text
+/// (a doc edit that drops the anchor turns the test red — the same
 /// governance as [`WHITELIST`]). Two families, both ruled legitimate:
 /// - declared extension names (Phase A pairs / hook family / session keys /
 ///   the tracker import / the HTTP cap): the fork has no such option at
@@ -293,68 +218,103 @@ const WHITELIST: &[(&str, &str)] = &[
 ///   — the Motrix-alignment round-trip; convergence when the fork side is
 ///   explicitly set is by design, not drift.
 ///
-/// The table IS the budget (audited count 25 + the media family 10 +
-/// the four-pool budget trio 3 = 38; the umbrella ledger entry is
-/// `echo-taiji-only-budget`, specific families ride their dedicated
-/// entries): rows stay sorted, and the live set must equal the table
-/// member-for-member — a new taiji-only key without a ruled ledger row
-/// is red, and a converged row (a key the live set no longer observes)
-/// is red until reclaimed via governance.
+/// The table IS the budget (audited count 25 + the media family 10 —
+/// the 8 unified-registration keys plus media-archive/media-info-json — +
+/// the four-pool budget trio 3 — `max-concurrent-seeds`/
+/// `max-concurrent-checks`/`media-synthesis-concurrency`, anchors =
+/// the §3 dedicated entry — = 38): rows
+/// stay sorted, and the live set must equal the table
+/// member-for-member — a new taiji-only key without a ruled anchor row is
+/// red, and a converged row (a key the live set no longer observes) is red
+/// until reclaimed via governance.
+///
+/// Source attribution: the hook family ×6 and the proxy pair
+/// (`all-proxy`/`https-proxy`) — ; `load-cookies`/`save-session`
+/// — ; the remaining keys — the Phase A / §3 declarations
+/// (`DECLARED_OPTION_DIFFS` and the `GLOBAL_PATCH_TABLE` echo rows,
+/// taiji-core `session::options`).
 const TAIJI_ONLY_ECHO_AUDIT: &[(&str, &str)] = &[
-    ("all-proxy", "getglobaloption-echo-subset"),
-    ("async-dns", "getglobaloption-echo-subset"),
-    ("bt-enable-nat-pmp", "declared-extension-option-keys"),
-    ("bt-enable-upnp", "declared-extension-option-keys"),
-    ("bt-exclude-tracker", "getglobaloption-echo-subset"),
-    ("bt-lsd", "declared-extension-option-keys"),
-    ("bt-metadata-web-sources", "declared-extension-option-keys"),
-    ("bt-peer-connection-type", "declared-extension-option-keys"),
-    ("bt-tracker", "bt-tracker-rpc-union"),
-    ("bt-tracker-file", "declared-extension-option-keys"),
-    ("client-ban-prefixes", "declared-extension-option-keys"),
-    ("dht-entry-point", "getglobaloption-echo-subset"),
-    ("dht-entry-point6", "getglobaloption-echo-subset"),
-    ("enable-async-dns6", "getglobaloption-echo-subset"),
-    ("http-max-per-host", "http-max-per-host-extension"),
-    ("https-proxy", "getglobaloption-echo-subset"),
-    ("load-cookies", "getglobaloption-echo-subset"),
-    ("max-concurrent-checks", "four-pool-budgets"),
-    ("max-concurrent-seeds", "four-pool-budgets"),
+    ("all-proxy", "`all-proxy` / `https-proxy`"),
+    ("async-dns", "`async-dns` / `enable-async-dns6` (resolver"),
+    ("bt-enable-nat-pmp", "`bt-enable-nat-pmp`"),
+    ("bt-enable-upnp", "`bt-enable-upnp`"),
+    (
+        "bt-exclude-tracker",
+        "`bt-exclude-tracker` (no exclusion face",
+    ),
+    ("bt-lsd", "`bt-lsd`"),
+    ("bt-metadata-web-sources", "`bt-metadata-web-sources`"),
+    ("bt-peer-connection-type", "`bt-peer-connection-type`"),
+    ("bt-tracker", "`bt-tracker` (the fork silently ignores"),
+    ("bt-tracker-file", "`bt-tracker-file`"),
+    ("client-ban-prefixes", "`client-ban-prefixes`"),
+    ("dht-entry-point", "`dht-entry-point`"),
+    ("dht-entry-point6", "`dht-entry-point6`"),
+    ("enable-async-dns6", "`enable-async-dns6`"),
+    (
+        "http-max-per-host",
+        "`http-max-per-host` has since actually entered the getGlobalOption",
+    ),
+    ("https-proxy", "`all-proxy` / `https-proxy`"),
+    ("load-cookies", "`load-cookies` accepted"),
+    ("max-concurrent-checks", "Four-pool budget trio"),
+    ("max-concurrent-seeds", "Four-pool budget trio"),
     // The media family (2026-10-28: the unified-registration 8 +
-    // 2026-10-30: the media-archive/media-info-json product faces —
-    // the fork has no media surface at all).
-    ("media-allow-private-key-url", "media-option-family"),
-    ("media-archive", "media-option-family"),
-    ("media-audio-lang", "media-option-family"),
-    ("media-ffmpeg-path", "media-option-family"),
-    ("media-info-json", "media-option-family"),
-    ("media-segment-concurrency", "media-option-family"),
-    ("media-staging-dir", "media-option-family"),
-    ("media-staging-quota-gib", "media-option-family"),
-    ("media-subtitles", "media-option-family"),
-    ("media-synthesis-concurrency", "four-pool-budgets"),
-    ("media-variant-policy", "media-option-family"),
-    // Motrix-specific session options (the fork's own integration face,
-    // absent upstream; the unified option registration includes them).
-    ("motrix-peer-listeners", "motrix-session-options"),
-    ("motrix-startup-tasks", "motrix-session-options"),
-    // The hook notification family + seed-time (the echo's own value
-    // face; the fork echoes them only when set) — the budget umbrella
-    // entry holds the key list.
-    ("on-bt-download-complete", "echo-taiji-only-budget"),
-    ("on-download-complete", "echo-taiji-only-budget"),
-    ("on-download-error", "echo-taiji-only-budget"),
-    ("on-download-pause", "echo-taiji-only-budget"),
-    ("on-download-start", "echo-taiji-only-budget"),
-    ("on-download-stop", "echo-taiji-only-budget"),
-    ("pause", "getglobaloption-echo-subset"),
-    ("save-session", "getglobaloption-echo-subset"),
-    ("seed-time", "echo-taiji-only-budget"),
+    // 2026-10-30: the media-archive/media-info-json product
+    // faces — the fork has no media surface at all; anchors = the §3
+    // media option-family declaration in docs/rpc-api-diff.md, whose
+    // product-face entry carries the two new keys).
+    (
+        "media-allow-private-key-url",
+        "Media option family (unified registration",
+    ),
+    ("media-archive", "Media product faces (taiji extensions"),
+    (
+        "media-audio-lang",
+        "Media option family (unified registration",
+    ),
+    (
+        "media-ffmpeg-path",
+        "Media option family (unified registration",
+    ),
+    ("media-info-json", "Media product faces (taiji extensions"),
+    (
+        "media-segment-concurrency",
+        "Media option family (unified registration",
+    ),
+    (
+        "media-staging-dir",
+        "Media option family (unified registration",
+    ),
+    (
+        "media-staging-quota-gib",
+        "Media option family (unified registration",
+    ),
+    (
+        "media-subtitles",
+        "Media option family (unified registration",
+    ),
+    ("media-synthesis-concurrency", "Four-pool budget trio"),
+    (
+        "media-variant-policy",
+        "Media option family (unified registration",
+    ),
+    ("motrix-peer-listeners", "`motrix-peer-listeners`"),
+    ("motrix-startup-tasks", "`motrix-startup-tasks`"),
+    ("on-bt-download-complete", "`on-bt-download-complete`"),
+    ("on-download-complete", "the hook notification family"),
+    ("on-download-error", "the hook notification family"),
+    ("on-download-pause", "the hook notification family"),
+    ("on-download-start", "the hook notification family"),
+    ("on-download-stop", "the hook notification family"),
+    ("pause", "no global pause template face"),
+    ("save-session", "`save-session`"),
+    ("seed-time", "`seed-time`"),
 ];
 
 /// Shared-key value-diff audit (2026-10-28, same live run): shared
 /// `getGlobalOption` keys whose values differ under identical default
-/// inputs — `(key, deviations-ledger entry id)`. Two
+/// inputs — `(key, anchor substring in docs/rpc-api-diff.md)`. Two
 /// families, both ruled declared divergences:
 /// - the three Phase A declarations (`listen-port` range vs single value,
 ///   the `peer-id-prefix` namespacing, the `seed-ratio` minimal numeric
@@ -366,116 +326,93 @@ const TAIJI_ONLY_ECHO_AUDIT: &[(&str, &str)] = &[
 ///   accepted-value-face family as [`TAIJI_ONLY_ECHO_AUDIT`]).
 ///
 /// Rows stay sorted; a value drift outside this table is red, and a
-/// converged row is red until reclaimed (same governance as WHITELIST;
-/// all 17 keys ride the echo-shared-value-faces ledger entry).
+/// converged row is red until reclaimed (same governance as WHITELIST).
 const SHARED_VALUE_DIFF_AUDIT: &[(&str, &str)] = &[
-    ("connect-timeout", "echo-shared-value-faces"),
-    ("continue", "echo-shared-value-faces"),
-    ("listen-port", "echo-shared-value-faces"),
-    ("max-connection-per-server", "echo-shared-value-faces"),
-    ("max-download-result", "echo-shared-value-faces"),
-    ("max-file-not-found", "echo-shared-value-faces"),
-    ("max-mmap-limit", "echo-shared-value-faces"),
-    ("max-resume-failure-tries", "echo-shared-value-faces"),
-    ("max-tries", "echo-shared-value-faces"),
-    ("min-split-size", "echo-shared-value-faces"),
-    ("peer-id-prefix", "echo-shared-value-faces"),
-    ("remote-time", "echo-shared-value-faces"),
-    ("retry-wait", "echo-shared-value-faces"),
-    ("seed-ratio", "echo-shared-value-faces"),
-    ("split", "echo-shared-value-faces"),
-    ("timeout", "echo-shared-value-faces"),
-    ("user-agent", "echo-shared-value-faces"),
+    ("async-dns", "`async-dns` / `enable-async-dns6` (resolver"),
+    (
+        "connect-timeout",
+        "unset no-op value faces echo the empty string",
+    ),
+    ("continue", "unset no-op value faces echo the empty string"),
+    ("listen-port", "fork default `6881-6999`"),
+    (
+        "max-connection-per-server",
+        "unset no-op value faces echo the empty string",
+    ),
+    (
+        "max-download-result",
+        "unset no-op value faces echo the empty string",
+    ),
+    (
+        "max-file-not-found",
+        "unset no-op value faces echo the empty string",
+    ),
+    (
+        "max-mmap-limit",
+        "unset no-op value faces echo the empty string",
+    ),
+    (
+        "max-resume-failure-tries",
+        "unset no-op value faces echo the empty string",
+    ),
+    ("max-tries", "unset no-op value faces echo the empty string"),
+    (
+        "min-split-size",
+        "unset no-op value faces echo the empty string",
+    ),
+    ("peer-id-prefix", "fork `A2-1-37-0-`; taiji `-TJ0001-`"),
+    (
+        "remote-time",
+        "unset no-op value faces echo the empty string",
+    ),
+    (
+        "retry-wait",
+        "unset no-op value faces echo the empty string",
+    ),
+    ("seed-ratio", "fork default literal `1.0`"),
+    ("split", "unset no-op value faces echo the empty string"),
+    ("timeout", "unset no-op value faces echo the empty string"),
+    (
+        "user-agent",
+        "unset no-op value faces echo the empty string",
+    ),
 ];
 
-/// Ledger structure check (no reference dependency, always red-able):
-/// every entry carries the five fixed fields, ids are non-empty and
-/// unique, kinds stay on the four-value enum, and the entry count
-/// holds the floor (a whole-section loss must not silently idle the
-/// exemption machinery green).
+/// Whitelist anchor check (no reference dependency, always green): every
+/// id's anchor substring must appear in the declaration doc. Extended with
+/// the audit tables: every ruled taiji-only echo key and every
+/// ruled shared-key value diff must keep their declaration anchors, and
+/// both tables must stay sorted and duplicate free (the live comparisons
+/// run member-for-member against them).
 #[test]
-fn ledger_structure_is_complete() {
-    let entries = parse_ledger();
+fn whitelist_entries_are_anchored_in_the_declaration_doc() {
+    for (id, anchor) in WHITELIST {
+        assert!(
+            DOC.contains(anchor),
+            "whitelist entry {id}'s anchor {anchor:?} is not in docs/rpc-api-diff.md — the doc and the guard have drifted"
+        );
+    }
+    let keys: Vec<&str> = TAIJI_ONLY_ECHO_AUDIT.iter().map(|(k, _)| *k).collect();
     assert!(
-        entries.len() >= LEDGER_MIN_ENTRIES,
-        "the deviations ledger holds {} entries (floor {LEDGER_MIN_ENTRIES}); \
-         a section loss needs the parser/floor re-derived, not accepted",
-        entries.len()
+        keys.windows(2).all(|w| w[0] < w[1]),
+        "the audit table must be sorted and duplicate-free: {keys:?}"
     );
-    let mut ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-    let total = ids.len();
-    ids.sort_unstable();
-    ids.dedup();
-    assert_eq!(ids.len(), total, "duplicate ledger ids");
-    for entry in &entries {
-        assert!(!entry.id.is_empty(), "empty ledger id: {entry:?}");
+    for (key, anchor) in TAIJI_ONLY_ECHO_AUDIT {
         assert!(
-            LEDGER_KINDS.contains(&entry.kind.as_str()),
-            "ledger id {} has off-enum kind {:?}",
-            entry.id,
-            entry.kind
-        );
-        assert!(
-            !entry.where_.is_empty(),
-            "ledger id {} misses where",
-            entry.id
-        );
-        assert!(!entry.what.is_empty(), "ledger id {} misses what", entry.id);
-        assert!(!entry.refs.is_empty(), "ledger id {} misses refs", entry.id);
-    }
-}
-
-/// Exemption registration + where-anchor check (no reference
-/// dependency, always green while aligned): every [`WHITELIST`] id and
-/// every audit-table ledger id is registered in the ledger; every
-/// ledger `where` anchor resolves to an existing repo file (the
-/// `taiji/` workspace prefix is stripped, the `:lines` tail dropped —
-/// an anchor file moved or deleted turns red, forcing the ledger to
-/// travel with the code; line numbers stay human evidence). Every
-/// audit key must appear in its mapped entry's what/refs stanza.
-#[test]
-fn exemption_ids_are_registered_in_the_ledger() {
-    let entries = parse_ledger();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for entry in &entries {
-        let anchored = entry
-            .where_
-            .strip_prefix("taiji/")
-            .unwrap_or(entry.where_.as_str());
-        let path = anchored.split(':').next().unwrap_or_default();
-        let file = root.join(path);
-        assert!(
-            file.is_file(),
-            "ledger id {} where-anchor {} is not a file (update the entry)",
-            entry.id,
-            file.display()
+            DOC.contains(anchor),
+            "audit key {key}'s declaration anchor {anchor:?} is not in docs/rpc-api-diff.md — the audit ruling and the doc have drifted"
         );
     }
-    for (id, _) in WHITELIST {
+    let vkeys: Vec<&str> = SHARED_VALUE_DIFF_AUDIT.iter().map(|(k, _)| *k).collect();
+    assert!(
+        vkeys.windows(2).all(|w| w[0] < w[1]),
+        "the value-diff audit table must be sorted and duplicate-free: {vkeys:?}"
+    );
+    for (key, anchor) in SHARED_VALUE_DIFF_AUDIT {
         assert!(
-            entries.iter().any(|e| &e.id == id),
-            "exemption id {id} not registered in the deviations ledger"
+            DOC.contains(anchor),
+            "value-diff audit key {key}'s declaration anchor {anchor:?} is not in docs/rpc-api-diff.md — the audit ruling and the doc have drifted"
         );
-    }
-    for (table, name) in [
-        (TAIJI_ONLY_ECHO_AUDIT, "TAIJI_ONLY_ECHO_AUDIT"),
-        (SHARED_VALUE_DIFF_AUDIT, "SHARED_VALUE_DIFF_AUDIT"),
-    ] {
-        let keys: Vec<&str> = table.iter().map(|(k, _)| *k).collect();
-        assert!(
-            keys.windows(2).all(|w| w[0] < w[1]),
-            "the {name} table must be sorted and duplicate-free: {keys:?}"
-        );
-        for (key, ledger_id) in table {
-            let Some(entry) = entries.iter().find(|e| &e.id == ledger_id) else {
-                panic!("{name} key {key} maps to unregistered ledger id {ledger_id}");
-            };
-            assert!(
-                entry.what.contains(key) || entry.refs.contains(key),
-                "{name} key {key} is not enumerated in ledger entry {ledger_id} \
-                 (extend its what/refs stanza)"
-            );
-        }
     }
 }
 
@@ -735,7 +672,7 @@ fn err_msg(resp: &Value) -> String {
 fn zero_diff(label: &str, o: &Value, n: &Value) {
     assert_eq!(
         o, n,
-        "{label}: a difference outside the deviations ledger (reference vs taiji)"
+        "{label}: a difference outside the whitelist (reference vs taiji)"
     );
 }
 
@@ -768,11 +705,11 @@ fn strip_global_stat_extension_keys(v: &Value) -> Value {
 fn declared(label: &str, id: &str, o: &Value, n: &Value) {
     assert_ne!(
         o, n,
-        "{label}: ledger entry {id} no longer shows an actual difference — please reclaim the entry (governance)"
+        "{label}: whitelist entry {id} no longer shows an actual difference — please reclaim the entry (governance)"
     );
     assert!(
-        ledger_ids().contains(&id.to_string()),
-        "{label}: ledger entry {id} not registered in the deviations ledger"
+        WHITELIST.iter().any(|(wid, _)| *wid == id),
+        "{label}: whitelist entry {id} not registered"
     );
 }
 
@@ -907,39 +844,54 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
         expect_extra,
         "the compat-face taiji.* extension set drifted"
     );
+    // Fork releases added checkpoint import and retained HTTP retry APIs.
+    // These names are intentionally absent: taiji owns its native persistence
+    // and import paths. Compare every name present in the selected reference;
+    // an undeclared future fork method still fails this exact-set assertion.
+    let known_fork_only = [
+        "aria2.addLegacyTorrentV1",
+        "aria2.addUriWithCookies",
+        "aria2.exportSession",
+        "aria2.getCheckpointStatus",
+        "aria2.getDownloadResultCount",
+        "aria2.getHttpRetryStatusV1",
+        "aria2.importLegacyCheckpointV1",
+        "aria2.inspectLegacyCheckpointV1",
+        "aria2.reconcileLegacyCheckpointV1",
+        "aria2.requeueDownloadResult",
+        "aria2.retryHttpDownloadV1",
+        "aria2.searchDownloadResult",
+        "aria2.setTaskCookies",
+    ];
+    let expected_missing: Vec<String> = known_fork_only
+        .iter()
+        .filter(|name| so.iter().any(|value| value == **name))
+        .map(|name| (*name).to_string())
+        .collect();
     assert_eq!(
         set_diff(&so, &sn),
-        [
-            "aria2.addUriWithCookies",
-            "aria2.exportSession",
-            "aria2.getDownloadResultCount",
-            "aria2.requeueDownloadResult",
-            "aria2.searchDownloadResult",
-            "aria2.setTaskCookies",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>(),
-        "the missing-method set drifted (the whitelist method-face-missing family: 6 fork-only names)"
+        expected_missing,
+        "the missing-method set drifted outside the declared fork-only families"
     );
     let (_, no) = call(oa, "system.listNotifications", &[]).await;
     let (_, nn) = call(na, "system.listNotifications", &[]).await;
-    // Strip taiji extension events (the `taiji.*` namespace; declared in
-    // the deviations ledger as `extension-events`) before zero-diff —
-    // aria2 has no counterpart for these names. Rebuilds the full
-    // response envelope (id/jsonrpc preserved) with the filtered result.
-    let strip_ext = |v: &Value| -> Value {
-        let mut envelope = v.clone();
-        if let Some(Value::Array(a)) = envelope.get_mut("result") {
-            *a = a
-                .iter()
-                .filter(|n| !n.as_str().is_some_and(|s| s.starts_with("taiji.")))
-                .cloned()
-                .collect();
-        }
-        envelope
-    };
-    zero_diff("listNotifications", &strip_ext(&no), &strip_ext(&nn));
+    declared("listNotifications", "http-output-ready-event", &no, &nn);
+    let compat_notifications: Vec<_> = result_of(&nn)
+        .as_array()
+        .unwrap_or_else(|| panic!("notification list missing"))
+        .iter()
+        .filter(|name| **name != json!("taiji.onHttpOutputReady"))
+        .cloned()
+        .collect();
+    zero_diff(
+        "listNotifications compatibility events",
+        result_of(&no),
+        &json!(compat_notifications),
+    );
+    assert_eq!(
+        result_of(&nn).as_array().map(Vec::len),
+        Some(compat_notifications.len() + 1)
+    );
 
     // Non-committed methods (registered on the fork; taiji answers with the
     // unknown-method surface — token auth runs first, same as the fork).
@@ -972,8 +924,14 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     // own whitelist entry anchored in docs/rpc-api-diff.md). Fork side
     // errors on missing params; taiji side always answers "No such method".
     for (m, id) in [
-        ("aria2.addUriWithCookies", "task-cookie-rpc-family"),
-        ("aria2.setTaskCookies", "task-cookie-rpc-family"),
+        (
+            "aria2.addUriWithCookies",
+            "method-face-missing-adduri-with-cookies",
+        ),
+        (
+            "aria2.setTaskCookies",
+            "method-face-missing-set-task-cookies",
+        ),
     ] {
         let (_, ro) = call(oa, m, &[tok()]).await;
         let (_, rn) = call(na, m, &[tok()]).await;
@@ -1057,22 +1015,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
             for gid in ["beef000000000000", "xyz"] {
                 let (_, ro) = call(oa, &reference_name(m), &[tok(), json!(gid)]).await;
                 let (_, rn) = call(na, m, &[tok(), json!(gid)]).await;
-                // The unpause error-message face: taiji phrases a
-                // not-found/unpausable GID as "GID#xxx cannot be
-                // unpaused now" while aria2 says "GID xxx is not
-                // found" — same code (1), different text. Compare the
-                // code only for unpause (the declared message-face
-                // deviation; the zero-diff face is the code).
-                if *m == "unpause" {
-                    let oc = ro["error"]["code"].as_i64();
-                    let nc = rn["error"]["code"].as_i64();
-                    assert_eq!(
-                        oc, nc,
-                        "unpause: error code differs for gid {gid}: ref={ro} taiji={rn}"
-                    );
-                } else {
-                    zero_diff(m, &ro, &rn);
-                }
+                zero_diff(m, &ro, &rn);
             }
         }
     }
@@ -1135,7 +1078,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
             .unwrap_or("")
             .starts_with("taiji/")
     );
-    declared("getVersion values", "getversion-face", &ro, &rn);
+    declared("getVersion values", "get-version-face", &ro, &rn);
     let (_, ro) = call(oa, &reference_name("getSessionInfo"), &[tok()]).await;
     let (_, rn) = call(na, "getSessionInfo", &[tok()]).await;
     zero_diff(
@@ -1168,18 +1111,24 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
         !reference_only.is_empty(),
         "the fork's echo table is empty — the reference run shape is abnormal"
     );
-    // Audit (2026-10-28): the taiji-only set must equal the audited
-    // table member-for-member — the table IS the budget (38 ruled
-    // legitimate extensions, each mapped to a deviations-ledger entry
-    // checked by `exemption_ids_are_registered_in_the_ledger`); a new
-    // taiji-only key without a ruled row is red, and a key the live
-    // set no longer observes is red until its row is reclaimed via
-    // governance (the same discipline as WHITELIST reverse governance).
-    let mut audited: Vec<&str> = TAIJI_ONLY_ECHO_AUDIT.iter().map(|(k, _)| *k).collect();
+    // Reference builds differ in enabled features (notably c-ares). A key
+    // already echoed by that build is shared, not a taiji-only extension.
+    // Every declared native key must still exist; unknown additions fail.
+    for (key, _) in TAIJI_ONLY_ECHO_AUDIT {
+        assert!(
+            on.contains_key(*key),
+            "declared native echo key missing: {key}"
+        );
+    }
+    let mut audited: Vec<&str> = TAIJI_ONLY_ECHO_AUDIT
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| !oo.contains_key(*key))
+        .collect();
     audited.sort_unstable();
     assert_eq!(
         taiji_only, audited,
-        "the taiji-only echo keys drifted from the audit table (the budget = the audited actual 25)"
+        "taiji-only echo keys drifted outside the declared audit"
     );
     // Only the audited keys may differ in value among shared keys (three
     // Phase A declarations + the Motrix-alignment no-op value faces —
@@ -1200,21 +1149,16 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
         on.get("dir").and_then(|v| v.as_str()),
         "the same-input cross-validation dir must be exactly equal"
     );
-    declared(
-        "getGlobalOption echo set",
-        "getglobaloption-echo-subset",
-        &ro,
-        &rn,
-    );
+    declared("getGlobalOption echo set", "global-echo-subset", &ro, &rn);
     declared(
         "getGlobalOption values",
-        "echo-shared-value-faces",
+        "global-echo-shared-values",
         &ro,
         &rn,
     );
     // changeGlobalOption: unknown keys are ignored on both sides (zero
     // diff); bt-tracker is imported and echoed by taiji but silently
-    // ignored by the fork (ledger echo-taiji-only-budget).
+    // ignored by the fork (whitelist global-echo-taiji-only).
     let (_, ro) = call(
         oa,
         &reference_name("changeGlobalOption"),
@@ -1249,12 +1193,12 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     );
     declared(
         "getGlobalOption taiji-only keys",
-        "echo-taiji-only-budget",
+        "global-echo-taiji-only",
         &ro,
         &rn2,
     );
     // Invalid value: the fork errors, taiji ignores (whitelist
-    // http-option-invalid-tightening).
+    // option-invalid-value).
     let (_, ro) = call(
         oa,
         &reference_name("changeGlobalOption"),
@@ -1269,7 +1213,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     .await;
     declared(
         "changeGlobalOption invalid value",
-        "http-option-invalid-tightening",
+        "option-invalid-value",
         &ro,
         &rn,
     );
@@ -1355,12 +1299,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     );
     declared("tellStatus pre-probe", "pre-probe-projection", &ro, &rn);
     declared("tellStatus http subdict", "status-http-subdict", &ro, &rn);
-    declared(
-        "tellStatus bt superset",
-        "status-bt-superset-keys",
-        &ro,
-        &rn,
-    );
+    declared("tellStatus bt superset", "status-bt-superset", &ro, &rn);
     // keys filter is zero-diff (GID-normalized).
     let keys = json!(["gid", "status"]);
     let (_, ro) = call(
@@ -1375,7 +1314,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     // filter is zero-diff.
     let (_, ro) = call(oa, &reference_name("tellStatus"), &[tok(), json!(bt_o)]).await;
     let (_, rn) = call(na, "tellStatus", &[tok(), json!(bt_n)]).await;
-    declared("tellStatus bt face", "status-bt-superset-keys", &ro, &rn);
+    declared("tellStatus bt face", "status-bt-superset", &ro, &rn);
     let (_, ro) = call(
         oa,
         &reference_name("tellStatus"),
@@ -1386,7 +1325,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     zero_diff("tellStatus bt keys", &subst(&ro, &bt_o, &bt_n), &rn);
     // changeOption: unknown keys are zero-diff; out-of-domain scheduler
     // values are explicitly rejected by taiji (whitelist
-    // http-option-invalid-tightening: the fork accepts, taiji rejects without
+    // option-domain-reject: the fork accepts, taiji rejects without
     // truncating).
     let (_, ro) = call(
         oa,
@@ -1424,7 +1363,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     assert!(err_msg(&rn).starts_with("taiji.option.invalid"));
     declared(
         "changeOption domain reject",
-        "http-option-invalid-tightening",
+        "option-domain-reject",
         &ro,
         &rn,
     );
@@ -1702,14 +1641,15 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
             shape(result_of(&ro)) && shape(result_of(&rn)),
             "the addMetalink GID array shape"
         );
-        // Version / boundary differences (ledger metalink-seam-differences).
+        // Version / boundary differences (whitelist metalink-version /
+        // metalink-boundary).
         let v3 = b"<?xml version=\"1.0\"?><metalink version=\"3.0\" xmlns=\"http://www.metalinker.org/\">\
                   <files><file name=\"v3.bin\"><size>1</size>\
                   <url>http://127.0.0.1:1/v3.bin</url></file></files></metalink>";
         let (_, ro) = call(oa, "aria2.addMetalink", &[tok(), json!(base64_encode(v3))]).await;
         let (_, rn) = call(na, "aria2.addMetalink", &[tok(), json!(base64_encode(v3))]).await;
         assert!(err_msg(&rn).starts_with("taiji.metalink.unsupported_version"));
-        declared("metalink v3", "metalink-seam-differences", &ro, &rn);
+        declared("metalink v3", "metalink-version", &ro, &rn);
         let (_, ro) = call(
             oa,
             "aria2.addMetalink",
@@ -1722,7 +1662,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
             &[tok(), json!(base64_encode(b"<foo/>"))],
         )
         .await;
-        declared("metalink wrong root", "metalink-seam-differences", &ro, &rn);
+        declared("metalink wrong root", "metalink-boundary", &ro, &rn);
         let (_, ro) = call(
             oa,
             "aria2.addMetalink",
@@ -1735,7 +1675,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
             &[tok(), json!(base64_encode(b"\x00garbage"))],
         )
         .await;
-        declared("metalink not xml", "metalink-seam-differences", &ro, &rn);
+        declared("metalink not xml", "metalink-boundary", &ro, &rn);
     }
 
     // ---- 7. Shutdown surface (zero diff; runs last) ----

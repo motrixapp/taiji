@@ -213,6 +213,7 @@ async fn dual_tier_failover_then_stop_sequence_persists_tracker_rows() {
     std::fs::create_dir_all(&dest).unwrap_or_else(|e| panic!("{e}"));
     let root = tokio_util::sync::CancellationToken::new();
     let cfg = EngineConfig {
+        initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
         peer_id: *b"-TJ0001-ENGINEENGIN1",

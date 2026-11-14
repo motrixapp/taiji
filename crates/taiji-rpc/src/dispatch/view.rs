@@ -72,9 +72,7 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
         )),
         CommandReply::Uris(uris) => Ok(Value::Array(
             uris.iter()
-                .map(|u| {
-                    json!({"uri": u.uri, "status": crate::aria2::status::uri_status_word(u.status)})
-                })
+                .map(|u| json!({"uri": u.uri, "status": crate::aria2::status::uri_status_word(u.status)}))
                 .collect(),
         )),
         CommandReply::GlobalStat(g) => Ok(json!({
@@ -94,10 +92,13 @@ pub(crate) fn encode_reply(reply: CommandReply) -> Result<Value, CommandReply> {
             "numChecking": g.num_checking.to_string(),
             "numSynthesizing": g.num_synthesizing.to_string(),
         })),
-        // The echo serialization gate (crate::aria2::option): every
-        // getOption/getGlobalOption body renders through it (unknown
-        // keys warn + count — never dropped, wire bytes unchanged).
         CommandReply::Options(map) => Ok(crate::aria2::option::serialize_options(&map)),
+        CommandReply::TorrentMetadata {
+            data,
+            awaiting_selection,
+        } => Ok(
+            json!({ "data": crate::base64::encode(&data), "awaitingSelection": awaiting_selection }),
+        ),
         CommandReply::HttpOutput(output) => {
             let state = crate::aria2::status::http_output_phase_word(output.phase);
             let mut value = json!({ "state": state, "hostControlled": output.host_controlled.to_string(), "paused": output.paused.to_string() });
@@ -261,7 +262,10 @@ pub(crate) fn created_torrent_json(info: &taiji_core::create::CreatedTorrentInfo
 /// Defense for query methods receiving an unexpected reply (a broken
 /// structural invariant -> explicit error, never faked).
 pub(crate) fn unexpected_reply(method: &str, other: CommandReply, id: Value) -> RpcResponse {
-    RpcResponse::error(&RpcError::unexpected_reply(method, &other), id)
+    RpcResponse::error(
+        &RpcError::generic(format!("unexpected {method} reply: {other:?}")),
+        id,
+    )
 }
 
 // ---- aria2 JSON value surface (numbers -> strings, booleans -> "true"/"false") ----
@@ -511,7 +515,13 @@ fn http_json(h: &taiji_core::session::HttpView) -> Value {
         Value::Array(
             h.sources
                 .iter()
-                .map(crate::aria2::status::http_source_json)
+                .map(|s| {
+                    json!({
+                        "url": s.url,
+                        "rate": s.rate.to_string(),
+                        "state": crate::aria2::status::source_state_word(s.state),
+                    })
+                })
                 .collect(),
         ),
     );
@@ -578,9 +588,7 @@ pub(crate) fn file_entry_json(f: &taiji_core::session::FileEntryView) -> Value {
         Value::Array(
             f.uris
                 .iter()
-                .map(|u| {
-                    json!({"uri": u.uri, "status": crate::aria2::status::uri_status_word(u.status)})
-                })
+                .map(|u| json!({"uri": u.uri, "status": crate::aria2::status::uri_status_word(u.status)}))
                 .collect(),
         ),
     );

@@ -1036,6 +1036,7 @@
             // two-bit model diverges here)
             written_progress: ProgressModel::from_lengths(&[file_len], merkle::BLOCK_SIZE),
             written_count: 0,
+            selected_written_count: 0,
             completed: false,
             hash_files: None,
             swarm: FaceView(Arc::new(Mutex::new(SwarmSnapshot {
@@ -3661,7 +3662,7 @@
         // (3) piece 0 flushed: the gate lifts and real disk bytes are
         // served; completion still does not flip (piece 1 not yet
         // flushed).
-        on_piece_written(std::slice::from_mut(&mut face), 0, 0, &[2]);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 0, &[2], None);
         assert!(face.written_bits.get(0), "flushing sets the written bit");
         let n = partial
             .read_block(0, 0, &mut buf)
@@ -3675,7 +3676,7 @@
         // completion flips).
         on_piece_verified(std::slice::from_mut(&mut face), 0, 1);
         assert!(!face.completed, "all hash-passed does not equal complete (the written semantics)");
-        let all = on_piece_written(std::slice::from_mut(&mut face), 0, 1, &[2]);
+        let all = on_piece_written(std::slice::from_mut(&mut face), 0, 1, &[2], None);
         assert!(all, "all pieces flushed -> the whole face complete");
         assert!(face.completed, "the face completion flag flips with the last piece written");
 
@@ -3695,6 +3696,18 @@
     /// blocks early via on_piece_written's all verdict: the ungated
     /// seeding source mount / BtComplete hook / EngineEnd::Completed).
     #[test]
+    fn completed_unselected_piece_cannot_complete_new_selection() {
+        let mut face = adv_face(2);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 0, &[2], None);
+        let mask = [false, true];
+        assert!(!crate::faces::apply_file_selection(std::slice::from_mut(&mut face), &[1], Some(&mask)));
+        assert!(!face.completed);
+        assert_eq!(face.selected_written_count, 0);
+        assert!(on_piece_written(std::slice::from_mut(&mut face), 0, 1, &[1], Some(&mask)));
+        assert_eq!(face.selected_written_count, 1);
+    }
+
+    #[test]
     fn face_completion_recheck_waits_for_written_not_verified() {
         let mut face = adv_face(2);
         let required = [2usize];
@@ -3704,7 +3717,7 @@
         on_piece_verified(std::slice::from_mut(&mut face), 0, 1);
         assert_eq!(face.verified_count, 2, "hash pass counts as verified");
         assert_eq!(face.written_count, 0, "the written count is zero before flushing");
-        recheck_face_completion(std::slice::from_mut(&mut face), &required);
+        recheck_face_completion(std::slice::from_mut(&mut face), &required, false);
         assert!(
             !face.completed,
             "all hash-passed does not equal complete: the written-semantics recheck \
@@ -3712,13 +3725,13 @@
         );
         // Piece 0 flushed: the recheck still does not flip (partially
         // flushed).
-        on_piece_written(std::slice::from_mut(&mut face), 0, 0, &required);
-        recheck_face_completion(std::slice::from_mut(&mut face), &required);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 0, &required, None);
+        recheck_face_completion(std::slice::from_mut(&mut face), &required, false);
         assert!(!face.completed, "partially flushed does not complete");
         // Everything flushed: the recheck flips (the same criterion
         // source as on_piece_written).
-        on_piece_written(std::slice::from_mut(&mut face), 0, 1, &required);
-        let all = recheck_face_completion(std::slice::from_mut(&mut face), &required);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 1, &required, None);
+        let all = recheck_face_completion(std::slice::from_mut(&mut face), &required, false);
         assert!(all && face.completed, "everything flushed -> complete");
     }
 
@@ -3736,18 +3749,18 @@
         let required = [4usize];
         // Row 1: the first piece (index 0, right neighbor 1 not flushed)
         // -> isolated.
-        on_piece_written(std::slice::from_mut(&mut face), 0, 0, &required);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 0, &required, None);
         assert_eq!((face.write_adjacent, face.write_isolated), (0, 1), "row 1: the first piece isolated");
         // Row 2: piece 2 (left neighbor 1 and right neighbor 3 not
         // flushed) -> isolated.
-        on_piece_written(std::slice::from_mut(&mut face), 0, 2, &required);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 2, &required, None);
         assert_eq!((face.write_adjacent, face.write_isolated), (0, 2), "row 2: a jumping piece isolated");
         // Row 3: piece 1 (left neighbor 0 flushed) -> adjacent.
-        on_piece_written(std::slice::from_mut(&mut face), 0, 1, &required);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 1, &required, None);
         assert_eq!((face.write_adjacent, face.write_isolated), (1, 2), "row 3: an in-fill piece adjacent");
         // Row 4: a duplicate written event (the pipeline already counted)
         // -> not counted again.
-        on_piece_written(std::slice::from_mut(&mut face), 0, 1, &required);
+        on_piece_written(std::slice::from_mut(&mut face), 0, 1, &required, None);
         assert_eq!(
             (face.write_adjacent, face.write_isolated),
             (1, 2),
@@ -7819,7 +7832,7 @@ async fn streaming_dispatch_no_duplicate_when_all_inflight() {
         assert!(!face.completed);
         // Completion verdict -> release.
         face.written_count = 64;
-        let all = crate::faces::recheck_face_completion(std::slice::from_mut(&mut face), &[64]);
+        let all = crate::faces::recheck_face_completion(std::slice::from_mut(&mut face), &[64], false);
         assert!(all && face.completed, "64/64 flushed -> complete");
         assert_eq!(
             face.dispatch_scratch.done.capacity(),

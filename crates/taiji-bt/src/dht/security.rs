@@ -233,39 +233,26 @@ const PROBE_TCP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2)
 /// in-flight targets are aborted once one wins (their connections close
 /// with the cancelled tasks); all failing → None.
 async fn tcp_probe_v6_source() -> Option<IpAddr> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<IpAddr>>(PROBE_TCP_TARGETS_V6.len());
-    let mut handles = Vec::with_capacity(PROBE_TCP_TARGETS_V6.len());
+    // Own every child: returning a winner or cancelling the outer probe drops
+    // the set and aborts the remaining connects instead of detaching sockets.
+    let mut probes = tokio::task::JoinSet::new();
     for dst in PROBE_TCP_TARGETS_V6 {
-        let tx = tx.clone();
-        handles.push(tokio::spawn(async move {
+        probes.spawn(async move {
             let target = SocketAddr::new(IpAddr::V6(dst), PROBE_TCP_PORT);
-            let source =
-                tokio::time::timeout(PROBE_TCP_TIMEOUT, tokio::net::TcpStream::connect(target))
-                    .await
-                    .ok()
-                    .and_then(|conn| conn.ok())
-                    .and_then(|stream| stream.local_addr().ok())
-                    .map(|local| local.ip());
-            // Capacity = target count, at most one message per task: send never waits.
-            let _ = tx.send(source).await;
-        }));
+            tokio::time::timeout(PROBE_TCP_TIMEOUT, tokio::net::TcpStream::connect(target))
+                .await
+                .ok()
+                .and_then(|conn| conn.ok())
+                .and_then(|stream| stream.local_addr().ok())
+                .map(|local| local.ip())
+        });
     }
-    drop(tx);
-    let mut winner = None;
-    for _ in 0..handles.len() {
-        match rx.recv().await {
-            Some(Some(source)) => {
-                winner = Some(source);
-                break;
-            }
-            Some(None) => continue,
-            None => break,
+    while let Some(result) = probes.join_next().await {
+        if let Ok(Some(source)) = result {
+            return Some(source);
         }
     }
-    for handle in &handles {
-        handle.abort();
-    }
-    winner
+    None
 }
 
 /// Probed-source acceptance classification (a pure-function seam, locked

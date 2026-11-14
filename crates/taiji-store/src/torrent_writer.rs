@@ -506,7 +506,7 @@ impl TorrentWriter {
 
     /// Acquire a write handle: open/LRU bookkeeping under the pool lock
     /// (a synchronous primitive; callers run in blocking context — no
-    /// await under the lock and the only syscall under it is the open),
+    /// await under the lock and filesystem handle creation stays under it),
     /// then pwrite outside the lock (same shape as the read-side
     /// `acquire_read_handle`). LRU eviction closing a handle cannot race
     /// an in-flight pwrite — `Arc` holders keep the `File` alive until
@@ -521,7 +521,7 @@ impl TorrentWriter {
                     // Pool key = layout-relative path; the opener closure
                     // opens the captured full path.
                     let mut w = crate::disk::FileDiskWriter::new();
-                    w.open_existing(&full, false)?;
+                    w.open_for_write(&full)?;
                     Ok::<_, StoreError>(Arc::new(w))
                 },
                 |_, handle| drop(handle),
@@ -562,8 +562,28 @@ impl TorrentWriter {
     ///   handles close right after creation (allocation is a side
     ///   operation and does not consume the steady-open budget).
     pub fn allocate_with(&mut self, mode: AllocationMode) -> Result<(), StoreError> {
-        for f in self.layout.files() {
-            if f.padding {
+        self.allocate_selected_with(mode, None)
+    }
+
+    /// Avoid creating unselected files. Indices exclude padding, as in BEP53.
+    pub fn allocate_selected_with(
+        &mut self,
+        mode: AllocationMode,
+        selected: Option<&[u32]>,
+    ) -> Result<(), StoreError> {
+        let selected: Option<std::collections::HashSet<u32>> =
+            selected.map(|files| files.iter().copied().collect());
+        for (index, f) in self
+            .layout
+            .files()
+            .iter()
+            .filter(|file| !file.padding)
+            .enumerate()
+        {
+            if selected
+                .as_ref()
+                .is_some_and(|files| !files.contains(&(index as u32)))
+            {
                 continue;
             }
             let path = f.path.clone();

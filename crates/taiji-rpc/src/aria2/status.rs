@@ -18,8 +18,8 @@
 //! Upstream anchor mapping: docs/design/rpc.md
 
 use taiji_core::session::{
-    BanSource, HttpOutputPhase, HttpSourceState, HttpSourceView, MediaTrackState, RecoveryStatus,
-    ServerStatus, StatusKind, UriStatus,
+    BanSource, HttpOutputPhase, HttpSourceState, MediaTrackState, RecoveryStatus, ServerStatus,
+    StatusKind, UriStatus,
 };
 
 /// The task-status word table (RpcMethodImpl.cc VLB_* constants; the
@@ -126,16 +126,6 @@ pub(crate) const METRICS_STATES: [StatusKind; 6] = [
     StatusKind::Error,
     StatusKind::Removed,
 ];
-
-/// One `http.sources[]` entry's JSON (kept beside the word table: the
-/// sources face is rendered here, consumers stay table-driven).
-pub(crate) fn http_source_json(s: &HttpSourceView) -> serde_json::Value {
-    serde_json::json!({
-        "url": s.url,
-        "rate": s.rate.to_string(),
-        "state": source_state_word(s.state),
-    })
-}
 
 #[cfg(test)]
 mod tests {

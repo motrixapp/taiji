@@ -611,6 +611,7 @@ pub(super) struct FaceState {
     /// written basis: the seeding full source reads disk ungated, so
     /// seeding requires everything written).
     pub(super) written_count: usize,
+    pub(super) selected_written_count: usize,
     pub(super) completed: bool,
     /// The hash request serving file face (the v2 face; MetaHashSource
     /// built at completion).
@@ -1190,6 +1191,7 @@ pub(super) fn on_piece_written(
     fi: usize,
     index: u64,
     required: &[usize],
+    selected_mask: Option<&[bool]>,
 ) -> bool {
     let count = faces[fi].piece_count;
     {
@@ -1207,6 +1209,9 @@ pub(super) fn on_piece_written(
                 "duplicate written event (store pipeline authoritative)");
         } else {
             face.written_count += 1;
+            if selected_mask.is_some_and(|mask| mask.get(index as usize) == Some(&true)) {
+                face.selected_written_count += 1;
+            }
             // Write locality (observation only): index +/-1 already
             // written at write time = adjacent (a goff-contiguous
             // run, read-ahead friendly), otherwise isolated (the
@@ -1240,37 +1245,51 @@ pub(super) fn on_piece_written(
         other.dirty_since_snapshot = true;
         if other.written_progress.set_piece_done_global(index) {
             other.written_count += 1;
+            if selected_mask.is_some_and(|mask| mask.get(index as usize) == Some(&true)) {
+                other.selected_written_count += 1;
+            }
         }
     }
     // Completion check = the written basis (the single source of
     // truth, [`recheck_face_completion`]).
-    recheck_face_completion(faces, required)
+    recheck_face_completion(faces, required, selected_mask.is_some())
 }
 
-/// Face completion recheck (the ONLY completion criterion, the
-/// written basis): `!completed && written_count >= need` ->
-/// completed. Returns whether all faces are complete. Call sites:
-/// [`on_piece_written`] (each piece written), the SetFileSelection
-/// command arm (a mask landing later than the restore / in-download
-/// recheck), and the main loop's startup pre-loop
-/// (restore-as-complete).
-///
-/// The criterion reads ONLY `written_count` (the written count) —
-/// verified (hash-pass) counts do not participate: hash-pass
-/// increments verified while only the write advances written_count
-/// (`on_piece_verified` / `on_piece_written`), so a face with
-/// selected pieces verified-but-unwritten must not complete (the
-/// seeding full source reads disk ungated / EngineEnd::Completed
-/// means verified and written). `need` = the piece count a face
-/// needs to complete (BEP53 select-file: with a mask active = the
-/// piece count inside the mask, unselected pieces do not count
-/// toward completion; the all-selected semantics = piece_count,
-/// maintained by the caller).
-pub(super) fn recheck_face_completion(faces: &mut [FaceState], required: &[usize]) -> bool {
+/// Rebuild the selected written count once on startup or a selection change.
+/// Unselected completed pieces must never satisfy the new selection.
+pub(super) fn apply_file_selection(
+    faces: &mut [FaceState],
+    required: &[usize],
+    mask: Option<&[bool]>,
+) -> bool {
+    for face in faces.iter_mut() {
+        face.selected_written_count = mask.map_or(0, |mask| {
+            mask.iter()
+                .enumerate()
+                .filter(|(index, selected)| **selected && face.written_bits.get(*index))
+                .count()
+        });
+        face.completed = false;
+    }
+    recheck_face_completion(faces, required, mask.is_some())
+}
+
+/// Completion uses only written pieces in the selected set. The counter is
+/// maintained per write, so checking a large torrent remains constant time.
+pub(super) fn recheck_face_completion(
+    faces: &mut [FaceState],
+    required: &[usize],
+    selection_active: bool,
+) -> bool {
     let mut all = true;
     for (fi, f) in faces.iter_mut().enumerate() {
         let need = required.get(fi).copied().unwrap_or(f.piece_count);
-        if !f.completed && f.written_count >= need {
+        let written = if selection_active {
+            f.selected_written_count
+        } else {
+            f.written_count
+        };
+        if !f.completed && written >= need {
             f.completed = true;
             // On completion release the dispatch-round scratch (the
             // grow-only endgame working set) and the stat_man bucket

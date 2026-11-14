@@ -297,6 +297,15 @@ impl SessionActor {
             C::GetServers { gid } => {
                 let _ = reply.send(self.get_servers(&gid).await);
             }
+            C::GetTorrentMetadata { gid } => {
+                let result = self.get_torrent_metadata(&gid);
+                let _ = reply.send(result);
+            }
+            C::ConfirmTorrentSelection { gid, options } => {
+                let result = self.confirm_torrent_selection(&gid, options).await;
+                let _ = reply.send(result);
+                self.pump_all().await;
+            }
             C::GetUris { gid } => {
                 let _ = reply.send(self.get_uris(&gid));
             }
@@ -427,6 +436,9 @@ impl SessionActor {
                     }
                 }
                 for entry in self.queue.reserved_snapshot() {
+                    if self.awaiting_torrent_selection(entry.gid) {
+                        continue;
+                    }
                     if let Some(e) = self.queue.reserved_entry_mut(entry.gid) {
                         e.paused = true;
                     }
@@ -480,6 +492,9 @@ impl SessionActor {
                     self.queue.set_check_pending_paused(gid, false);
                 }
                 for entry in self.queue.reserved_snapshot() {
+                    if self.awaiting_torrent_selection(entry.gid) {
+                        continue;
+                    }
                     if let Some(e) = self.queue.reserved_entry_mut(entry.gid) {
                         e.paused = false;
                     }

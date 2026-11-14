@@ -66,17 +66,29 @@ pub struct MagnetServices {
     binding: crate::nat::PeerNetworkBinding,
     sequence: AtomicU64,
     cache: Mutex<Vec<CachedTorrent>>,
+    dns: Arc<taiji_io::dns::SharedDns>,
 }
 impl MagnetServices {
     pub fn new(persist: Option<PersistHandle>) -> Self {
+        Self::with_dns(persist, taiji_io::dns::SharedDns::shared_default())
+    }
+
+    /// Reuse one resolver across metadata tracker and DHT discovery.
+    /// Embedders can supply a service with their own resolution policy.
+    pub fn with_dns(persist: Option<PersistHandle>, dns: Arc<taiji_io::dns::SharedDns>) -> Self {
         Self {
             runtime: tokio::sync::Mutex::new(None),
             persist,
             binding: crate::nat::PeerNetworkBinding::new(rand::random()),
             sequence: AtomicU64::new(1),
             cache: Mutex::new(Vec::new()),
+            dns,
         }
     }
+    pub(super) fn dns(&self) -> Arc<taiji_io::dns::SharedDns> {
+        Arc::clone(&self.dns)
+    }
+
     pub fn network(&self) -> crate::nat::PeerNetworkBinding {
         self.binding.clone()
     }
@@ -321,6 +333,7 @@ impl MagnetServices {
         };
         let (enabled_tx, mut enabled) = tokio::sync::watch::channel(true);
         crate::lock(&runtime.bootstrap_controls).push((family, enabled_tx));
+        let dns = Arc::clone(&self.dns);
         tokio::spawn(async move {
             use futures::StreamExt;
             loop {
@@ -332,6 +345,7 @@ impl MagnetServices {
                 let mut probes = futures::stream::FuturesUnordered::new();
                 for source in sources.clone() {
                     let handle = handle.clone();
+                    let dns = Arc::clone(&dns);
                     probes.push(async move {
                         let addresses = if let Ok(address) = source.parse::<std::net::SocketAddr>()
                         {
@@ -343,7 +357,6 @@ impl MagnetServices {
                             let Ok(port) = port.parse::<u16>() else {
                                 return 0;
                             };
-                            let dns = taiji_io::dns::SharedDns::shared_default();
                             match tokio::time::timeout(
                                 Duration::from_secs(3),
                                 dns.resolve_for_transport(host, port),

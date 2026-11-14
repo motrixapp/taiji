@@ -78,53 +78,78 @@ Upstream anchor mapping for the `BH_*` env-knob registry
   only; `escape_control_chars` fills the CR/LF/NUL gap so raw control
   characters cannot forge or replay log lines.
 
-## dns.rs
+## dns.rs and dns/{shared,system}.rs
 
-Upstream anchors (aria2, read-only reference; libtorrent):
+`SharedDns` is the process-wide resolver used by HTTP, FTP, HTTP/UDP trackers
+and DHT bootstrap. Literal IPs bypass resolution. Hostnames are ASCII
+case-normalized, but a trailing dot remains significant for OS search domains.
+One lookup produces the complete address list; IPv4/IPv6 consumers project
+that list without treating a missing family as a host-wide failure.
 
-- Literal-IP passthrough (zero resolution cost): aria2
-  `NameResolveCommand.cc` `util::isNumericHost(hostname)` pushes the
-  hostname straight into the result list. The same branch exists in
-  `SharedDns::resolve_for_transport`; on the reqwest/hyper-util path it
-  is dead code (hyper-util's `try_parse` short-circuits first) and is
-  kept for direct-call faces such as FTP.
-- First-address use: `NameResolveCommand.cc` onSuccess assigns
-  `req_->remoteAddr = addrs[0]`. The taiji single-address view
-  (`pick_addr`) takes the first IPv4, or the first v6 when only v6
-  exists — the same orientation as aria2's
-  `PREF_DISABLE_IPV6 → setFamily(AF_INET)`; taiji has no such option and
-  expresses it as a preference order, and v6-only results are handed to
-  the v6 carrier face instead of a rejection path.
-- Resolution failure is network-class retryable: `NameResolveCommand.cc`
-  `res.empty() → onFailure()` sets `req_->error = UDPT_ERR_NETWORK` —
-  not URL-class (permanent). taiji maps it to the retryable error class
-  "dns" and reuses the actor's existing failure-backoff machinery.
-- Resolution is decoupled from the request: aria2 enqueues the request
-  only on resolve onSuccess. taiji spawns the resolve task inside the
-  actor and returns the result through the result channel (non-blocking
-  tick).
-- Bad-IP rotation: aria2 rotates known-bad addresses
-  (`markBadIPAddress`, `AbstractCommand.cc` / `DownloadEngine.cc`);
-  taiji deliberately does not implement that rotation — a stale cache
-  entry can compound with upper-layer retries.
-- `DNS_TIMEOUT` = 30s is anchored to aria2's `--dns-timeout` default of
-  30 (a hidden option in `OptionHandlerFactory.cc`, range 1..=60).
-- Log levels: aria2 logs all four resolution points at INFO — cache hit
-  (`MSG_DNS_CACHE_HIT`, `AbstractCommand.cc`), resolving
-  (`MSG_RESOLVING_HOSTNAME`, `AsyncNameResolverMan.cc`), resolution
-  complete (`MSG_NAME_RESOLUTION_COMPLETE`), resolution failed
-  (`MSG_NAME_RESOLUTION_FAILED`). taiji deliberately drops
-  hit/miss/complete to debug and keeps failure at info: the shared layer
-  is the single source for every transport, hit/miss are high-frequency
-  events that would flood INFO, and failures are rare and
-  triage-critical (frequency discipline outranks the reference levels).
-  Log target: `taiji::io::dns` (the `taiji::<crate>::<module>` shape).
+Concurrent requests for the same host share an owned logical query. Cancelling
+one caller does not cancel the others. Positive results live for 300 seconds;
+lookup failures for 2 seconds; timeouts for 1 second. These are application
+TTLs, not authoritative DNS record TTLs, which `getaddrinfo` does not expose.
+Cache hits do not extend expiry. Positive and negative entries share the
+256-host insertion-ordered bound. Expiry removes both the entry and its order
+record; zero capacity disables caching. Capacity rejection and cancellation
+are transient local outcomes and are never negatively cached.
 
-Cache capacity accounting: `HOST_CACHE_CAPACITY` (256) counts host
-entries — a dual-stack host's A and AAAA records share one whole-list
-entry. Under the earlier per-family shape the same constant spent two
-slots per dual-stack host, so the shape upgrade doubled the physical
-capacity behind an unchanged constant.
+`SystemResolver` uses the system resolver to retain hosts-file, search-domain
+and scoped/VPN DNS behavior. Up to 32 system lookups run in dedicated threads;
+up to 256 distinct hosts may be running or awaiting admission. `SharedDns`
+also limits outstanding logical queries to 256, including invalidated queries
+that have not yet finished. Same-host physical work is deduplicated even after
+the logical timeout or negative-cache expiry. Admission and resolution use a
+30-second deadline; waiting for an abandoned generation does not restart a
+caller's budget.
+
+A started `getaddrinfo` call cannot be safely force-cancelled. Its physical
+entry and permit remain owned until it returns, even if every caller has left.
+Dedicated DNS threads keep such calls out of Tokio's filesystem/blocking pool
+and do not delay runtime shutdown. Once physical work completes, stale answers
+are discarded; a waiting new cohort may retry within its remaining deadline.
+Invalidation propagates to the physical generation, and generation checks keep
+late results out of the new cache. Permanently blocked OS calls can still
+occupy all 32 slots: resource use is bounded, not magically recovered. See
+[Tokio's blocking-task cancellation semantics](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).
+
+UDP trackers consume all resolved addresses of the carrier's family. Each
+attempt keeps at most 32 candidates, probes at most two CONNECT endpoints at
+once and staggers probes by 250 ms with an active-operation timer; idle
+maintenance retains its 1-second tick. New requests and replies are flushed
+immediately. Only the winning endpoint receives ANNOUNCE. DNS, CONNECT and ANNOUNCE
+share one attempt deadline. Network failure can advance to another candidate;
+a valid tracker error or empty peer list does not poison DNS or trigger an
+address race. Connection IDs are scoped to IP and port; automatic scrape uses
+the successful endpoint. Owner tokens isolate cancellation, timeout,
+reconfiguration and late replies. Full outbound channels retain unsent
+requests without starting their retransmit timers. Malformed or mismatched
+replies cannot consume a live transaction.
+
+Each actor shares one asynchronous IPv6 availability probe across its IPv6
+operations and caches the result from completion time. Waiting for that probe
+consumes the operation's original deadline but never blocks IPv4 requests,
+incoming replies or commands. Reconfiguration and shutdown cancel the probe;
+its token prevents a late completion from updating the new generation.
+
+Existing cache hit/miss and caller latency/error counters remain separate from
+backend work. `/metrics` additionally exposes `taiji_dns_backend_queries_total`,
+`taiji_dns_coalesced_total`, `taiji_dns_negative_hits_total`,
+`taiji_dns_capacity_rejected_total`, `taiji_dns_system_queries_total`,
+`taiji_dns_system_coalesced_total`, `taiji_dns_system_active` and
+`taiji_dns_system_queued`. Counters have no hostname/IP labels. A coalesced
+caller is still a cache miss; a negative-cache hit is counted separately from
+a successful hit. Active/queued gauges measure physical system work rather
+than surviving futures.
+
+`taiji-io/tests/dns_concurrency.rs` covers the public sharing/cache contract;
+physical-work tests inject a blocking lookup and real release gates.
+`taiji-core/tests/dns_discovery.rs` exercises shared HTTP/UDP resolution,
+address failover, real UDP packets and magnet metadata acquisition without
+starting payload downloads. `cargo run -p taiji-io --example dns_workload
+--release` emits call counts and latency for controlled 128-caller bursts.
+Its injected delay is not a measurement of real DNS or a comparison with aria2.
 
 ## nat/igd.rs
 

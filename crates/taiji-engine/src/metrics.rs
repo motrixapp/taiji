@@ -580,6 +580,15 @@ pub struct MetricsSnapshot {
     /// double-count policy in the `taiji_io::dns` module doc's metrics
     /// section). Multiple atomics, non-consistent snapshot - each count
     /// read independently; do not assert cross-field consistency.
+    /// DNS work and admission counters; active/queued track physical system queries.
+    pub dns_backend_queries_total: u64,
+    pub dns_coalesced_total: u64,
+    pub dns_negative_hits_total: u64,
+    pub dns_capacity_rejected_total: u64,
+    pub dns_system_queries_total: u64,
+    pub dns_system_coalesced_total: u64,
+    pub dns_system_active: u64,
+    pub dns_system_queued: u64,
     pub dns_lookups_hit_total: u64,
     pub dns_lookups_miss_total: u64,
     pub dns_lookups_error_total: u64,
@@ -768,6 +777,14 @@ impl Default for MetricsSnapshot {
             rpc_conn_rejected_total_scope_total: 0,
             rpc_conn_rejected_total_scope_per_ip: 0,
             rpc_auth_fail_total: 0,
+            dns_backend_queries_total: 0,
+            dns_coalesced_total: 0,
+            dns_negative_hits_total: 0,
+            dns_capacity_rejected_total: 0,
+            dns_system_queries_total: 0,
+            dns_system_coalesced_total: 0,
+            dns_system_active: 0,
+            dns_system_queued: 0,
             dns_lookups_hit_total: 0,
             dns_lookups_miss_total: 0,
             dns_lookups_error_total: 0,
@@ -1975,6 +1992,14 @@ impl SessionMetrics {
         // family; multiple atomics, non-consistent snapshot - see the
         // module and field docs).
         let io = self.io_metrics.snapshot();
+        snap.dns_backend_queries_total = io.dns.backend_started;
+        snap.dns_coalesced_total = io.dns.coalesced;
+        snap.dns_negative_hits_total = io.dns.negative_hit;
+        snap.dns_capacity_rejected_total = io.dns.capacity_rejected;
+        snap.dns_system_queries_total = io.dns.system_started;
+        snap.dns_system_coalesced_total = io.dns.system_coalesced;
+        snap.dns_system_active = io.dns.system_active;
+        snap.dns_system_queued = io.dns.system_queued;
         snap.dns_lookups_hit_total = io.dns.lookups_hit;
         snap.dns_lookups_miss_total = io.dns.lookups_miss;
         snap.dns_lookups_error_total = io.dns.lookups_error;

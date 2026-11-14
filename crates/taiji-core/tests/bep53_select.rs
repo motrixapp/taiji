@@ -232,6 +232,7 @@ async fn bep53_select_file_downloads_only_selection() {
 
     let root = tokio_util::sync::CancellationToken::new();
     let cfg = EngineConfig {
+        initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
         peer_id: *b"-TJ0001-ENGINEENGIN1",
@@ -286,6 +287,7 @@ async fn bep53_select_file_downloads_only_selection() {
     let (engine2, join2) = DownloadEngine::spawn_controlled(
         {
             let mut c = EngineConfig {
+                initial_selection: None,
                 preset_progress: None, // default None, zero behavior delta
                 tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
                 peer_id: *b"-TJ0001-ENGINEENGIN1",
@@ -634,6 +636,7 @@ async fn bep53_select_file_v2_only_downloads_only_selection() {
 
     let root = tokio_util::sync::CancellationToken::new();
     let cfg = EngineConfig {
+        initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
         peer_id: *b"-TJ0001-ENGINEENGIN1",

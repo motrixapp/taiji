@@ -107,10 +107,29 @@ python scripts/bench_magnet_ws.py --taiji target/release/taiji \
 
 The default `--mode notify` races readiness notifications with a bounded 10 ms
 status reconciliation fallback, allowing older baselines to participate. Use
-`--mode poll --poll-ms 1 --clients baseline,taiji` to isolate engine changes from
-the new notification. Record `ready_via` and RPC call counts; keep this series
+`--mode poll --poll-ms 1 --clients baseline,taiji` to compare delivery using the
+same polling interval. Record `ready_via` and RPC call counts; keep this series
 separate from the earlier short-connection HTTP results. Both clients still
 validate identity and retrieve the file list before the clock stops. Both clients receive the same 50 ms idle preparation before timing (`--prepare-ms`);
 native clients request `prepareBitTorrent` just as Motrix does. This does not preload
 metadata. Only local synthetic fixtures are allowed. libtorrent stop-announce waits are disabled only
 during fixture cleanup, after the measured interval. No payload is requested.
+
+### Engine fetching benchmark
+
+`scripts/bench_magnet_fetch.py` compares two taiji binaries with the same
+`infoValidatedUs` instrumentation. It records readiness, identity and file
+count checks, but reports the engine's monotonic time through info validation.
+Use a baseline with timing instrumentation and the original scheduling policy.
+
+```sh
+python scripts/bench_magnet_fetch.py --baseline /tmp/baseline-taiji \
+  --candidate target/release/taiji --samples 30 --seed 44 --output /tmp/magnet-fetch
+```
+
+The benchmark reuses the tracker and peer endpoints for each pair and randomizes
+engine order. Each case uses a fresh profile on loopback. TCP is explicit and
+DHT is disabled. By default `prepareBitTorrent` gets 50 ms before each case,
+with an empty metadata cache. Use `--prepare-ms 0` to include discovery startup
+or `--cache memory --scenarios healthy,v2-file-tree` for warm metadata.
+Raw attempts and peer traffic counters are retained alongside percentile summaries.

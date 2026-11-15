@@ -171,12 +171,15 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
 
 `taiji.getMagnetResolution(gid)` 是原生只读方法。返回 `attemptId`（16 位十六进制）、`revision`、
 `elapsedMs`、`state`（`queued`、`resolving`、`ready`、`paused` 或 `failed`）、
-`cache`（`null`、`memory` 或 `persistent`）和 `milestones`。状态与阶段快照
+`cache`（`null`、`memory` 或 `persistent`）、`infoValidatedUs` 和 `milestones`。状态与阶段快照
 在同一次读取中按当前任务队列计算。
-阶段字段为可选的毫秒偏移，起点是本次尝试进入会话队列：`admittedMs`、
+阶段字段为可选的毫秒偏移，起点是会话收到命令或后续尝试重新准入的时刻。
+字段包括 `admittedMs`、
 `firstCandidateMs`、`firstHandshakeMs`、`firstInfoBlockMs`、`infoVerifiedMs`、
 `verificationReadyMs`、`metadataReadyMs`、`selectionCommittedMs`。缺省表示尚未
-观察到该阶段；缓存命中可以没有网络阶段。所有时间来自同一单调时钟，不能与
+观察到该阶段；缓存命中可以没有网络阶段。`infoValidatedUs` 从同一起点计到
+原始 info 身份和文件结构均通过校验，单位为微秒，校验成功前为 `null`。
+缓存写入、后续 v2 piece layer 请求和客户端通知在此之后。所有时间来自同一单调时钟，不能与
 其他进程的时间戳相减。新尝试使用新 ID。内存保留最近 2048 条记录，不存在或
 已淘汰的记录明确报错。原有任务状态和通知格式保持不变；宿主可在原生文件
 选择任务就绪的暂停通知后读取快照。

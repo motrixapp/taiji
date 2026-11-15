@@ -207,13 +207,18 @@ feature-name negotiation is required.
 
 `taiji.getMagnetResolution(gid)` is a read-only native method. It returns `attemptId` (16 hex characters), `revision`,
 `elapsedMs`, `state` (`queued`, `resolving`, `ready`, `paused`, or `failed`),
-`cache` (`null`, `memory`, or `persistent`), and `milestones`. State is projected
+`cache` (`null`, `memory`, or `persistent`), `infoValidatedUs`, and `milestones`. State is projected
 from the current task queue in the same read as the timing snapshot.
-Milestones are optional millisecond offsets from acceptance into the session
-queue: `admittedMs`, `firstCandidateMs`, `firstHandshakeMs`, `firstInfoBlockMs`,
+Milestones are optional millisecond offsets from receipt of the session command
+or from re-admission on a later attempt. The keys are
+`admittedMs`, `firstCandidateMs`, `firstHandshakeMs`, `firstInfoBlockMs`,
 `infoVerifiedMs`, `verificationReadyMs`, `metadataReadyMs`, and
 `selectionCommittedMs`. Missing values mean the event has not been observed;
-cache hits need not have network milestones. Times use one monotonic clock;
+cache hits need not have network milestones. `infoValidatedUs` measures the same
+start through successful validation of the raw info identity and file layout,
+in microseconds. It is null until validation succeeds. Cache writes, subsequent
+v2 piece-layer requests, and client notification follow this fetch milestone.
+Times use one monotonic clock;
 do not subtract timestamps from another process. A new attempt gets a new ID.
 The latest 2048 records are retained in memory; unavailable or aged-out records
 return an explicit error. Existing task status and notification envelopes are

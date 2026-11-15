@@ -100,8 +100,25 @@ python scripts/bench_magnet_ws.py --taiji target/release/taiji \
 ```
 
 默认 `--mode notify` 同时等待就绪通知和有界的 10 ms 状态同步兜底，使旧基线也能
-参与。使用 `--mode poll --poll-ms 1 --clients baseline,taiji` 可区分引擎改动与新增
-通知带来的收益。结果记录 `ready_via` 和 RPC 调用数量；这组数据应与原先的 HTTP
+参与。使用 `--mode poll --poll-ms 1 --clients baseline,taiji` 可用相同的轮询间隔对比
+交付延迟。结果记录 `ready_via` 和 RPC 调用数量；这组数据应与原先的 HTTP
 短连接结果分开。双方均在取回文件列表并核对身份后结束计时。计时前均空闲准备 50 ms（`--prepare-ms`），
 原生客户端像 Motrix 一样先请求 `prepareBitTorrent`，不预载 metadata。仅允许本机合成夹具。
 libtorrent 的停止 announce 等待仅在计时结束后的夹具清理阶段关闭；不请求 payload。
+
+### 引擎磁链获取基准
+
+`scripts/bench_magnet_fetch.py` 对比带相同 `infoValidatedUs` 埋点的两个 taiji
+二进制。脚本检查就绪、身份和文件数量，延迟取自引擎单调时钟，计到 info
+校验完成。基线需包含计时埋点并使用原调度策略。
+
+```sh
+python scripts/bench_magnet_fetch.py --baseline /tmp/baseline-taiji \
+  --candidate target/release/taiji --samples 30 --seed 44 --output /tmp/magnet-fetch
+```
+
+每对样本共用 tracker 和 peer 的端点，随机决定引擎顺序。每次使用新建会话，
+在本机回环上指定 TCP 并关闭 DHT。默认提前调用 `prepareBitTorrent` 并等待
+50 ms，元数据缓存为空。`--prepare-ms 0` 将发现服务启动计入耗时。
+`--cache memory --scenarios healthy,v2-file-tree` 测量已预填的内存缓存。
+原始结果和 peer 流量计数随分位数汇总一并保留。

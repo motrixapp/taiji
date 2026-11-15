@@ -146,6 +146,16 @@ This selection barrier survives restart; `unpauseAll` skips it and `unpause`
 rejects it until confirmation. Ordinary `pause-metadata` keeps its existing
 pause semantics when this additional option is absent.
 
+- `taiji.onTorrentMetadataReady` is a native WebSocket notification with
+  `params: [{gid}]`. It is emitted after verified magnet info is registered
+  behind the selection barrier. Read `getTorrentManifest` directly; no preceding
+  status/file query or feature negotiation is needed. Ordinary user pauses do
+  not emit this event. Notifications are advisory and not replayed on restart;
+  keep status reconciliation for missed events and reconnects. The name stays
+  native even when the aria2 compatibility namespace is enabled.
+- A live pending-selection task shares its admitted original info model with
+  the manifest reader. Restored tasks and post-selection proof enrichment retain
+  the raw-artifact validation path; output mappings never become original paths.
 - `taiji.getTorrentManifest(gid)` returns `{data, awaitingSelection, manifest}`.
   The retained `getTorrentMetadata` alias returns the same envelope. `data` is
   base64 metainfo with the original raw info bytes. `manifest` contains

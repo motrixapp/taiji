@@ -93,3 +93,24 @@ results separate from deterministic fixtures and report failed attempts as well.
   unsigned archives into a draft release. The separate `sign-macos` workflow
   signs and notarizes both macOS binaries before publication. Windows binaries
   are unsigned. See [the packaging contract](../packaging/README.md).
+
+### WebSocket and alert comparison
+
+`scripts/bench_magnet_ws.py` uses a persistent authenticated WebSocket for native
+engines and libtorrent's `metadata_received_alert` via nonblocking `set_alert_fd`.
+Install `websockets==15.0.1` alongside the optional libtorrent binding. Example:
+
+```sh
+python scripts/bench_magnet_ws.py --taiji target/release/taiji \
+  --baseline /tmp/previous-taiji --samples 30 --output /tmp/magnet-ws
+```
+
+The default `--mode notify` races readiness notifications with a bounded 10 ms
+status reconciliation fallback, allowing older baselines to participate. Use
+`--mode poll --poll-ms 1 --clients baseline,taiji` to isolate engine changes from
+the new notification. Record `ready_via` and RPC call counts; keep this series
+separate from the earlier short-connection HTTP results. Both clients still
+validate identity and retrieve the file list before the clock stops. Both clients receive the same 50 ms idle preparation before timing (`--prepare-ms`);
+native clients request `prepareBitTorrent` just as Motrix does. This does not preload
+metadata. Only local synthetic fixtures are allowed. libtorrent stop-announce waits are disabled only
+during fixture cleanup, after the measured interval. No payload is requested.

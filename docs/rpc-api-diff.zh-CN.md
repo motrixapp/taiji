@@ -985,7 +985,7 @@ aria2 无对应守卫面；差异方向 = taiji 安全增强）。锚点：
   延迟后断开。其余形态（secret 未设 / 非 listen-all / 带密码的
   Basic）保持现行行为（回环上 `/metrics` 匿名可读，WS 升级即订阅）。
 
-HTTP 文件收尾额外通知为 `taiji.onHttpOutputReady`，在原生与兼容模式中都保留该名字，并出现在 `system.listNotifications`。原有 6 个兼容事件的名字及顺序保持不变；差异测试只排除这一明确声明的新增事件。
+HTTP 文件收尾额外通知为 `taiji.onHttpOutputReady`，已验证的磁链文件选择额外通知为 `taiji.onTorrentMetadataReady`。两者在原生与兼容模式中都保留原生名字，并出现在 `system.listNotifications`。原有 6 个兼容事件的名字及顺序保持不变；差异测试只排除这两个明确声明的新增事件。
 
 部分文件选择的任务进度按所选文件的有效字节计算；aria2 的过滤长度按涉及的完整分块计数。taiji 不把共享边界分块的额外字节计入文件进度，完成判定仍等待所需分块验证和写入。
 

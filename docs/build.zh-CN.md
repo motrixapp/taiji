@@ -87,3 +87,21 @@ Transmission 的 RPC 不能在元数据到达前落实文件排除，因此不�
 
 `--scenarios v2-32k,v2-513 --clients taiji,baseline,libtorrent` 验证没有提供
 piece-layer 证明时的 info-first 文件列表；完整导出与证明恢复由原生集成测试覆盖。
+
+### WebSocket 与 alert 比较
+
+`scripts/bench_magnet_ws.py` 为原生引擎使用经过认证的 WebSocket 长连接，
+libtorrent 则通过非阻塞 `set_alert_fd` 等待 `metadata_received_alert`。
+在可选的 libtorrent Python 环境中安装 `websockets==15.0.1`，例如：
+
+```sh
+python scripts/bench_magnet_ws.py --taiji target/release/taiji \
+  --baseline /tmp/previous-taiji --samples 30 --output /tmp/magnet-ws
+```
+
+默认 `--mode notify` 同时等待就绪通知和有界的 10 ms 状态同步兜底，使旧基线也能
+参与。使用 `--mode poll --poll-ms 1 --clients baseline,taiji` 可区分引擎改动与新增
+通知带来的收益。结果记录 `ready_via` 和 RPC 调用数量；这组数据应与原先的 HTTP
+短连接结果分开。双方均在取回文件列表并核对身份后结束计时。计时前均空闲准备 50 ms（`--prepare-ms`），
+原生客户端像 Motrix 一样先请求 `prepareBitTorrent`，不预载 metadata。仅允许本机合成夹具。
+libtorrent 的停止 announce 等待仅在计时结束后的夹具清理阶段关闭；不请求 payload。

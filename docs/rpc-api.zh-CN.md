@@ -124,6 +124,13 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
 `unpauseAll` 跳过它，`unpause` 在确认前拒绝启动。没有该附加选项时，普通
 `pause-metadata` 仍保持原有的暂停语义。
 
+- `taiji.onTorrentMetadataReady` 是原生 WebSocket 通知，参数为 `[{gid}]`。
+  已验证的磁链 info 注册到文件选择屏障后发出；客户端可直接读取
+  `getTorrentManifest`，无须先查状态、文件或探测功能。普通用户暂停不产生此事件。
+  通知是尽力投递，重启后不重放；保留状态同步以处理丢失通知和重连。
+  开启 aria2 兼容命名空间后，此通知仍保留原生名称。
+- 活跃会话内待选择的任务与 manifest 读取共享已完成准入校验的原始 info。
+  恢复任务和确认后的证明补全仍从原始 artifact 验证；输出映射不会成为原始路径。
 - `taiji.getTorrentManifest(gid)` 返回 `{data, awaitingSelection, manifest}`，
   保留的 `getTorrentMetadata` 别名返回相同结构。`data` 是保留原始 info 字节的
   base64 metainfo。`manifest` 包含 `infoHash`、可空的 `v1`/`v2`、`name`、

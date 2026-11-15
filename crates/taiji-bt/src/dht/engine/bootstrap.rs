@@ -17,18 +17,28 @@ use super::*;
 /// a deliberate SPEC enhancement, see docs/design/dht.md; DNS resolution
 /// belongs to core's bootstrap task, this is constants only).
 ///
-/// DNS A-record check at inclusion: all three resolve
-/// (`router.bittorrent.com`, `dht.transmissionbt.com`,
-/// `router.utorrent.com`); `router.bitcomet.com` has no A record (not
-/// included).
-///
-/// `dht.libtorrent.org:25401` evaluated and rejected: it resolves and is
-/// libtorrent's official default bootstrap, but adding it as a fourth
-/// entry degraded cold-start bootstrap; not included.
+/// 2026-11 re-vetting (superseding the original three-entry table whose
+/// first entry was `router.bittorrent.com`):
+/// - `router.bittorrent.com:6881` / `router.utorrent.com:6881`: dead
+///   worldwide — the historical address 67.215.246.10 now hosts an
+///   unrelated web server (no DHT listener; TCP/UDP 6881 silent from
+///   six global vantage points), and transmission#8664 confirms only
+///   `dht.transmissionbt.com` / `dht.libtorrent.org` still work. Both
+///   dropped.
+/// - `dht.transmissionbt.com:6881` first: verified live (find_node
+///   answered from both A records, ~180-250ms), and its DNS resolves
+///   cleanly everywhere observed.
+/// - `dht.libtorrent.org:25401` second (mutual backup, mirroring the
+///   v6 table's pairing): verified live (find_node answered from the
+///   real address 185.157.221.247). The earlier fourth-entry cold-start
+///   regression is superseded by the settle-on-first-success entry
+///   round: the backup costs one concurrent ping that is cancelled as
+///   soon as the primary settles. Note its DNS is intermittently
+///   injected on some direct paths (rotating false A records) — a
+///   miss costs nothing, so it stays as second, not first.
 pub const DEFAULT_BOOTSTRAP_NODES: &[(&str, u16)] = &[
-    ("router.bittorrent.com", 6881),
     ("dht.transmissionbt.com", 6881),
-    ("router.utorrent.com", 6881),
+    ("dht.libtorrent.org", 25401),
 ];
 
 impl DhtEngine {

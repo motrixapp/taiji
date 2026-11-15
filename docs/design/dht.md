@@ -206,7 +206,7 @@ Intentional divergences from the reference (none affect interoperability):
 
 1. Hardcoded bootstrap router fallback: aria2 `--dht-entry-point[-6]` has
    no default (`OptionHandlerFactory.cc` NO_DEFAULT_VALUE) — no entry, no
-   bootstrap. This engine provides `router.bittorrent.com` etc. as
+   bootstrap. This engine provides `dht.transmissionbt.com` etc. as
    hardcoded v4 fallback constants (`DEFAULT_BOOTSTRAP_NODES`) per SPEC
    §6.7, offered as an upper-layer option; a deliberate SPEC enhancement,
    not aria2 behavior. Default resolution / the option surface belong to
@@ -256,12 +256,21 @@ exclusion would cut the node off the network.
 
 ## engine/bootstrap.rs
 
-Default bootstrap nodes (v4): `router.bittorrent.com`,
-`dht.transmissionbt.com`, `router.utorrent.com` — all three had valid DNS
-A records at inclusion; `router.bitcomet.com` has no A record and is not
-included. `dht.libtorrent.org:25401` was evaluated and rejected: it
-resolves and is libtorrent's official default bootstrap, but adding it as
-a fourth entry degraded cold-start bootstrap; not included.
+Default bootstrap nodes (v4): `dht.transmissionbt.com:6881` first,
+`dht.libtorrent.org:25401` second (mutual backup, mirroring the v6
+table's pairing). The 2026-11 re-vetting retired both BitTorrent Inc
+routers — the historical `router.bittorrent.com` address (67.215.246.10)
+now hosts an unrelated web server with no DHT listener (TCP/UDP 6881
+silent from global vantage points; see transmission#8664, which records
+transmissionbt/libtorrent as the surviving bootstraps). transmissionbt
+is primary: find_node answered from both A records and its DNS resolves
+cleanly everywhere observed. libtorrent.org verified live at its real
+address (185.157.221.247), but its DNS is intermittently injected on
+some direct paths (rotating false A records) — so it is the backup, not
+the primary; the earlier fourth-entry cold-start regression is
+superseded by the settle-on-first-success entry round (the backup's
+concurrent ping is cancelled as soon as the primary settles).
+`router.bitcomet.com` has no A record; not included.
 
 Bootstrap settle semantics: aria2's entry round joins on all entries
 settling, so one unreachable entry's retry budget (retry x transaction

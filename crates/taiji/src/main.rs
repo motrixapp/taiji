@@ -1809,7 +1809,7 @@ pub(crate) fn parse_dht_entry_point(s: &str) -> Result<String, String> {
     let bad = || {
         format!(
             "invalid --dht-entry-point value: {s} (expected HOST:PORT, \
-             e.g. router.bittorrent.com:6881)"
+             e.g. dht.transmissionbt.com:6881)"
         )
     };
     let Some((host, port)) = s.rsplit_once(':') else {

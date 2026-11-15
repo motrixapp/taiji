@@ -31,18 +31,41 @@ def free_port():
 
 
 class Fixture:
+    # Per-peer (handshake delay, serialized response delay) in seconds.
+    # None models a peer that handshakes and advertises metadata but never serves it.
+    PEER_PROFILES = {
+        "rtt-single": [(0.060, 0.040)],
+        "rtt-staggered": [(0.040, 0.040), (0.045, 0.040)],
+        "rtt-mixed": [(0.005, 0.180), (0.020, 0.025), (0.040, 0.035)],
+        "metadata-stall": [(0.005, None), (0.020, 0.025), (0.040, 0.035)],
+        "slow-blocks": [(0, 0.050)] * 4,
+        "v2-file-tree": [(0.020, 0.015)] * 3,
+    }
+
     def __init__(self, scenario, iteration, peer_host):
         self.peer_host = peer_host
+        self.file_count = 1
         info = {
             b"name": f"magnet-bench-{scenario}-{iteration}.bin".encode(),
             b"length": 32768,
             b"piece length": 16384,
             b"pieces": hashlib.sha1(bytes(16384)).digest() * 2,
         }
-        if scenario == "slow-blocks":
+        if scenario in {"slow-blocks", "rtt-mixed", "metadata-stall"}:
             info[b"x-benchmark-padding"] = bytes(128 * 1024)
-        self.v2 = scenario in {"v2-32k", "v2-513"}
-        if self.v2:
+        if scenario in {"rtt-single", "rtt-staggered"}:
+            info[b"x-benchmark-padding"] = bytes(20 * 1024)
+        self.v2 = scenario in {"v2-32k", "v2-513", "v2-file-tree"}
+        if scenario == "v2-file-tree":
+            self.file_count = 2048
+            root = hashlib.sha256(bytes(16384)).digest()
+            info = {b"name": f"{scenario}-{iteration}".encode(), b"meta version": 2,
+                    b"piece length": 16384, b"file tree": {
+                        f"file-{i:05d}.bin".encode(): {b"": {
+                            b"length": 16384, b"pieces root": root}}
+                        for i in range(self.file_count)
+                    }}
+        elif self.v2:
             piece_length, pieces = (32768, 2) if scenario == "v2-32k" else (16384, 513)
             blocks = piece_length // 16384 * pieces
             nodes = [hashlib.sha256(bytes(16384)).digest()] * blocks
@@ -59,7 +82,6 @@ class Fixture:
         self.hash = self.identity[:20]
         self.scenario = scenario
         self.public = False
-        self.file_count = 1
         self.servers = []
         self.handlers = set()
         self.counters = {"announces": 0, "connections": 0, "metadata_requests": 0,
@@ -68,6 +90,13 @@ class Fixture:
         self.peers = []
         self.healthy_peers = []
         self.responded_pieces = set()
+        self.trace = []
+        self.started = time.monotonic()
+
+    def mark(self, event, index, **details):
+        if self.scenario in {"rtt-mixed", "metadata-stall"}:
+            self.trace.append({"ms": (time.monotonic() - self.started) * 1000,
+                               "event": event, "peer": index, **details})
 
     async def server(self, callback, peer=False):
         async def track(reader, writer):
@@ -90,16 +119,23 @@ class Fixture:
 
     async def start(self):
         async def blackhole(reader, _writer):
+            self.counters["silent_peer_accepts"] = self.counters.get("silent_peer_accepts", 0) + 1
             await reader.read()
-        for _ in range(64 if self.scenario == "dead-peers" else 0):
+
+        async def dead_tracker(reader, _writer):
+            self.counters["silent_tracker_accepts"] = self.counters.get("silent_tracker_accepts", 0) + 1
+            await reader.read()
+
+        for _ in range({"dead-peers": 64, "dial-contention": 8}.get(self.scenario, 0)):
             self.peers.append(await self.server(blackhole, peer=True))
-        for index in range(4 if self.scenario == "slow-blocks" else 1):
+        for index in range(len(self.PEER_PROFILES.get(self.scenario, [(0, 0)]))):
             async def peer(reader, writer, index=index):
                 return await self.peer(reader, writer, index)
             self.peers.append(await self.server(peer, peer=True))
-            self.healthy_peers.append(self.peers[-1])
+            if self.PEER_PROFILES.get(self.scenario, [(0, 0)])[index][1] is not None:
+                self.healthy_peers.append(self.peers[-1])
         for _ in range(24 if self.scenario == "dead-trackers" else 0):
-            port = await self.server(blackhole)
+            port = await self.server(dead_tracker)
             self.trackers.append(f"http://127.0.0.1:{port}/announce")
         port = await self.server(self.tracker)
         self.trackers.append(f"http://127.0.0.1:{port}/announce")
@@ -129,6 +165,9 @@ class Fixture:
             self.counters["non_plain_handshakes"] += 1
             return
         self.counters["connections"] += 1
+        handshake_delay, response_delay = self.PEER_PROFILES.get(self.scenario, [(0, 0)])[index]
+        if handshake_delay:
+            await asyncio.sleep(handshake_delay)
         reserved = bytearray(8)
         reserved[5] = 0x10
         if self.v2:
@@ -138,6 +177,7 @@ class Fixture:
         def send(extension, data):
             writer.write(struct.pack(">IBB", len(data) + 2, 20, extension) + data)
         send(0, lt.bencode({b"m": {b"ut_metadata": 7}, b"metadata_size": len(self.info)}))
+        self.mark("handshake", index)
         await writer.drain()
         remote_id = 2
         while True:
@@ -154,17 +194,22 @@ class Fixture:
                 remote_id = value.get(b"m", {}).get(b"ut_metadata", 2)
             elif message[1] == 7 and value.get(b"msg_type") == 0:
                 piece = int(value[b"piece"])
+                self.counters["metadata_request_frames"] = self.counters.get("metadata_request_frames", 0) + 1
+                self.mark("request", index, piece=piece)
+                if response_delay is None:
+                    continue
                 block = self.info[piece * 16384:(piece + 1) * 16384]
                 if not block:
                     send(remote_id, lt.bencode({b"msg_type": 2, b"piece": piece}))
                 else:
-                    if self.scenario == "slow-blocks":
-                        await asyncio.sleep(0.05)
+                    if response_delay:
+                        await asyncio.sleep(response_delay)
                     self.counters["metadata_requests"] += 1
                     self.counters["metadata_bytes"] += len(block)
                     if piece in self.responded_pieces:
                         self.counters["duplicate_metadata_bytes"] = self.counters.get("duplicate_metadata_bytes", 0) + len(block)
                     self.responded_pieces.add(piece)
+                    self.mark("response", index, piece=piece, size=len(block))
                     send(remote_id, lt.bencode({b"msg_type": 1, b"piece": piece,
                                               b"total_size": len(self.info)}) + block)
                 await writer.drain()
@@ -241,9 +286,10 @@ class HttpRpc:
 
 
 class Daemon:
-    def __init__(self, kind, binary, directory, public=False):
+    def __init__(self, kind, binary, directory, public=False, peer_connection_type=None):
         self.kind, self.binary, self.directory = kind, binary, directory
         self.public = public
+        self.peer_connection_type = peer_connection_type
         self.process = None
         self.log = None
         self.version = None
@@ -279,6 +325,8 @@ class Daemon:
                     "--bt-enable-nat-pmp=false", "--listen-port=0", "--bt-max-peers=128",
                     "--bt-save-metadata=false", f"--dir={downloads}",
                     f"--sqlite3-db-path={self.directory / 'state.sqlite3'}"]
+            if self.peer_connection_type:
+                args.append(f"--bt-peer-connection-type={self.peer_connection_type}")
             self.rpc = HttpRpc(f"http://127.0.0.1:{port}/jsonrpc")
             method, params = "taiji.getVersion", []
         self.log = (self.directory / "daemon.log").open("w")

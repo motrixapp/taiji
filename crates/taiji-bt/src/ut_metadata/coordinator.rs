@@ -18,6 +18,7 @@ const MAX_PEERS: usize = 128;
 const MAX_SIZES: usize = 4;
 const LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEDGE_DELAY: Duration = Duration::from_secs(2);
+const MIN_TAIL_HEDGE_AGE: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub struct SharedMetadataSpec {
@@ -244,6 +245,7 @@ impl SharedMetadataPeer {
             return Ok(vec![0]);
         };
         let progressed = member.received > 0;
+        let latency = member.latency;
         let hedge_delay = member.latency.map_or(HEDGE_DELAY, |latency| {
             latency
                 .saturating_mul(4)
@@ -264,7 +266,8 @@ impl SharedMetadataPeer {
             .get_mut(&self.peer)
             .ok_or(FetchError::Rejected)?
             .epoch = epoch;
-        let group = state.groups.get_mut(&size).ok_or(FetchError::Rejected)?;
+        let State { groups, peers, .. } = &mut *state;
+        let group = groups.get_mut(&size).ok_or(FetchError::Rejected)?;
         if group.isolate {
             if !rejected.is_empty() {
                 return Ok(Vec::new());
@@ -276,7 +279,8 @@ impl SharedMetadataPeer {
         }
         // Bootstrap peers with one block, then share remaining work across
         // active suppliers. A lone useful supplier may fill the whole window.
-        let remaining_blocks = group.assembler.missing_indices().len();
+        let missing = group.assembler.missing_indices();
+        let remaining_blocks = missing.len();
         let window = if !progressed {
             WINDOW
         } else if group.isolate || active == 1 {
@@ -294,7 +298,6 @@ impl SharedMetadataPeer {
             .filter(|lease| lease.peer == self.peer)
             .count();
         let mut remaining = window.saturating_sub(outstanding);
-        let missing = group.assembler.missing_indices();
         let mut requests = Vec::new();
         // Every unrequested block gets an owner before any duplicate is sent.
         for hedge in [false, true] {
@@ -311,7 +314,10 @@ impl SharedMetadataPeer {
                         && leases[0].peer != self.peer
                         && group.hedges < (group.assembler.num_pieces() / 4).max(2)
                         && (group.assembler.num_pieces() <= SMALL_METADATA_BLOCKS
-                            || now.saturating_duration_since(leases[0].sent) >= hedge_delay)
+                            || now.saturating_duration_since(leases[0].sent) >= hedge_delay
+                            || (!group.isolate
+                                && remaining_blocks == 1
+                                && tail_is_overdue(now, leases[0], latency, peers)))
                 } else {
                     leases.is_empty()
                 };
@@ -494,6 +500,30 @@ impl SharedMetadataPeer {
         state.groups.clear();
         Ok(DataOutcome::Complete { metadata })
     }
+}
+
+/// When the entire assembly is waiting on one block, let an idle supplier
+/// with a measured response time race the current owner. Keep the owner's
+/// lease live and stay within the same duplicate-request budget.
+fn tail_is_overdue(
+    now: Instant,
+    lease: Lease,
+    alternative_latency: Option<Duration>,
+    peers: &HashMap<u64, Member>,
+) -> bool {
+    let Some(alternative) = alternative_latency.filter(|sample| !sample.is_zero()) else {
+        return false;
+    };
+    let age = now.saturating_duration_since(lease.sent);
+    let margin = alternative.saturating_mul(2);
+    if age < margin.max(MIN_TAIL_HEDGE_AGE) {
+        return false;
+    }
+    peers
+        .get(&lease.peer)
+        .and_then(|owner| owner.latency)
+        .filter(|sample| !sample.is_zero())
+        .is_none_or(|owner| age >= owner.saturating_mul(2) || owner >= age.saturating_add(margin))
 }
 
 impl Drop for SharedMetadataPeer {
@@ -739,6 +769,99 @@ mod tests {
         feed(&mut b, &data, &[0], now + HEDGE_DELAY);
         assert!(pool.completed().is_some());
     }
+
+    #[test]
+    fn proven_supplier_races_a_silent_final_lease_without_revoking_it() {
+        let data = vec![42; METADATA_PIECE_SIZE * 6];
+        let pool = pool(&data);
+        let now = Instant::now();
+        let mut slow = pool
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut fast = pool
+            .attach(2, [2; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(slow.requests(now).unwrap_or_default(), vec![0]);
+        for round in 0..3 {
+            let sent = now + Duration::from_millis(round * 15);
+            let requests = fast.requests(sent).unwrap_or_default();
+            assert!(!requests.contains(&0));
+            feed(
+                &mut fast,
+                &data,
+                &requests,
+                sent + Duration::from_millis(15),
+            );
+        }
+        assert!(
+            fast.requests(now + Duration::from_millis(49))
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert_eq!(
+            fast.requests(now + MIN_TAIL_HEDGE_AGE).unwrap_or_default(),
+            vec![0]
+        );
+        let mut third = pool
+            .attach(3, [3; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            third
+                .requests(now + MIN_TAIL_HEDGE_AGE)
+                .unwrap_or_default()
+                .is_empty()
+        );
+        feed(&mut slow, &data, &[0], now + Duration::from_millis(55));
+        assert_eq!(pool.completed().as_deref(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn tail_race_respects_a_supplier_with_a_recent_response_estimate() {
+        let data = vec![13; METADATA_PIECE_SIZE * 6];
+        let pool = pool(&data);
+        let _slow = pool
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let now = Instant::now();
+        let lease = Lease { peer: 1, sent: now };
+        let mut state = pool.lock();
+        let latency = Some(Duration::from_millis(25));
+        state
+            .peers
+            .get_mut(&1)
+            .unwrap_or_else(|| panic!("owner"))
+            .latency = Some(Duration::from_millis(60));
+        assert!(!tail_is_overdue(
+            now + Duration::from_millis(55),
+            lease,
+            latency,
+            &state.peers
+        ));
+        assert!(tail_is_overdue(
+            now + Duration::from_millis(121),
+            lease,
+            latency,
+            &state.peers
+        ));
+        state
+            .peers
+            .get_mut(&1)
+            .unwrap_or_else(|| panic!("owner"))
+            .latency = Some(Duration::from_millis(180));
+        assert!(tail_is_overdue(
+            now + Duration::from_millis(90),
+            lease,
+            latency,
+            &state.peers
+        ));
+        assert!(!tail_is_overdue(
+            now + Duration::from_millis(90),
+            lease,
+            None,
+            &state.peers
+        ));
+    }
+
     #[test]
     fn unknown_size_probes_and_wrong_size_does_not_poison_honest_peer() {
         let data = vec![7; 100];

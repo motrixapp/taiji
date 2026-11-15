@@ -133,6 +133,9 @@ impl MagnetServices {
     ) {
         self.cache.remember(v1, v2, torrent).await;
     }
+    pub(super) async fn remember_verified(&self, entry: super::cache::VerifiedCacheEntry) {
+        self.cache.remember_verified(entry).await;
+    }
     pub(super) async fn open(
         &self,
         cfg: &MagnetTaskConfig,

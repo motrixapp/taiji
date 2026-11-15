@@ -545,6 +545,87 @@ mod tests {
             .collect()
     }
     #[test]
+    fn late_supplier_keeps_small_metadata_within_one_service_round() {
+        let data = vec![29; METADATA_PIECE_SIZE * 2];
+        let start = Instant::now();
+        let solo = pool(&data);
+        let mut only = solo
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let initial = only.requests(start).unwrap_or_default();
+        feed(
+            &mut only,
+            &data,
+            &initial,
+            start + Duration::from_millis(50),
+        );
+        let solo_ms = if solo.completed().is_some() {
+            50
+        } else {
+            let next = only
+                .requests(start + Duration::from_millis(50))
+                .unwrap_or_default();
+            feed(&mut only, &data, &next, start + Duration::from_millis(100));
+            assert!(solo.completed().is_some());
+            100
+        };
+        let shared = pool(&data);
+        let first = shared
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut peers = vec![first];
+        let mut available = [0u64, 1];
+        let mut events = Vec::new();
+        for index in peers[0].requests(start).unwrap_or_default() {
+            available[0] += 50;
+            events.push((available[0], 0usize, index));
+        }
+        peers.push(
+            shared
+                .attach(2, [2; 20], Some(data.len()))
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        for index in peers[1]
+            .requests(start + Duration::from_millis(1))
+            .unwrap_or_default()
+        {
+            available[1] += 50;
+            events.push((available[1], 1usize, index));
+        }
+        let completed_ms = loop {
+            assert!(!events.is_empty(), "suppliers must continue progressing");
+            events.sort_unstable();
+            let (ms, peer, block) = events.remove(0);
+            assert!(ms <= 1000, "bounded service budget");
+            feed(
+                &mut peers[peer],
+                &data,
+                &[block],
+                start + Duration::from_millis(ms),
+            );
+            if shared.completed().is_some() {
+                break ms;
+            }
+            for (index, peer) in peers.iter_mut().enumerate() {
+                for block in peer
+                    .requests(start + Duration::from_millis(ms))
+                    .unwrap_or_default()
+                {
+                    available[index] = available[index].max(ms) + 50;
+                    events.push((available[index], index, block));
+                }
+            }
+        };
+        eprintln!(
+            "single-supplier parallel replies: {solo_ms} ms; staggered serial suppliers: {completed_ms} ms"
+        );
+        assert!(
+            completed_ms <= 51,
+            "a late supplier must not spend its first round duplicating reserved work: {completed_ms} ms"
+        );
+    }
+
+    #[test]
     fn four_suppliers_finish_nine_blocks_in_three_service_rounds() {
         let data = vec![23; METADATA_PIECE_SIZE * 9];
         let pool = pool(&data);

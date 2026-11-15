@@ -1750,6 +1750,7 @@ impl SessionActor {
         self.jobs.insert(
             gid,
             Job::Torrent(Box::new(TorrentJob {
+                selection_info: None,
                 metainfo: Arc::new(meta),
                 tiers,
                 dir: dest,
@@ -1851,6 +1852,7 @@ impl SessionActor {
         self.jobs.insert(
             gid,
             Job::Torrent(Box::new(TorrentJob {
+                selection_info: cfg.selection_pending.then(|| Arc::clone(&meta)),
                 metainfo: Arc::clone(&meta),
                 tiers,
                 dir,
@@ -1883,6 +1885,9 @@ impl SessionActor {
             .insert_reserved(ReservedEntry { gid, paused: true }, Some(0));
         if let Some(resolution) = self.magnet_services.resolution(gid) {
             resolution.mark(crate::magnet::ResolutionMilestone::MetadataReady);
+        }
+        if cfg.selection_pending {
+            self.publish(gid, EventKind::MetadataReady);
         }
         info!(target: "taiji::core::session", gid = %gid,
             "upgraded metadata task parked as paused (bt-pause-metadata residency)");
@@ -2129,6 +2134,7 @@ impl SessionActor {
         self.jobs.insert(
             gid,
             Job::Torrent(Box::new(TorrentJob {
+                selection_info: None,
                 metainfo: Arc::clone(&meta),
                 tiers: tiers.clone(),
                 dir,
@@ -2983,6 +2989,7 @@ impl SessionActor {
         self.jobs.insert(
             gid,
             Job::Torrent(Box::new(TorrentJob {
+                selection_info: None,
                 metainfo: Arc::clone(&meta),
                 tiers,
                 dir: dir.clone(),

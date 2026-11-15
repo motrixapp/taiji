@@ -19,13 +19,14 @@ use taiji_core::session::EventKind;
 #[cfg(test)]
 use taiji_core::session::{MEDIA_PHASE_EVENT_METHOD, RecoveryEventKind, TASK_COOKIE_EVENT_METHOD};
 
-/// The six event notification names (the canonical face:
+/// The canonical lifecycle names plus native readiness events (the canonical face:
 /// `taiji.onXxx`, the payload `[{gid}]` unchanged). Same source as the
 /// [`notification_method`] match below (locked by a consistency
 /// test); `system.listNotifications` emits this table directly in the
 /// default (compat off) state.
 pub const RPC_NOTIFICATIONS: &[&str] = &[
     "taiji.onHttpOutputReady",
+    "taiji.onTorrentMetadataReady",
     "taiji.onDownloadStart",
     "taiji.onDownloadPause",
     "taiji.onDownloadStop",
@@ -42,6 +43,7 @@ pub const RPC_NOTIFICATIONS: &[&str] = &[
 /// are not in this table (the compat face covers only the six events).
 pub const RPC_NOTIFICATIONS_ARIA2: &[&str] = &[
     "taiji.onHttpOutputReady",
+    "taiji.onTorrentMetadataReady",
     "aria2.onDownloadStart",
     "aria2.onDownloadPause",
     "aria2.onDownloadStop",
@@ -65,6 +67,7 @@ pub(crate) fn notification_face(aria2_compat: bool) -> &'static [&'static str] {
 pub(crate) fn notification_method(kind: EventKind, aria2_compat: bool) -> &'static str {
     match kind {
         EventKind::HttpReady => "taiji.onHttpOutputReady",
+        EventKind::MetadataReady => "taiji.onTorrentMetadataReady",
         EventKind::Start => face(
             "taiji.onDownloadStart",
             "aria2.onDownloadStart",
@@ -151,12 +154,15 @@ mod tests {
             assert_eq!(notification_method(k1, false), c);
             assert_eq!(notification_method(k1, true), a);
         }
-        assert_eq!(EventKind::ALL.len(), 7, "the kind set is seven");
+        assert_eq!(EventKind::ALL.len(), 8, "the kind set is eight");
         for kind in EventKind::ALL {
-            if kind == EventKind::HttpReady {
-                // The HTTP output-ready extension keeps its canonical
+            if matches!(kind, EventKind::HttpReady | EventKind::MetadataReady) {
+                // Native readiness extensions keep their canonical
                 // name on both faces (one name, not in the compat swap).
-                assert_eq!(notification_method(kind, true), "taiji.onHttpOutputReady");
+                assert_eq!(
+                    notification_method(kind, true),
+                    notification_method(kind, false)
+                );
                 continue;
             }
             let swapped = notification_method(kind, false)

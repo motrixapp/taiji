@@ -1674,6 +1674,9 @@ fn validate_checksum_value(v: &str) -> Result<(), SessionError> {
 }
 
 struct TorrentJob {
+    /// Original info already admitted by a live magnet selection phase.
+    /// Restored jobs use the validated raw-row read path instead.
+    selection_info: Option<Arc<Metainfo>>,
     metainfo: Arc<Metainfo>,
     tiers: Vec<(usize, String)>,
     dir: PathBuf,

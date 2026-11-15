@@ -23,6 +23,44 @@ impl std::ops::Deref for CacheHit {
 
 type Entry = (MetadataCacheIdentity, Bytes);
 
+/// Only built from an admitted metainfo model on the blocking parse path.
+/// Disk reads and callers supplying raw bytes still use `canonical` below.
+pub(super) struct VerifiedCacheEntry(Entry);
+impl VerifiedCacheEntry {
+    pub(super) fn from_admitted(meta: &Metainfo) -> Option<Self> {
+        let mut size = meta.info_bytes.len();
+        let mut layers = std::collections::BTreeMap::new();
+        for file in &meta.meta.files {
+            if let (Some(root), Some(layer)) = (file.pieces_root, &file.piece_layer) {
+                if let std::collections::btree_map::Entry::Vacant(entry) = layers.entry(root) {
+                    size = size.saturating_add(layer.len());
+                    if size > MEMORY_BYTES {
+                        return None;
+                    }
+                    entry.insert(layer.to_vec());
+                }
+            }
+        }
+        if size > MEMORY_BYTES {
+            return None;
+        }
+        let bytes = super::metadata2torrent(
+            &meta.info_bytes,
+            &[],
+            &layers.into_iter().collect::<Vec<_>>(),
+        );
+        (bytes.len() <= MEMORY_BYTES).then(|| {
+            Self((
+                MetadataCacheIdentity {
+                    v1: meta.meta.identity.v1,
+                    v2: meta.meta.identity.v2,
+                },
+                Bytes::from(bytes),
+            ))
+        })
+    }
+}
+
 pub(super) struct MetadataCache {
     entries: Mutex<Vec<Entry>>,
     persist: Option<PersistHandle>,
@@ -96,6 +134,14 @@ impl MetadataCache {
                 return;
             }
         };
+        self.store(entry).await;
+    }
+
+    pub(super) async fn remember_verified(&self, entry: VerifiedCacheEntry) {
+        self.store(entry.0).await;
+    }
+
+    async fn store(&self, entry: Entry) {
         if let Some(persist) = &self.persist {
             if let Err(error) = persist.cache_metadata(entry.0, entry.1.to_vec()).await {
                 warn!(target:"taiji::core::magnet", %error, "metadata cache write failed");
@@ -152,6 +198,30 @@ fn canonical(bytes: &[u8], expected: MetadataCacheIdentity) -> Option<Entry> {
 mod tests {
     use super::*;
     use taiji_store::persist::PersistWriter;
+
+    #[tokio::test]
+    async fn admitted_cache_preserves_raw_identity_and_proofs_without_discovery_fields() {
+        let bytes = include_bytes!("../../../taiji-bt/tests/fixtures/hybrid_16k.torrent");
+        let meta = Metainfo::parse(bytes).unwrap_or_else(|e| panic!("{e}"));
+        taiji_engine::metainfo_admission::validate(&meta).unwrap_or_else(|e| panic!("{e}"));
+        let entry = VerifiedCacheEntry::from_admitted(&meta).unwrap_or_else(|| panic!("cacheable"));
+        let cache = MetadataCache::new(None);
+        cache.remember_verified(entry).await;
+        let hit = cache
+            .load(meta.meta.identity.v1, meta.meta.identity.v2)
+            .await
+            .unwrap_or_else(|| panic!("cached"));
+        let parsed = Metainfo::parse(&hit.bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(parsed.info_bytes, meta.info_bytes);
+        assert_eq!(parsed.meta.identity, meta.meta.identity);
+        for (file, original) in parsed.meta.files.iter().zip(&meta.meta.files) {
+            assert_eq!(file.piece_layer, original.piece_layer);
+        }
+        let top = taiji_bt::bencode::decode(&hit.bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert!(top.get(b"announce").is_none());
+        assert!(top.get(b"announce-list").is_none());
+        assert!(top.get(b"url-list").is_none());
+    }
 
     #[tokio::test]
     async fn persistent_hybrid_cache_preserves_layers_and_rejects_corrupt_proofs() {

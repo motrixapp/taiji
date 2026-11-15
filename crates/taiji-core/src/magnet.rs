@@ -1798,37 +1798,26 @@ async fn finalize(
         resolution.mark(ResolutionMilestone::InfoVerified);
     }
     let fetched = metainfo.is_none();
-    if let Err(error) = manifest::prepare_verified_info(
+    let park = manifest::selection_preview(&cfg);
+    let verified = match manifest::prepare_verified_info(
         &cfg,
         &magnet,
         &metadata,
         &mut trs,
         &mut tiers,
-        &mut metainfo,
+        metainfo.take(),
         phase.as_ref(),
     )
     .await
     {
-        return MagnetEnd::Failed(error);
+        Ok(verified) => verified,
+        Err(error) => return MagnetEnd::Failed(error),
+    };
+    if park {
+        return manifest::park_selection(&cfg, verified, phase, chain, resolution.as_ref()).await;
     }
-    if cfg.options.pause_metadata
-        && cfg.options.follow_torrent
-        && !cfg.options.bt_metadata_only
-        && !cfg.options.bt_save_metadata
-    {
-        return manifest::park_selection(
-            &cfg,
-            &metadata,
-            &trs,
-            metainfo,
-            phase,
-            chain,
-            resolution.as_ref(),
-        )
-        .await;
-    }
-    if fetched {
-        metainfo = None;
+    if !fetched {
+        metainfo = Some((verified.meta, verified.bytes));
     }
     // ---- BEP52 piece-layer prefetch (before parsing) ----
     // `piece layers` sits outside the info dict (a BEP52 top-level key) —

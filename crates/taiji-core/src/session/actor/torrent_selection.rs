@@ -37,6 +37,22 @@ impl SessionActor {
         }
         let data = data.ok_or_else(|| SessionError::failed("torrent metadata is not ready"))?;
         let awaiting_selection = self.awaiting_torrent_selection(gid);
+        if awaiting_selection {
+            if let Some(Job::Torrent(job)) = self.jobs.get(&gid) {
+                if let Some(original) = job.selection_info.clone() {
+                    let manifest = tokio::task::spawn_blocking(move || {
+                        taiji_domain::torrent_manifest::TorrentManifest::from_metainfo(&original)
+                    })
+                    .await
+                    .map_err(|e| SessionError::failed(e.to_string()))?;
+                    return Ok(CommandReply::TorrentMetadata {
+                        data,
+                        awaiting_selection,
+                        manifest: Box::new(manifest),
+                    });
+                }
+            }
+        }
         let recovered = if !awaiting_selection {
             if let Some(persist) = &self.persist {
                 persist
@@ -168,6 +184,7 @@ impl SessionActor {
         }
         self.rows.insert(row.gid.clone(), (row, files));
         if let Some(Job::Torrent(job)) = self.jobs.get_mut(&gid) {
+            job.selection_info = None;
             job.metainfo = Arc::new(meta);
             job.dir = dir;
             job.selected_files = selected;

@@ -197,6 +197,7 @@ impl SessionActor {
                     self.jobs.insert(
                         gid,
                         Job::Torrent(Box::new(TorrentJob {
+                            selection_info: None,
                             metainfo: Arc::clone(&meta),
                             tiers,
                             dir,

@@ -810,6 +810,7 @@ fn get_option_echo_keys_are_fully_declared() {
     ))
     .unwrap_or_else(|e| panic!("metainfo: {e}"));
     let tj = TorrentJob {
+        selection_info: None,
         metainfo: Arc::new(meta),
         tiers: Vec::new(),
         dir: PathBuf::from("/t"),

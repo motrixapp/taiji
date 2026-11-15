@@ -208,8 +208,33 @@ async fn invalidation_waits_for_old_physical_generation_then_caches_fresh_answer
         .unwrap_or_else(|e| panic!("{e}"))
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(answer, vec![SocketAddr::new(ip(2), 80)]);
-    assert!(first.await.unwrap_or_else(|e| panic!("{e}")).is_ok());
-    assert_eq!(lookup.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        first
+            .await
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|e| panic!("{e}")),
+        vec![SocketAddr::new(ip(2), 80)],
+    );
+    // These are distinct logical generations. An immediate replacement can
+    // finish before the other retired waiter is rescheduled, producing two
+    // serial refreshes instead of one coalesced refresh. Only in-flight work
+    // is shared; freshness, the physical cap and subsequent cache reuse are
+    // invariant in both schedules.
+    let calls = lookup.calls.load(Ordering::SeqCst);
+    assert!(
+        (2..=3).contains(&calls),
+        "one original and at most two refreshes"
+    );
+    assert_eq!(lookup.peak.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        shared.resolve_for_transport("version.test", 80).await,
+        Ok(vec![SocketAddr::new(ip(2), 80)])
+    );
+    assert_eq!(
+        lookup.calls.load(Ordering::SeqCst),
+        calls,
+        "fresh answer must be cached"
+    );
     assert_eq!(
         shared.cached_family_list("version.test", ResolveFamily::V4, Instant::now()),
         Some(vec![ip(2)])

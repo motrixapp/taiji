@@ -22,7 +22,9 @@ use std::time::Duration;
 use sha1::{Digest as _, Sha1};
 use taiji_bt::peer_wire::Reserved;
 use taiji_bt::piece_id::Addressing;
-use taiji_core::engine::{DownloadEngine, EngineConfig, FaceConfig, FaceKind, WriterFactory};
+use taiji_core::engine::{
+    DownloadEngine, EngineConfig, FaceConfig, FaceKind, TrackerWireConfig, WriterFactory,
+};
 use taiji_store::disk::DiskWriter;
 use taiji_store::disk_policy::{AllocationMode, DiskPolicy, DiskTier};
 use taiji_store::error::StoreError;
@@ -255,7 +257,52 @@ async fn default_tier_has_no_flush_beat() {
         })),
     );
     let root = tokio_util::sync::CancellationToken::new();
-    let engine = DownloadEngine::spawn(cfg, &root);
+    // final_flush's acknowledged data barrier belongs to persistent engines.
+    // A nonpersistent engine may return before its storage task finishes, so
+    // it cannot establish the before-join durability property asserted here.
+    let (persist, persist_join) =
+        taiji_store::persist::PersistWriter::spawn(tmp.join("state.sqlite3"))
+            .await
+            .unwrap_or_else(|e| panic!("persist: {e}"));
+    let gid = "d150000000000001";
+    persist
+        .upsert_torrent(
+            taiji_store::persist::TorrentRow {
+                gid: gid.into(),
+                name: "disk-policy".into(),
+                state: "downloading".into(),
+                queue_pos: 0,
+                dir: tmp.display().to_string(),
+                config_json: "{}".into(),
+                kind: "v1".into(),
+                v1_infohash: Some(vec![9; 20]),
+                v2_infohash: None,
+                is_private: false,
+                metadata: None,
+                error_code: None,
+                error_msg: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("parent: {e}"));
+    let (handle, engine) = DownloadEngine::spawn_controlled(
+        cfg,
+        TrackerWireConfig {
+            persist: Some((gid.into(), persist.clone())),
+            ..Default::default()
+        },
+        &root,
+        taiji_bt::utp::PeerConnectionType::default(),
+    );
+    // Observe the running loop before measuring its flush policy. A fixed
+    // delay from spawn can otherwise cancel a still-constructing pipeline.
+    tokio::time::timeout(Duration::from_secs(15), handle.query_status())
+        .await
+        .unwrap_or_else(|e| panic!("engine readiness timed out: {e}"))
+        .unwrap_or_else(|e| panic!("engine failed before readiness: {e}"));
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(
         fsyncs.load(Ordering::SeqCst),
@@ -264,7 +311,10 @@ async fn default_tier_has_no_flush_beat() {
          change in the running window)"
     );
     root.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), engine).await;
+    tokio::time::timeout(Duration::from_secs(10), engine)
+        .await
+        .unwrap_or_else(|e| panic!("engine shutdown timed out: {e}"))
+        .unwrap_or_else(|e| panic!("engine task failed: {e}"));
     assert_eq!(
         fsyncs.load(Ordering::SeqCst),
         1,
@@ -273,6 +323,18 @@ async fn default_tier_has_no_flush_beat() {
          final_flush waits on the barrier value before landing the terminal \
          progress row)"
     );
+    assert!(
+        persist
+            .load_torrent_progress(gid)
+            .await
+            .unwrap_or_else(|e| panic!("progress: {e}"))
+            .is_some()
+    );
+    drop(persist);
+    tokio::time::timeout(Duration::from_secs(10), persist_join)
+        .await
+        .unwrap_or_else(|e| panic!("persist drain: {e}"))
+        .unwrap_or_else(|e| panic!("persist task: {e}"));
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

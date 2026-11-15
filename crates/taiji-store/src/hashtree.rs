@@ -49,14 +49,16 @@ pub enum TreeError {
     OversizeBlock(usize),
 }
 
+type LeafLayer = Vec<Option<[u8; 32]>>;
+
 /// Per-file hash tree: the trusted metadata piece layer plus a lazily
 /// fetched block-layer cache.
 #[derive(Debug, Default)]
 pub struct HashTreeCache {
     piece_layers: HashMap<[u8; 32], Vec<[u8; 32]>>,
     /// Keyed by `(file root, layer_depth)`; depth 0 = the leaf layer (16 KiB
-    /// granularity).
-    block_layers: HashMap<([u8; 32], u32), Vec<[u8; 32]>>,
+    /// granularity). Unfetched slots are distinct from verified zero hashes.
+    block_layers: HashMap<([u8; 32], u32), LeafLayer>,
     piece_len: u32,
 }
 
@@ -136,10 +138,13 @@ impl HashTreeCache {
         // check).
         let key = (*root, depth);
         let entry = self.block_layers.entry(key).or_default();
-        if entry.len() < (start + len) as usize {
-            entry.resize((start + len) as usize, [0u8; 32]);
+        let end = (start + len) as usize;
+        if entry.len() < end {
+            entry.resize(end, None);
         }
-        entry[start as usize..(start + len) as usize].copy_from_slice(&hashes);
+        for (slot, hash) in entry[start as usize..end].iter_mut().zip(hashes) {
+            *slot = Some(hash);
+        }
         Ok(())
     }
 
@@ -184,11 +189,9 @@ impl HashTreeCache {
         Ok(self.leaf_want(root, leaf_index)? == *hash)
     }
 
-    /// Expected-hash lookup in the leaf layer (shared by `verify_block` /
-    /// `verify_block_hash`): error set and order identical to the lookup
-    /// half of the pre-split `verify_block` (UnknownRoot -> leaf index out
-    /// of range -> layer not cached -> index out of range within the
-    /// layer).
+    /// Expected-hash lookup in the leaf layer. Only the registered piece
+    /// layer determines file bounds. Any in-range leaf that has not been
+    /// admitted yet is a cache miss, including gaps between segments.
     fn leaf_want(&self, root: &[u8; 32], leaf_index: u64) -> Result<[u8; 32], TreeError> {
         let Some(pieces) = self.piece_layers.get(root) else {
             return Err(TreeError::UnknownRoot(*root));
@@ -201,19 +204,14 @@ impl HashTreeCache {
                 count: leaves_total,
             });
         }
-        let Some(layer) = self.block_layers.get(&(*root, 0)) else {
-            return Err(TreeError::LeafLayerNotCached(*root));
-        };
-        let Some(&want) = layer.get(leaf_index as usize) else {
-            return Err(TreeError::LeafIndexOutOfRange {
-                index: leaf_index,
-                count: layer.len() as u64,
-            });
-        };
-        Ok(want)
+        self.block_layers
+            .get(&(*root, 0))
+            .and_then(|layer| layer.get(leaf_index as usize).copied().flatten())
+            .ok_or(TreeError::LeafLayerNotCached(*root))
     }
 
-    /// Length of the cached leaf layer (for diagnostics/tests).
+    /// One past the highest cached leaf index (for diagnostics/tests).
+    /// The cache can have gaps below this index.
     pub fn leaf_layer_len(&self, root: &[u8; 32]) -> Option<usize> {
         self.block_layers.get(&(*root, 0)).map(|l| l.len())
     }
@@ -345,6 +343,46 @@ mod tests {
         assert!(matches!(
             cache.verify_and_put_layer(&root2, 0, 1, leaves2[..4].to_vec()),
             Err(TreeError::SegmentNotPieceAligned { .. })
+        ));
+    }
+
+    #[test]
+    fn partial_leaf_layer_distinguishes_cache_misses_from_file_bounds() {
+        let (mut cache, root, _content, leaves) = fixture();
+        // Admit only the second piece, leaving an uncached gap before it
+        // and a suffix beyond the end of the cache.
+        cache
+            .verify_and_put_layer(&root, 0, 2, leaves[2..4].to_vec())
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        for index in [0, 4] {
+            assert!(
+                matches!(
+                    cache.verify_block_hash(&root, index, &leaves[index as usize]),
+                    Err(TreeError::LeafLayerNotCached(_))
+                ),
+                "leaf {index} is in the file but its hash has not been fetched"
+            );
+        }
+        assert!(matches!(
+            cache.verify_block_hash(&root, 2, &leaves[2]),
+            Ok(true)
+        ));
+        assert!(matches!(
+            cache.verify_block_hash(&root, 8, &[0; 32]),
+            Err(TreeError::LeafIndexOutOfRange { index: 8, count: 8 })
+        ));
+
+        cache
+            .verify_and_put_layer(&root, 0, 0, leaves[..2].to_vec())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(
+            cache.verify_block_hash(&root, 0, &leaves[0]),
+            Ok(true)
+        ));
+        assert!(matches!(
+            cache.verify_block_hash(&root, 2, &leaves[2]),
+            Ok(true)
         ));
     }
 

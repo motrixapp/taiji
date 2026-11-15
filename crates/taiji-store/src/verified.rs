@@ -1412,11 +1412,8 @@ impl VerifiedWriter {
                     // blocks re-enter the table.
                     return Ok(BufferOutcome::BlockRejected { leaf_index: leaf });
                 }
-                // Whole-piece buffering fallback: the existing v2 path
-                // when the lazy layer is unavailable (not fetched /
-                // degraded / file tree not registered — nothing to
-                // compare against). The dispatch side logs the
-                // fallback explicitly.
+                // Fall back to the trusted piece root when this leaf's
+                // hash is unavailable, even if other leaves are cached.
                 Err(TreeError::LeafLayerNotCached(_)) | Err(TreeError::UnknownRoot(_)) => {}
                 Err(e) => return Err(e.into()),
             }
@@ -2844,12 +2841,10 @@ mod tests {
         );
     }
 
-    /// Leaf layer not ready (lazy fetch degraded) -> whole-piece
-    /// buffering fallback: corrupted data goes through the HashPool
-    /// whole-piece verification -> PieceFailed (existing v2 semantics,
-    /// not silent — the caller logs the fallback).
+    /// Lazy fetch of the leaf layer stopped after the first piece.
+    /// The remaining data still goes through whole-piece verification.
     #[test]
-    fn block_check_falls_back_to_piece_path_when_layer_missing() {
+    fn block_check_falls_back_to_piece_path_when_layer_is_partial() {
         const PIECE: u32 = 32768;
         let content = pattern(2 * 32768);
         let tmp = TempDir::new("v2-fallback");
@@ -2866,10 +2861,11 @@ mod tests {
             .map(|p| crate::merkle::node_hash(&p[0], &p[1]))
             .collect();
         let root = crate::merkle::file_root_from_piece_roots(&pieces, 2);
-        // Leaf layer not lazily fetched (no leaf layer in the cache)
-        // -> verify_block returns LeafLayerNotCached.
         let mut trees = HashTreeCache::new(PIECE);
         trees.add_file(root, pieces.clone());
+        trees
+            .verify_and_put_layer(&root, 0, 0, leaves[..2].to_vec())
+            .unwrap_or_else(|e| panic!("lazy layer: {e}"));
         let pool = HashPool::new_v2(pieces, PIECE, content.len() as u64);
         let mut vw = VerifiedWriter::new(w, pool, crate::cache::DEFAULT_CACHE_LIMIT)
             .with_block_check(BlockCheck {
@@ -2895,6 +2891,14 @@ mod tests {
             0,
             "unverified data must not hit disk"
         );
+        // A clean retry can verify and write even with the layer unavailable.
+        vw.push_block(1, 0, &content[32768..49152])
+            .unwrap_or_else(|e| panic!("{e}"));
+        let out = vw
+            .push_block(1, 16384, &content[49152..65536])
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(out, PushOutcome::PieceVerified { .. }));
+        assert_eq!(read_all(&path, 65536)[32768..], content[32768..]);
     }
 
     // ---------------------------------------------------------------------

@@ -1891,6 +1891,7 @@ impl SessionActor {
         }
         info!(target: "taiji::core::session", gid = %gid,
             "upgraded metadata task parked as paused (bt-pause-metadata residency)");
+        self.pump_all().await;
     }
 
     /// Teardown bookkeeping + stop-family hook triggers + event bus publish

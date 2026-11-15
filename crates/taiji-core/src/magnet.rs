@@ -3573,13 +3573,22 @@ mod tests {
         let out = resolve_entry_points_with(&[], &dns).await;
         let elapsed = t0.elapsed();
         // Normal nodes all resolve (ports synthesized from the entry
-        // table); the hanging node is skipped (not blocking).
+        // table); the hanging table head is skipped (not blocking).
+        // Expectation built from the table tail so the test stays
+        // table-agnostic (the 2026-11 re-vetting reordered the table;
+        // duplicates are deduplicated like the production path).
+        let mut want: Vec<std::net::SocketAddr> = taiji_bt::dht::DEFAULT_BOOTSTRAP_NODES[1..]
+            .iter()
+            .map(|(_, port)| {
+                std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)),
+                    *port,
+                )
+            })
+            .collect();
+        want.dedup();
         assert_eq!(
-            out,
-            vec![std::net::SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)),
-                6881
-            )],
+            out, want,
             "healthy nodes are retained and duplicate addresses are deduplicated"
         );
         assert!(

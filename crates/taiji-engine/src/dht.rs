@@ -857,10 +857,10 @@ mod tests {
         assert!(got.iter().all(|e| !e.starts_with("dht.")));
     }
 
-    /// Empty v4 table -> the v4 fallback constants (the original bt::dht
-    /// [`DEFAULT_BOOTSTRAP_NODES`] table, a zero-behavior-change
-    /// regression lock; see the bt-side constant comments for the entry
-    /// vetting and the libtorrent.org exclusion).
+    /// Empty v4 table -> the v4 fallback constants (the 2026-11 re-vetted
+    /// bt::dht [`DEFAULT_BOOTSTRAP_NODES`] table — transmissionbt first,
+    /// libtorrent.org as the mutual backup; see the bt-side constant
+    /// comments for the dead-router evidence and the ordering rationale).
     #[test]
     fn entry_source_v4_empty_falls_back_to_v4_table() {
         let got = select_entry_sources(&[], DhtFamily::V4);
@@ -869,10 +869,20 @@ mod tests {
             .map(|(h, p)| format!("{h}:{p}"))
             .collect();
         assert_eq!(got, want);
-        assert_eq!(want.len(), 3, "v4 fallback table must stay untouched");
+        assert!(!got.is_empty(), "v4 fallback must not be an empty table");
+        // Worldwide-dead routers must not flow back, and the
+        // clean-DNS primary stays first (the backup's DNS is
+        // intermittently injected on some paths — see the constant
+        // comment).
         assert!(
-            want.iter().all(|e| !e.contains("libtorrent")),
-            "the empirically degraded libtorrent bootstrap entry must not flow back into the v4 table"
+            want.iter().all(|e| !e.starts_with("router.bittorrent.com")
+                && !e.starts_with("router.utorrent.com")),
+            "dead bootstrap routers must not flow back into the v4 table"
+        );
+        assert!(
+            want.first()
+                .is_some_and(|e| e.starts_with("dht.transmissionbt.com")),
+            "transmissionbt must stay the first (clean-DNS primary) v4 entry"
         );
     }
 

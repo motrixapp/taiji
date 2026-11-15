@@ -1929,7 +1929,7 @@ enum Rebuilt {
 
 /// SessionActor: queue scheduling and the command entry point.
 pub struct SessionActor {
-    cmd_rx: mpsc::Receiver<SessionEnvelope>,
+    cmd_rx: mpsc::Receiver<(SessionEnvelope, Instant)>,
     events: mpsc::Sender<TaskNotice>,
     event_rx: mpsc::Receiver<TaskNotice>,
     /// The six-event notification bus (broadcast(256); sends never block).
@@ -2091,7 +2091,7 @@ pub struct SessionActor {
 
 /// SessionActor control handle: held by the RPC layer / CLI.
 pub struct SessionHandle {
-    cmd_tx: mpsc::Sender<SessionEnvelope>,
+    cmd_tx: mpsc::Sender<(SessionEnvelope, Instant)>,
     events: broadcast::Sender<SessionEvent>,
     /// Recovery extension event bus (taiji.*; the same topology as the
     /// six-event bus).
@@ -2115,10 +2115,11 @@ impl SessionHandle {
     /// Submit a command and await the receipt. Returns
     /// [`SessionError::SessionClosed`] once the actor has exited.
     pub async fn call(&self, cmd: SessionCommand) -> Result<CommandReply, SessionError> {
+        let received_at = Instant::now();
         let (tx, rx) = oneshot::channel();
         let env = SessionEnvelope { cmd, reply: tx };
         self.cmd_tx
-            .send(env)
+            .send((env, received_at))
             .await
             .map_err(|_| SessionError::SessionClosed)?;
         rx.await.map_err(|_| SessionError::SessionClosed)?
@@ -2218,7 +2219,7 @@ impl SessionActor {
     ) -> (SessionHandle, tokio::task::JoinHandle<()>) {
         // Capacity 64: RPC commands are low-frequency; full = backpressure
         // on the caller.
-        let (cmd_tx, cmd_rx) = mpsc::channel::<SessionEnvelope>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (events, event_rx) = mpsc::channel::<TaskNotice>(EVENT_CHANNEL_CAPACITY);
         // Six-event bus: broadcast sends synchronously without blocking
         // (full = slow subscribers lag).
@@ -2527,9 +2528,9 @@ impl SessionActor {
                            _ = self.token.cancelled() => break,
                            env = self.cmd_rx.recv() => match env {
                                None => break, // senders dropped: SessionHandle released → graceful shutdown
-                               Some(env) => {
+                               Some((env, received_at)) => {
                                    let SessionEnvelope { cmd, reply } = env;
-                                   if self.handle_command(cmd, reply).await {
+                                   if self.handle_command(cmd, reply, received_at).await {
                                        break;
                                    }
                                }

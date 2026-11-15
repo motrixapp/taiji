@@ -16,6 +16,7 @@ use crate::metainfo::Metainfo;
 pub(super) struct VerifiedInfo {
     pub meta: Metainfo,
     pub bytes: Vec<u8>,
+    pub validated_at: std::time::Instant,
     cache: Option<VerifiedCacheEntry>,
     verification_ready: bool,
 }
@@ -104,6 +105,7 @@ pub(super) async fn prepare_verified_info(
                 return Err("select-file/so= file index out of range".into());
             }
         }
+        let validated_at = std::time::Instant::now();
         let verification_ready = !meta
             .meta
             .files
@@ -117,6 +119,7 @@ pub(super) async fn prepare_verified_info(
         Ok::<_, String>(VerifiedInfo {
             meta,
             bytes,
+            validated_at,
             cache,
             verification_ready,
         })

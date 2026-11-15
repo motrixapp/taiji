@@ -2325,8 +2325,9 @@ impl SessionActor {
         uris: Vec<String>,
         options: BTreeMap<String, String>,
         position: Option<usize>,
+        received_at: std::time::Instant,
     ) -> Result<CommandReply, SessionError> {
-        self.add_uri_inner(uris, options, position, Vec::new())
+        self.add_uri_inner(uris, options, position, Vec::new(), received_at)
             .await
     }
 
@@ -2372,7 +2373,8 @@ impl SessionActor {
         }
         let seed = cookies_from_specs(&cookies);
         options.insert("motrix-task-cookie-scope".into(), "true".into());
-        self.add_uri_inner(uris, options, position, seed).await
+        self.add_uri_inner(uris, options, position, seed, std::time::Instant::now())
+            .await
     }
 
     async fn add_uri_inner(
@@ -2381,6 +2383,7 @@ impl SessionActor {
         mut options: BTreeMap<String, String>,
         position: Option<usize>,
         cookie_seed: Vec<taiji_http::cookies::NetscapeCookie>,
+        received_at: std::time::Instant,
     ) -> Result<CommandReply, SessionError> {
         let explicit_options: std::collections::BTreeSet<_> = options.keys().cloned().collect();
         for (key, value) in &self.global.motrix_http_defaults {
@@ -2499,7 +2502,7 @@ impl SessionActor {
             row.v1_infohash = parsed.btih.map(|b| b.to_vec());
             row.v2_infohash = parsed.btmh.map(|b| b.to_vec());
             self.persist_row(row, Vec::new()).await;
-            self.magnet_services.queue_resolution(gid);
+            self.magnet_services.queue_resolution_at(gid, received_at);
             self.jobs.insert(
                 gid,
                 Job::Magnet(Box::new(MagnetJob {

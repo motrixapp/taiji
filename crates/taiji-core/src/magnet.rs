@@ -1813,6 +1813,9 @@ async fn finalize(
         Ok(verified) => verified,
         Err(error) => return MagnetEnd::Failed(error),
     };
+    if let Some(resolution) = &resolution {
+        resolution.mark_info_validated(verified.validated_at);
+    }
     if park {
         return manifest::park_selection(&cfg, verified, phase, chain, resolution.as_ref()).await;
     }

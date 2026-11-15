@@ -210,6 +210,7 @@ impl SessionActor {
         &mut self,
         cmd: SessionCommand,
         reply: oneshot::Sender<Result<CommandReply, SessionError>>,
+        received_at: std::time::Instant,
     ) -> bool {
         use SessionCommand as C;
         match cmd {
@@ -238,7 +239,7 @@ impl SessionActor {
                 // pump (the client reply never waits for activation);
                 // instrumentation changes no behavior.
                 let cmd_t0 = std::time::Instant::now();
-                let result = self.add_uri(uris, options, position).await;
+                let result = self.add_uri(uris, options, position, received_at).await;
                 let add_us = cmd_t0.elapsed().as_micros() as u64;
                 let _ = reply.send(result);
                 self.pump_all().await;

@@ -32,7 +32,7 @@ pub enum ResolutionState {
     Failed,
 }
 
-/// Offsets are milliseconds from acceptance into the session queue, never wall-clock time.
+/// Offsets use the monotonic clock from session command receipt (or re-admission).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolutionSnapshot {
     pub state: ResolutionState,
@@ -40,6 +40,8 @@ pub struct ResolutionSnapshot {
     pub revision: u64,
     pub elapsed_ms: u64,
     pub milestones: BTreeMap<ResolutionMilestone, u64>,
+    /// Microseconds until the original info identity and file layout pass validation.
+    pub info_validated_us: Option<u64>,
     pub cache: Option<CacheOrigin>,
 }
 
@@ -48,6 +50,7 @@ struct State {
     claimed: bool,
     revision: u64,
     milestones: BTreeMap<ResolutionMilestone, u64>,
+    info_validated_us: Option<u64>,
     cache: Option<CacheOrigin>,
 }
 
@@ -58,9 +61,9 @@ pub struct MagnetResolution {
 }
 
 impl MagnetResolution {
-    fn new() -> Self {
+    fn new(start: Instant) -> Self {
         Self {
-            start: Instant::now(),
+            start,
             attempt_id: rand::random(),
             state: Mutex::new(State::default()),
         }
@@ -88,6 +91,17 @@ impl MagnetResolution {
             state.revision += 1;
         }
     }
+    pub(super) fn mark_info_validated(&self, at: Instant) {
+        let mut state = crate::lock(&self.state);
+        if state.info_validated_us.is_none() {
+            state.info_validated_us = Some(
+                at.saturating_duration_since(self.start)
+                    .as_micros()
+                    .min(u64::MAX as u128) as u64,
+            );
+            state.revision += 1;
+        }
+    }
     pub fn snapshot(&self) -> ResolutionSnapshot {
         let state = crate::lock(&self.state);
         ResolutionSnapshot {
@@ -108,6 +122,7 @@ impl MagnetResolution {
             revision: state.revision,
             elapsed_ms: self.start.elapsed().as_millis().min(u64::MAX as u128) as u64,
             milestones: state.milestones.clone(),
+            info_validated_us: state.info_validated_us,
             cache: state.cache,
         }
     }
@@ -117,9 +132,12 @@ impl MagnetResolution {
 pub(super) struct ResolutionBook(Mutex<VecDeque<(Gid, Arc<MagnetResolution>)>>);
 impl ResolutionBook {
     pub fn queued(&self, gid: Gid) -> Arc<MagnetResolution> {
+        self.queued_at(gid, Instant::now())
+    }
+    pub fn queued_at(&self, gid: Gid, start: Instant) -> Arc<MagnetResolution> {
         let mut records = crate::lock(&self.0);
         records.retain(|(id, _)| *id != gid);
-        let resolution = Arc::new(MagnetResolution::new());
+        let resolution = Arc::new(MagnetResolution::new(start));
         records.push_back((gid, resolution.clone()));
         // Covers the 1024 reserved tasks plus recent resolutions. Old records
         // may expire, but running work retains its own attempt handle.
@@ -199,6 +217,25 @@ mod tests {
                 .get(gid)
                 .unwrap_or_else(|| panic!("current"))
                 .snapshot()
+                .milestones
+                .contains_key(&ResolutionMilestone::MetadataReady)
+        );
+    }
+
+    #[test]
+    fn validated_info_uses_command_receipt_clock_before_ready() {
+        let book = ResolutionBook::default();
+        let gid = Gid::from_u64(1);
+        let received = Instant::now();
+        let delay = std::time::Duration::from_micros(81_234);
+        let resolution = book.queued_at(gid, received);
+        assert_eq!(resolution.snapshot().info_validated_us, None);
+        resolution.mark_info_validated(received + delay);
+        resolution.mark_info_validated(received + delay * 2);
+        let snapshot = resolution.snapshot();
+        assert_eq!(snapshot.info_validated_us, Some(81_234));
+        assert!(
+            !snapshot
                 .milestones
                 .contains_key(&ResolutionMilestone::MetadataReady)
         );

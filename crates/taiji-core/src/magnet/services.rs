@@ -105,6 +105,10 @@ impl MagnetServices {
     pub fn queue_resolution(&self, gid: Gid) {
         self.resolutions.queued(gid);
     }
+
+    pub(crate) fn queue_resolution_at(&self, gid: Gid, start: std::time::Instant) {
+        self.resolutions.queued_at(gid, start);
+    }
     pub(crate) fn admit_resolution(&self, gid: Gid) -> Arc<MagnetResolution> {
         self.resolutions.admit(gid)
     }

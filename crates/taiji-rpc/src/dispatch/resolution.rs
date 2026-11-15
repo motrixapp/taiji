@@ -31,6 +31,7 @@ pub(super) fn encode(snapshot: ResolutionSnapshot) -> Value {
         "attemptId": format!("{:016x}", snapshot.attempt_id),
         "revision": snapshot.revision,
         "elapsedMs": snapshot.elapsed_ms,
+        "infoValidatedUs": snapshot.info_validated_us,
         "milestones": milestones,
         "cache": snapshot.cache.map(|source| match source {
             CacheOrigin::Memory => "memory",

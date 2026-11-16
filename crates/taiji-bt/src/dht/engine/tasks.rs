@@ -217,6 +217,18 @@ impl DhtEngine {
                 }
             }
             Task::Lookup(l) => {
+                // A converged node lookup means the routing table carries
+                // real candidates (bootstrap settling alone guarantees
+                // only the entry point): hand any never-announced
+                // registration its discovery start point now — a peer
+                // lookup seeded from a one-node table exhausts a thin
+                // walk and can stamp the full quiet window on a live
+                // swarm. Only lookups that actually queried candidates
+                // count (an empty-table seed completion walked nothing).
+                // Idempotent (state-based filter).
+                if matches!(l.kind, LookupKind::Nodes) && l.walked_candidates() > 0 {
+                    self.dispatch_unannounced_pending();
+                }
                 // Read the live registry: a task can withdraw or change its
                 // mapped port while this query is still in flight.
                 let announce_port = self
@@ -262,13 +274,16 @@ impl DhtEngine {
                     }
                     if let Some(entry) = self.our_announces.get_mut(&l.target) {
                         entry.inflight = false;
+                        entry.last_lookup_supplied = l.values_seen() > 0;
                         // Only a round that actually sent >=1 announce_peer
-                        // enters the 15min quiet window (last_announced =
+                        // enters the announce quiet window (last_announced =
                         // the start of the resend cadence); zero sent
                         // (empty-table seed / no tokens — the cold-start
                         // assembly race where announce registration
                         // precedes bootstrap settling) does not occupy the
-                        // window; the next PeerAnnounceCheck re-dispatches.
+                        // window; the next PeerAnnounceCheck re-dispatches
+                        // (at the shortened cadence while the round found
+                        // no peers).
                         if sent > 0 {
                             entry.last_announced = Some(now);
                         }

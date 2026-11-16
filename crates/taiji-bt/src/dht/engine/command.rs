@@ -136,6 +136,7 @@ impl DhtEngine {
                 face: target.face(),
                 last_requested: now,
                 last_announced: None,
+                last_lookup_supplied: false,
                 inflight: false,
             },
         );

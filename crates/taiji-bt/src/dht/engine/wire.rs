@@ -712,6 +712,7 @@ impl DhtEngine {
                         } => {
                             face = l.face;
                             peers_found.clone_from(values);
+                            l.note_values(values.len());
                             l.on_response(&node, Some(token), to_dht_nodes(nodes), &self.local_id);
                         }
                         ResponseBody::FindNode { nodes } => {

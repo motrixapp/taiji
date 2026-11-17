@@ -869,6 +869,104 @@ async fn announce_zero_send_does_not_consume_announce_interval() {
     wait_snapshot(&handle, 5_000, |s| s.announce_lookups_started >= 2).await;
 }
 
+/// Shared driver for the supply-classified reissue cadence: one restored
+/// node, an announce whose lookup walks (token-bearing reply from the
+/// restored node) and completes via the announce stage — `values` decides
+/// which cadence the round classifies into.
+#[allow(clippy::type_complexity)]
+async fn supply_cadence_round(
+    values: Vec<SocketAddr>,
+) -> (
+    u64,
+    DhtHandle,
+    mpsc::Receiver<OutboundPacket>,
+    mpsc::Sender<InboundPacket>,
+) {
+    let mut cfg = fast_cfg();
+    cfg.peer_announce_interval = Duration::from_secs(3600);
+    cfg.peer_announce_low_interval = Duration::from_millis(120);
+    let nodes = vec![TableNode {
+        id: NodeId([0x11; 20]),
+        addr: v4_addr(6884),
+        last_seen_ago_secs: 1,
+    }];
+    let restore = t(
+        DhtRestoreState::from_state_row([0xAB; 20], &encode_table(&nodes)),
+        "restore",
+    );
+    let (handle, _ev, mut out_rx, in_tx, _join) =
+        spawn_channel_engine(DhtFamily::V4, 6881, cfg, Some(restore));
+
+    call(
+        "announce",
+        handle.announce(target_of([0x55; 20], DhtSwarmKind::V1), 6881),
+    )
+    .await;
+    // Capture the outbound get_peers query and answer it: token held, no
+    // closer nodes, `values` per scenario.
+    let (tid, from) = loop {
+        let (to, msg) = recv_packet(&mut out_rx).await;
+        if let DhtMessage::Query(q) = msg {
+            if matches!(q.body, QueryBody::GetPeers { .. }) {
+                break (q.transaction_id, to);
+            }
+        }
+    };
+    let response = DhtMessage::Response(ResponseMessage {
+        transaction_id: tid,
+        responder_id: NodeId([0x11; 20]),
+        body: ResponseBody::GetPeers {
+            token: b"tok".to_vec(),
+            nodes: Vec::new(),
+            values,
+        },
+        requester_endpoint: None,
+        version: None,
+    });
+    let wire = t(encode_message(&response), "encode response");
+    t(
+        in_tx
+            .send(InboundPacket {
+                from,
+                data: Bytes::from(wire),
+            })
+            .await,
+        "inject response",
+    );
+    // The announce stage fired: the round sent >=1 announce_peer and is
+    // stamped (127/8 is exempt from the BEP42 storage gate).
+    wait_snapshot(&handle, 5_000, |s| s.queries_announce_peer_total >= 1).await;
+    let started = call("snapshot", handle.snapshot())
+        .await
+        .announce_lookups_started;
+    (started, handle, out_rx, in_tx)
+}
+
+/// A stamped round that found no peers reissues at the shortened cadence
+/// (DHTGetPeersCommand's low-peer branch): the next lookup appears well
+/// inside the 1h full interval. Before the supply classification the
+/// stamped round parked the target for the full interval regardless of
+/// outcome.
+#[tokio::test]
+async fn announce_low_supply_round_reissues_at_shortened_interval() {
+    let (started, handle, _out_rx, _in_tx) = supply_cadence_round(Vec::new()).await;
+    wait_snapshot(&handle, 5_000, |s| s.announce_lookups_started > started).await;
+}
+
+/// The control arm: a round that did find peers keeps the full cadence —
+/// no re-dispatch while the (1h) full interval stands and the shortened
+/// one (120ms) has long passed.
+#[tokio::test]
+async fn announce_supplied_round_keeps_full_interval() {
+    let (started, handle, _out_rx, _in_tx) = supply_cadence_round(vec![v4_addr(7002)]).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let snap = call("snapshot", handle.snapshot()).await;
+    assert_eq!(
+        snap.announce_lookups_started, started,
+        "a supplied round must not re-dispatch at the shortened cadence"
+    );
+}
+
 /// Bootstrap settlement redispatches registered entries that have never
 /// been announced: registration precedes bootstrap (the wiring-race
 /// shape), and PeerAnnounceCheck is stretched to 1h to isolate the

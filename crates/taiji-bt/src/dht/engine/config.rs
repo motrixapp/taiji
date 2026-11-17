@@ -19,6 +19,13 @@ pub const DHT_BUCKET_REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 
 pub const DHT_PEER_ANNOUNCE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Peer announce resend interval. aria2 `src/DHTConstants.h`.
 pub const DHT_PEER_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Peer announce resend interval while the target's peer supply is short
+/// (the most recent completed lookup saw no peers in reply values). The
+/// reference shortens the per-torrent get_peers cadence the same way
+/// (`DHTGetPeersCommand.cc`: 15min per torrent / 5min at low peer
+/// count); it reads the torrent's peer storage, which lives above this
+/// engine, so the engine-local supply signal is the lookup outcome.
+pub const DHT_PEER_ANNOUNCE_LOW_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Peer announce/record sanitization age. aria2 `src/DHTConstants.h`.
 pub const DHT_PEER_ANNOUNCE_PURGE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// Autosave period. aria2 `src/DHTSetup.cc` (`30_min`).
@@ -109,6 +116,9 @@ pub struct DhtEngineConfig {
     pub token_rotate_interval: Duration,
     pub autosave_interval: Duration,
     pub peer_announce_interval: Duration,
+    /// Resend interval while the target's peer supply is short (default
+    /// [`DHT_PEER_ANNOUNCE_LOW_INTERVAL`]; see that constant's docs).
+    pub peer_announce_low_interval: Duration,
     pub peer_announce_purge_interval: Duration,
     /// Per-source inbound KRPC query token bucket sustained rate
     /// (queries/second; default [`DHT_PER_SOURCE_QUERY_RATE`] 25,
@@ -136,6 +146,7 @@ impl Default for DhtEngineConfig {
             token_rotate_interval: DHT_TOKEN_UPDATE_INTERVAL,
             autosave_interval: DHT_AUTOSAVE_INTERVAL,
             peer_announce_interval: DHT_PEER_ANNOUNCE_INTERVAL,
+            peer_announce_low_interval: DHT_PEER_ANNOUNCE_LOW_INTERVAL,
             peer_announce_purge_interval: DHT_PEER_ANNOUNCE_PURGE_INTERVAL,
             per_source_query_rate: DHT_PER_SOURCE_QUERY_RATE,
             per_source_query_burst: DHT_PER_SOURCE_QUERY_BURST,

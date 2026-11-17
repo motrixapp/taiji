@@ -51,6 +51,13 @@ pub(super) struct AnnounceEntry {
     pub(super) last_requested: Instant,
     /// Last announce-capable lookup completion instant.
     pub(super) last_announced: Option<Instant>,
+    /// Whether the most recent completed lookup for this target saw at
+    /// least one peer in reply values — the engine-local form of the
+    /// reference's low-peer reissue branch (`DHTGetPeersCommand`: 15min
+    /// per torrent / 5min at low peer count; the reference reads the
+    /// torrent's peer storage, which is core scope, so the engine uses
+    /// its own lookup outcome).
+    pub(super) last_lookup_supplied: bool,
     /// A lookup is already in flight (prevents duplicate dispatches per
     /// target; mirrors the single-flight task semantics of
     /// DHTGetPeersCommand).

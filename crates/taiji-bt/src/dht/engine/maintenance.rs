@@ -52,14 +52,24 @@ impl DhtEngine {
             .iter()
             .filter(|(_, entry)| {
                 !entry.inflight
-                    && entry
-                        .last_announced
-                        .is_none_or(|t| now.duration_since(t) >= self.cfg.peer_announce_interval)
+                    && entry.last_announced.is_none_or(|t| {
+                        // 15min cycle while the swarm supplied peers at the
+                        // last lookup; the shortened cycle otherwise (the
+                        // low-peer branch of DHTGetPeersCommand.cc — a
+                        // lookup that yielded no peers must not park the
+                        // target in the full quiet window).
+                        let interval = if entry.last_lookup_supplied {
+                            self.cfg.peer_announce_interval
+                        } else {
+                            self.cfg.peer_announce_low_interval
+                        };
+                        now.duration_since(t) >= interval
+                    })
             })
             .map(|(target, entry)| (*target, entry.port, entry.face))
             .collect();
         for (target, port, face) in due {
-            debug!(target: LOG_TARGET, "re-announcing info_hash (15min cycle)");
+            debug!(target: LOG_TARGET, "re-announcing info_hash (announce cycle)");
             let _ = self.start_peer_lookup(
                 DhtTarget {
                     info_hash: target.0,

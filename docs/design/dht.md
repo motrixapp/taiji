@@ -223,14 +223,20 @@ Intentional divergences from the reference (none affect interoperability):
 4. Own resend registry: the reference's per-torrent resends live in
    `DHTGetPeersCommand` (15min per torrent / 5min at low peer count);
    TorrentTask wiring is core scope, so this engine provides an equivalent
-   registry: a registered `Announce` is resent every 15min by the
-   PeerAnnounceCheck timer and removed after 30min without a resend
-   command (PURGE policy). The resend cadence starts at the completion of
-   a lookup that actually sent >= 1 announce_peer (zero sends do not enter
-   the quiet window); entries never announced are re-dispatched when
-   bootstrap settles (in the core assembly order registration lands before
-   bootstrap settles, so without this the cold-start discovery start would
-   slip to the first PeerAnnounceCheck).
+   registry: a registered `Announce` is resent on the PeerAnnounceCheck
+   timer — every 15min while the target's latest lookup round supplied
+   peers, every 5min while it did not (the reference reads the torrent's
+   peer storage, which lives above this engine, so the engine-local
+   supply signal is the lookup outcome) — and removed after 30min without
+   a resend command (PURGE policy). The resend cadence starts at the
+   completion of a lookup that actually sent >= 1 announce_peer (zero
+   sends do not enter the quiet window); entries never announced are
+   re-dispatched when bootstrap settles and when a walked node lookup
+   converges (in the core assembly order registration lands before
+   bootstrap settles, and settling alone guarantees only the entry point —
+   a peer lookup seeded from a one-entry table exhausts a thin walk and
+   can park a live swarm in the quiet window; the routing table is warmed
+   by exactly that node lookup).
 5. Responder table ID: both the response and query paths enter the table
    with the wire-carried `r.id`/`a.id`; aria2 reuses the node tracked at
    send time on the response path (a bootstrap entry's random ID would

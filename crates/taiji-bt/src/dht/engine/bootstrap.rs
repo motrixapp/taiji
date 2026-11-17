@@ -99,27 +99,7 @@ impl DhtEngine {
             // not enter the 15min quiet window (zero sends are not
             // stamped); without this re-dispatch the discovery start point
             // would slip to the first PeerAnnounceCheck (<=5min).
-            // Comparison: aria2's per-torrent DHTGetPeersCommand runs
-            // periodically from download setup onward and does not wait
-            // for bootstrap settling (the "15min / 5min at low peers"
-            // cadence, docs/design/dht.md divergence 4).
-            let pending: Vec<(NodeId, u16, DhtSwarmKind)> = self
-                .our_announces
-                .iter()
-                .filter(|(_, entry)| !entry.inflight && entry.last_announced.is_none())
-                .map(|(target, entry)| (*target, entry.port, entry.face))
-                .collect();
-            for (target, port, face) in pending {
-                debug!(target: LOG_TARGET, "redispatching announce lookup after bootstrap");
-                let _ = self.start_peer_lookup(
-                    DhtTarget {
-                        info_hash: target.0,
-                        face,
-                    },
-                    Some(port),
-                    QueueKind::Periodic,
-                );
-            }
+            self.dispatch_unannounced_pending();
             self.cancel_round_pings(round_idx);
             return;
         }
@@ -134,6 +114,47 @@ impl DhtEngine {
         warn!(target: LOG_TARGET, "bootstrap failed for all entry points; DHT degraded until reachable");
     }
 
+    /// Re-dispatch registry entries never announced (not in flight, no
+    /// completed announce round). Two call sites keep the discovery start
+    /// point tight:
+    ///
+    /// - bootstrap settling — registration lands before bootstrap settles
+    ///   (core assembly order — registration is issued right after engine
+    ///   spawn, bootstrap must first resolve/ping), so the first lookup
+    ///   runs on an empty table, sends nothing, and does not enter the
+    ///   quiet window (zero sends are not stamped);
+    /// - the post-bootstrap node lookup's completion — settling only
+    ///   guarantees one live entry point; the table itself is warmed by
+    ///   the self lookup dispatched at settlement. A lookup started
+    ///   between the two events seeds from a one-node table, and a thin
+    ///   exhausted walk can stamp the full quiet window on a target whose
+    ///   peers are one deeper hop away. Running when the self lookup has
+    ///   converged gives the redispatch a populated candidate set.
+    ///
+    /// Idempotent (the filter is state-based, not event-based).
+    /// Comparison: aria2's per-torrent DHTGetPeersCommand runs
+    /// periodically from download setup onward and does not wait for
+    /// bootstrap settling (the "15min / 5min at low peers" cadence,
+    /// docs/design/dht.md divergence 4).
+    pub(super) fn dispatch_unannounced_pending(&mut self) {
+        let pending: Vec<(NodeId, u16, DhtSwarmKind)> = self
+            .our_announces
+            .iter()
+            .filter(|(_, entry)| !entry.inflight && entry.last_announced.is_none())
+            .map(|(target, entry)| (*target, entry.port, entry.face))
+            .collect();
+        for (target, port, face) in pending {
+            debug!(target: LOG_TARGET, "redispatching announce lookup");
+            let _ = self.start_peer_lookup(
+                DhtTarget {
+                    info_hash: target.0,
+                    face,
+                },
+                Some(port),
+                QueueKind::Periodic,
+            );
+        }
+    }
     /// Cancel the round's remaining entry pings (after first-success
     /// settling; cancelled pings do not retry, their in-flight transactions
     /// converge via the normal timeout sweep — the task is gone, late

@@ -145,6 +145,10 @@ pub struct LookupTask {
     /// Announce tokens of probed nodes (DHTPeerLookupTask.cc, keyed by node
     /// ID).
     tokens: HashMap<NodeId, Vec<u8>>,
+    /// Peer addresses seen in get_peers reply values so far (the
+    /// completion stage reads the total to classify the round's peer
+    /// supply).
+    values_seen: usize,
     finished: bool,
 }
 
@@ -170,6 +174,7 @@ impl LookupTask {
             in_flight: 0,
             pending: HashMap::new(),
             tokens: HashMap::new(),
+            values_seen: 0,
             finished: false,
         }
     }
@@ -294,6 +299,25 @@ impl LookupTask {
             })
             .take(K)
             .collect()
+    }
+
+    /// Records get_peers reply values seen on the wire (called by the
+    /// response path alongside [`Self::on_response`]; the pure state
+    /// machine itself stays values-agnostic).
+    pub fn note_values(&mut self, count: usize) {
+        self.values_seen += count;
+    }
+
+    /// Total peer addresses this lookup saw in reply values (the
+    /// completion stage's peer-supply signal).
+    pub fn values_seen(&self) -> usize {
+        self.values_seen
+    }
+
+    /// Candidates this lookup actually queried (used entries; zero = it
+    /// completed at seed on an empty table — no walk happened).
+    pub fn walked_candidates(&self) -> usize {
+        self.entries.iter().filter(|e| e.used).count()
     }
 
     /// Candidate table maintenance: stable sort (ascending XOR distance) +

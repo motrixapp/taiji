@@ -890,9 +890,12 @@ pub(super) fn torrent_bittorrent_view(tj: &TorrentJob) -> BittorrentView {
 
 /// The random session id for getSessionInfo (16 random bytes -> 32 hex
 /// chars; isomorphic to RpcMethodImpl.cc
-/// `util::toHex(e->getSessionId())`).
-pub(super) fn random_session_id() -> String {
-    let bytes: [u8; 16] = rand::random();
+/// `util::toHex(e->getSessionId())`). Byte source = the session
+/// randomness seam (default OS entropy; a fixed-seed seam replays the
+/// id).
+pub(super) fn random_session_id(rng: &crate::engine::Rng) -> String {
+    let mut bytes = [0u8; 16];
+    rng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

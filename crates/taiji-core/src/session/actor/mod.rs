@@ -1943,6 +1943,12 @@ pub struct SessionActor {
     /// Cloned through [`SessionHandle`] for subscription (the event face).
     bus: broadcast::Sender<SessionEvent>,
     gid: GidAllocator,
+    /// Session randomness seam (SPEC G6): one handle behind the
+    /// session's OS-random draws (peer-id generation per task, NAT
+    /// binding owners, the RPC session id; the GID allocator takes a
+    /// clone). Default = OS entropy, zero behavior change; a fixed-seed
+    /// construction (tests/simulation) replays the sequence.
+    rng: crate::engine::Rng,
     token: CancellationToken,
     global: super::options::GlobalOptions,
     /// Rate-limit execution face: the global bucket is shared across tasks
@@ -2273,16 +2279,25 @@ impl SessionActor {
             None
         };
         let handle_nat = nat.as_ref().map(|s| s.engine());
-        let magnet_services = Arc::new(crate::magnet::MagnetServices::new(persist.clone()));
+        // Session randomness seam (SPEC G6): one OS-entropy source the
+        // actor, the GID allocator, and the magnet services share (each
+        // takes a clone of the same handle).
+        let rng = crate::engine::Rng::default();
+        let session_id = random_session_id(&rng);
+        let magnet_services = Arc::new(crate::magnet::MagnetServices::with_rng(
+            persist.clone(),
+            rng.clone(),
+        ));
         let actor = SessionActor {
             magnet_services,
             cmd_rx,
             events,
             event_rx,
             bus: bus.clone(),
-            gid: GidAllocator::new(),
+            gid: GidAllocator::with_rng(rng.clone()),
+            rng,
             token: CancellationToken::new(),
-            session_id: random_session_id(),
+            session_id,
             queue: QueueMan::new(),
             jobs: HashMap::new(),
             moving: HashMap::new(),

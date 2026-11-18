@@ -77,6 +77,9 @@ pub(crate) fn recovery_face(piece_count: usize, piece_len: u32) -> FaceState {
     let mut stat_rng = XorShift(0x853C49E6748FEA9Bu64);
     let file_len = piece_count as u64 * u64::from(piece_len);
     FaceState {
+        // Real-clock default: the fixture's seam clock (tests that
+        // drive time overwrite this field with a manual handle).
+        clock: crate::seam::Clock::default(),
         kind: FaceKind::V2,
         info_hash: [0u8; 20],
         reserved: Reserved::aria2_default(),
@@ -1388,4 +1391,49 @@ async fn rec2_cooldown_gates_expires_and_resets_in_drive() {
         "fresh-evidence reset: a re-advertising peer becomes re-probeable immediately"
     );
     root_token.cancel();
+}
+
+/// Backoff-path boundary (SPEC G6): the recovery tried-peer cooldown
+/// (a failed peer is excluded from re-probing for
+/// [`RECOVERY_TRIED_COOLDOWN`] and released at expiry) is driven by
+/// the face's seam clock — one nanosecond before the boundary the
+/// exclusion holds; at exactly the boundary the `drive_recovery`
+/// round prunes the entry and the peer becomes eligible again.
+#[test]
+fn manual_clock_drives_recovery_cooldown_expiry_at_the_boundary() {
+    let (_, _piece_hashes, root) = layer_fixture();
+    let mut face = recovery_face(3, 32768);
+    let t0 = std::time::Instant::now();
+    let manual = crate::seam::ManualClock::new(t0);
+    face.clock = manual.clock();
+    let mut book = RecoveryBook::default();
+    book.files.insert(
+        0,
+        FileRecovery::new(root, 3 * u64::from(32768u32), 32768, 0)
+            .unwrap_or_else(|| panic!("multi-piece file must register recovery")),
+    );
+    // Seed the peer-switch memory at the manual origin (the same stamp
+    // `note_failure_at` writes on a failed fetch).
+    book.files
+        .get_mut(&0)
+        .unwrap_or_else(|| panic!("file row"))
+        .note_failure_at(1, t0);
+    let (deliver, _deliver_rx) = mpsc::channel::<RecoveredPieceLayer>(RECOVERY_DELIVER_CAPACITY);
+
+    // 1ns before the 90s boundary: the cooldown holds.
+    manual.advance(RECOVERY_TRIED_COOLDOWN - Duration::from_nanos(1));
+    drive_recovery(&mut face, 0, &mut book, &deliver);
+    assert!(
+        book.files[&0].tried.contains_key(&1),
+        "before the boundary the tried-peer cooldown must hold"
+    );
+
+    // Exactly at the boundary: expired — pruned in passing, the peer
+    // is re-probeable.
+    manual.advance(Duration::from_nanos(1));
+    drive_recovery(&mut face, 0, &mut book, &deliver);
+    assert!(
+        book.files[&0].tried.is_empty(),
+        "at exactly the cooldown boundary the entry is pruned (released for re-probing)"
+    );
 }

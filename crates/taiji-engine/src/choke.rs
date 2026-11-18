@@ -9,8 +9,6 @@
 //! unchoke-state / down-window bookkeeping ownership stays in
 //! faces/upload. Upstream anchor mapping: docs/design/engine.md.
 
-use std::time::Instant;
-
 use tracing::debug;
 
 use taiji_bt::choke::{ChokeMode, PeerStat, UNCHOKE_SLOTS};
@@ -66,7 +64,7 @@ pub(super) fn budget_derived_slots(enabled: bool, limiter: Option<&LimiterSet>) 
 /// exact pre-class path (local peers compete like anyone else).
 pub(super) fn choke_round(face: &mut FaceState, class_enabled: bool) {
     let mode = face.choke.mode();
-    let now = Instant::now();
+    let now = face.clock.now();
     let mut stats: Vec<PeerStat> = Vec::new();
     // Local-class exemption (peers indexes of interested LAN peers; the
     // landing below unchokes them outside the slot budget).
@@ -114,15 +112,16 @@ pub(super) fn choke_round(face: &mut FaceState, class_enabled: bool) {
             endgame_holder: false,
         });
     }
-    let decision = face.choke.select(&mut stats, Instant::now());
+    let decision = face.choke.select(&mut stats, face.clock.now());
     for id in &decision.regular {
         let _ = face.peers[*id as usize].command(taiji_bt::peer::PeerCommand::SendUnchoke);
         // Unchoke time/state bookkeeping lands in the peer_state row
         // (index -> cuid); a missing row (test fixture without the
         // table) is skipped.
         if let Some(&cuid) = face.peer_cuids.get(*id as usize) {
+            let now = face.clock.now();
             let row = face.peer_state_row(cuid);
-            row.last_unchoke = Some(Instant::now());
+            row.last_unchoke = Some(now);
             // am_unchoked bookkeeping feeds the preemptive free-slot
             // count (without it, edge-triggered passes could overshoot
             // slots). Bookkeeping only: losers are not re-choked (seeder
@@ -138,8 +137,9 @@ pub(super) fn choke_round(face: &mut FaceState, class_enabled: bool) {
     for &i in &local_exempt {
         let _ = face.peers[i].command(taiji_bt::peer::PeerCommand::SendUnchoke);
         if let Some(&cuid) = face.peer_cuids.get(i) {
+            let now = face.clock.now();
             let row = face.peer_state_row(cuid);
-            row.last_unchoke = Some(Instant::now());
+            row.last_unchoke = Some(now);
             row.am_unchoked = true;
         }
     }
@@ -281,7 +281,7 @@ pub(super) fn leecher_choke_round(
         .copied()
         .collect();
     face.regular_unchoked = decision.regular.iter().copied().collect();
-    let now = Instant::now();
+    let now = face.clock.now();
     // Cross-round optimistic key (input to libtorrent-mode waits-longest
     // choice; the aria2 fallback never reads it — planned optimism
     // shuffles — so the write is harmless there).
@@ -374,9 +374,10 @@ pub(super) fn preemptive_unchoke(face: &mut FaceState, cuid: u64, class_enabled:
     // last_unchoke keyspace unified on cuid (the old seeder/leecher dual
     // keyspace is gone): the pass keys the peer's own row, read the same
     // way by both faces.
+    let now = face.clock.now();
     let row = face.peer_state_row(cuid);
     row.am_unchoked = true;
-    row.last_unchoke = Some(Instant::now());
+    row.last_unchoke = Some(now);
     debug!(target: "taiji::core::engine", cuid, slots_before = unchoked,
         "preemptive unchoke (interested edge, free slot)");
 }

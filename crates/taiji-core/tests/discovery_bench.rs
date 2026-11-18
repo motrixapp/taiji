@@ -1203,6 +1203,9 @@ async fn pex_engine_iter(i: usize) -> Result<(usize, usize, f64, usize), String>
     let tmp = tmp_dir("pex-engine");
     let metrics = Arc::new(SessionMetrics::new());
     let cfg = EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)

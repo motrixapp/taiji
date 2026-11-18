@@ -277,6 +277,23 @@ pub struct EngineConfig {
     /// `SocketCore::bindAddress` same shape). The TCP listen socket
     /// (ingress) stays wildcard — multi-listen is the next phase.
     pub egress: Option<std::net::IpAddr>,
+    /// Monotonic-clock injection (SPEC G6): default
+    /// [`super::Clock::default`] = the real monotonic clock, zero
+    /// behavior change. Stored once on the loop state and each face
+    /// state at assembly; every driver-path "now" read (dispatch
+    /// rounds, choke rounds, run ticks, timeout and backoff
+    /// scheduling) reads it. Tests / the simulation harness inject a
+    /// [`super::ManualClock`] handle here and drive the engine's time
+    /// from outside. Scope: the engine driver only — taiji-io
+    /// transports keep their own clocks (see the [`super::seam`]
+    /// module docs).
+    pub clock: super::Clock,
+    /// Randomness injection (SPEC G6): default [`super::Rng::default`]
+    /// = OS entropy, zero behavior change. The engine itself derives
+    /// its in-loop deterministic generators' seeds from it only when a
+    /// seed is pinned (default keeps the frozen constants); core-side
+    /// peer-id/GID/session-id generation reads the same handle.
+    pub rng: super::Rng,
 }
 
 // Hand-written `Debug` (a derive is impossible: the writer/metadata hooks
@@ -310,6 +327,8 @@ impl std::fmt::Debug for EngineConfig {
             .field("preset_progress", &self.preset_progress)
             .field("tracker_options", &self.tracker_options)
             .field("egress", &self.egress)
+            .field("clock", &self.clock)
+            .field("rng", &self.rng)
             .finish()
     }
 }
@@ -579,6 +598,12 @@ pub fn engine_config(
         // `--interface` value before spawn (the two consumption faces
         // are the peer TCP dial and the UDP demux, see the field doc).
         egress: None,
+        // Determinism seams (SPEC G6): both default to the real
+        // clock / OS entropy — zero behavior difference; tests and the
+        // simulation harness overwrite before spawn (seam module
+        // docs).
+        clock: super::Clock::default(),
+        rng: super::Rng::default(),
     })
 }
 

@@ -265,6 +265,9 @@ mod progress;
 mod query;
 mod redial;
 mod run;
+/// Driver determinism seams: the injected clock and RNG handles
+/// (SPEC G6) — re-exported on the public facade below.
+mod seam;
 mod strategy;
 mod superseed;
 mod tracker;
@@ -348,7 +351,11 @@ pub use config::{
 pub use dht::load_dht_restore_state;
 pub use progress::{EngineEnd, Progress};
 pub use query::{EnginePeerSnapshot, EngineStatusSnapshot};
+// Determinism seams (SPEC G6): the injected clock/RNG handles and the
+// manual clock driver — the simulation harness constructs engines
+// with these through EngineConfig's public fields.
 pub use run::DownloadEngine;
+pub use seam::{Clock, ManualClock, Rng};
 pub use transit::peer_connection_type_str;
 // Scheduling policy configuration face (the session mirror + RPC
 // params/receipts + the config_json payload).

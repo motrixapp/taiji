@@ -44,7 +44,9 @@ pub const END_GAME_PIECE_NUM: u64 = 20;
 /// Rarity counters + shuffled selection order + lazily rebuilt bucket view.
 ///
 /// The injected `shuffle` closure keeps tests deterministic; production
-/// uses a rand::random sequence.
+/// passes a fixed-seed engine-side generator (taiji-engine assembly —
+/// a frozen constant by default, derived from the injected randomness
+/// seam when one is pinned; no OS-random draw is involved).
 ///
 /// Memory: `order` 4B/piece + `counts` 2B/piece + `pieces` 4B/piece (bucket
 /// view) ~= 10B/piece; the legacy layout was 12B/piece (u64 order + u32

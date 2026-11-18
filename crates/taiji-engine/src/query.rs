@@ -11,7 +11,6 @@
 //! Upstream anchor mapping: docs/design/engine.md
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use taiji_bt::mse::CryptoLevel;
 use taiji_bt::utp::Transport;
@@ -270,7 +269,9 @@ pub(super) fn peer_snapshots(
             };
             let (down_speed, up_speed) = match ps.rates.as_mut() {
                 Some(r) => {
-                    let now = Instant::now();
+                    // Disjoint-field read: the rate row borrows
+                    // face.peer_state, the clock read borrows face.clock.
+                    let now = face.clock.now();
                     (r.down.calculate(now), r.up.calculate(now))
                 }
                 None => (0, 0),

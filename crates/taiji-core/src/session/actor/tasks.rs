@@ -122,7 +122,9 @@ impl SessionActor {
                 // source, one value — the announce-side TrackerWiring.peer_id
                 // and the handshake-side DialCtx.peer_id consume the same
                 // field; assemble.rs wires the single source).
-                let peer_id = generate_peer_id(self.global.peer_id_prefix.as_bytes(), rand::random);
+                let prefix = self.global.peer_id_prefix.as_bytes();
+                let rng = &self.rng;
+                let peer_id = generate_peer_id(prefix, || rng.byte());
                 // Three-layer merge (the EngineConfig injection face):
                 // effective = per-torrent table (built-in announce-list ∪
                 // tracker edits via taiji.addTracker/removeTracker) ∪ the
@@ -168,7 +170,7 @@ impl SessionActor {
                 // singleton supervisor; None = both switches off — the
                 // existing nat: None shape is unchanged). Field-disjoint
                 // borrow, same discipline as self.global.
-                let network = crate::nat::PeerNetworkBinding::new(rand::random());
+                let network = crate::nat::PeerNetworkBinding::new(self.rng.next_u64());
                 let nat_engine = Some(
                     network.observe(
                         self.nat
@@ -586,7 +588,7 @@ impl SessionActor {
                 let tiers = merge_global_trackers(&mj.tiers, &self.global.bt_tracker);
                 let (tracker_updates, tracker_receiver) =
                     tokio::sync::watch::channel(tiers.clone());
-                let network = crate::nat::PeerNetworkBinding::new(rand::random());
+                let network = crate::nat::PeerNetworkBinding::new(self.rng.next_u64());
                 let nat_engine = network.observe(
                     self.nat
                         .as_ref()
@@ -609,7 +611,10 @@ impl SessionActor {
                     // source and value — this config's single peer_id field
                     // serves both faces; the upgraded engine regenerates
                     // from the same option on the activation path).
-                    peer_id: generate_peer_id(self.global.peer_id_prefix.as_bytes(), rand::random),
+                    peer_id: {
+                        let rng = &self.rng;
+                        generate_peer_id(self.global.peer_id_prefix.as_bytes(), || rng.byte())
+                    },
                     options: mj.options.clone(),
                     // Metadata-phase lease faces: LSD lease as above; DHT
                     // lease = the dedicated metadata-phase engine (above).

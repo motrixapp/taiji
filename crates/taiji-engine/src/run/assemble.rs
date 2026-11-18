@@ -11,11 +11,39 @@
 //!
 //! Upstream anchor mapping: docs/design/engine.md
 
+/// Frozen XorShift seed constants (the pre-seam behavior — kept
+/// bit-for-bit whenever no RNG seed is pinned on
+/// `EngineConfig.rng`): the PieceStatMan startup shuffle, the choke
+/// optimistic-slot shuffle, and the super-seed tie pick. Same constant
+/// family as aria2 `PieceStatMan`'s fixed-seed shuffle and the golden
+/// ratio fractional constant.
+const STAT_SHUFFLE_SEED: u64 = 0x853C_49E6_748F_EA9B;
+const CHOKE_RNG_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+const SUPERSEED_RNG_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// In-loop generator seed derivation (the RNG seam's engine-side
+/// consumption): no pinned seed (the OS default) keeps each frozen
+/// constant — zero behavior change; a pinned seed derives each
+/// generator from (pinned, frozen) via a splitmix-style mix, so a
+/// simulation's N engines in one process get distinct shuffles while
+/// each stays replayable. The final `| 1` guarantees a nonzero
+/// xorshift64 state (all-zero state never advances).
+fn xorshift_seed(pinned: Option<u64>, frozen: u64) -> u64 {
+    let Some(pinned) = pinned else {
+        return frozen;
+    };
+    let mut z = pinned ^ frozen;
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) | 1
+}
+
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -353,6 +381,13 @@ pub(super) async fn assemble_engine(
         // the DialCtx (every outbound peer TCP dial binds before
         // connect). None = the OS default route, zero change.
         egress,
+        // Determinism seams (SPEC G6): the clock is cloned into the
+        // EngineLoop and every face state (all driver "now" reads);
+        // the RNG's pinned seed (when set) derives the in-loop
+        // generator seeds below. Defaults = real clock / OS entropy,
+        // zero behavior change.
+        clock,
+        rng,
     } = cfg;
     let initial_mask = initial_selection
         .as_deref()
@@ -550,10 +585,10 @@ pub(super) async fn assemble_engine(
     // Lazy-fetch events: watcher -> main loop (bounded; full = backpressure
     // on the watcher).
     let (fetch_tx, fetch_rx) = mpsc::channel::<(usize, usize, HashFetchEvent)>(16 * faces.len());
-    let mut stat_rng = XorShift(0x853C49E6748FEA9Bu64);
+    let mut stat_rng = XorShift(xorshift_seed(rng.seed(), STAT_SHUFFLE_SEED));
     // Shuffle source for choke rounds (the leecher optimistic slot; an
     // independent XorShift state).
-    let choke_rng = XorShift(0x9E3779B97F4A7C15u64);
+    let choke_rng = XorShift(xorshift_seed(rng.seed(), CHOKE_RNG_SEED));
     // Availability events: a raw channel per face + an aggregating forward
     // task (a single main-loop receiver).
     let (avail_all_tx, avail_rx) = mpsc::channel::<(usize, AvailEvent)>(64 * faces.len());
@@ -686,7 +721,10 @@ pub(super) async fn assemble_engine(
             tracker_options,
         },
         tracker_ev_tx.clone(),
-        &mut stat_rng,
+        &mut SeamWiring {
+            clock: &clock,
+            stat_rng: &mut stat_rng,
+        },
     )
     .await;
     let FaceBuildOut {
@@ -825,7 +863,7 @@ pub(super) async fn assemble_engine(
     // report actual_port right now (the NAT external-port snapshot syncs on
     // the 2s tick and only the v4 face consumes the snapshot — the
     // family_announce_port convention).
-    let last_dht_announce = Instant::now();
+    let last_dht_announce = clock.now();
     let dht_dial_dedup = DialDedup::new();
     if !dht_wiring.is_empty() {
         spawn_dht_announces(&dht_wiring, &faces, actual_port, actual_port);
@@ -884,7 +922,7 @@ pub(super) async fn assemble_engine(
     // fixed constant seed — the engine has no external entropy surface, so
     // determinism means reproducible tests, in the same family as aria2
     // PieceStatMan's startup shuffle).
-    let superseed_rng = XorShift(0x9E37_79B9_7F4A_7C15u64);
+    let superseed_rng = XorShift(xorshift_seed(rng.seed(), SUPERSEED_RNG_SEED));
     // Streaming static geometry (the layout -> real-file-order projection;
     // built before the EngineLoop literal — layout is moved into
     // AssembledEngine right after).
@@ -1068,6 +1106,11 @@ pub(super) async fn assemble_engine(
         },
         state: EngineLoop {
             faces,
+            // The loop-level seam clock (SPEC G6): the same handle every
+            // face state carries (clones of one EngineConfig.clock). The
+            // clone keeps `clock` alive for the field initializers below
+            // that read it (one Arc clone per engine, negligible).
+            clock: clock.clone(),
             // BEP27 private bit (the SetDhtEnabled gate — runtime enable on
             // a private engine is always refused; torrent.cpp priv() cannot
             // be overridden).
@@ -1170,7 +1213,7 @@ pub(super) async fn assemble_engine(
             // from the BH_CONN_FILL_POOL knob read once at assembly via
             // from_env) / the BEP-40 self-reference / the turnover cadence
             // anchor / the dial-outcome observation window (starts empty).
-            dial_budget: super::ecology::DialBudget::from_env(Instant::now()),
+            dial_budget: super::ecology::DialBudget::from_env(clock.now()),
             dial_candidates: super::ecology::DialCandidates::from_env(),
             self_v4,
             // v6 candidate-preference surface: the global v6 probe reuses
@@ -1186,14 +1229,14 @@ pub(super) async fn assemble_engine(
             // register arm).
             last_slow_churn: None,
             slow_evict_marks: std::collections::HashMap::new(),
-            dial_outcomes: super::ecology::DialOutcomeWindow::new(Instant::now()),
+            dial_outcomes: super::ecology::DialOutcomeWindow::new(clock.now()),
             // Dial decay ladder: starts unstepped with the
             // anchor at assembly — the earliest possible step is one
             // outcome window (30s) in. The gear starts at the base rate
             // (an override pins it from the first decision).
             dial_decay_steps: 0,
             dial_gear: super::ecology::CONNECTION_SPEED,
-            dial_decay_anchor: Instant::now(),
+            dial_decay_anchor: clock.now(),
             // Holepunch observation bridging baseline (always zero at
             // session start — the process-level atomics share that origin;
             // the 1s seed tick feeds deltas in tick.rs).
@@ -1282,6 +1325,17 @@ async fn build_ban_book(
     }
 }
 
+/// Determinism-seam inputs for [`build_faces`] (the clippy
+/// too_many_arguments gate is satisfied by grouping, the same shape as
+/// StoreWiring/TrackerWiring): the seam clock cloned into every
+/// FaceState and the startup-shuffle generator (seeded from the RNG
+/// seam's pinned-seed derivation at its construction in
+/// assemble_engine).
+struct SeamWiring<'a> {
+    clock: &'a crate::seam::Clock,
+    stat_rng: &'a mut XorShift,
+}
+
 /// Per-face assembly (extracted; a verbatim move of the original run
 /// assembly's `faces.into_iter().enumerate()` loop): the store pipeline +
 /// availability aggregation + bitfield restore + TrackerActor wiring +
@@ -1293,7 +1347,7 @@ async fn build_faces(
     store: &StoreWiring<'_>,
     tracker: &TrackerWiring<'_>,
     tracker_ev_tx: mpsc::Sender<(usize, TrackerActorEvent)>,
-    stat_rng: &mut XorShift,
+    seam: &mut SeamWiring<'_>,
 ) -> FaceBuildOut {
     let mut avail_tx_face: Vec<mpsc::Sender<AvailEvent>> = Vec::new();
     let mut udp_carrier_out_rxs: Vec<mpsc::Receiver<(SocketAddr, Vec<u8>)>> = Vec::new();
@@ -1685,7 +1739,11 @@ async fn build_faces(
                 progress,
                 piece_count: face_count,
                 verified_count: restored,
-                stat_man: PieceStatMan::new(face_count as u64, &mut |n| stat_rng.next(n)),
+                // The face-level seam clock (SPEC G6): a clone of the
+                // EngineConfig handle — every face-path "now" read goes
+                // through it.
+                clock: seam.clock.clone(),
+                stat_man: PieceStatMan::new(face_count as u64, &mut |n| seam.stat_rng.next(n)),
                 peer_avail: std::collections::HashMap::new(),
                 peer_seeds: std::collections::HashSet::new(),
                 peers: Vec::new(),
@@ -1953,6 +2011,7 @@ async fn utp_dial_pump(
 #[cfg(test)]
 mod utp_consumer_split_tests {
     use super::*;
+    use std::time::Instant;
     use taiji_io::utp::InboundPacket;
     use taiji_io::utp::listener::spawn_with_sink;
     use taiji_io::utp::packet::{Header, PacketType};
@@ -2041,6 +2100,39 @@ mod utp_consumer_split_tests {
         assert!(
             reply.is_some(),
             "delegated dial returns the handle immediately (Some) — connect outcome surfaces via the handshake budget"
+        );
+    }
+}
+
+#[cfg(test)]
+mod seam_seed_derivation_tests {
+    use super::*;
+
+    /// The RNG seam's engine-side consumption (SPEC G6): no pinned
+    /// seed keeps each frozen generator constant bit-for-bit (zero
+    /// behavior change); a pinned seed derives distinct, nonzero,
+    /// deterministic per-generator seeds (replayable per engine,
+    /// decorrelated across the engine's three generators).
+    #[test]
+    fn xorshift_seed_derivation_table() {
+        assert_eq!(xorshift_seed(None, STAT_SHUFFLE_SEED), STAT_SHUFFLE_SEED);
+        assert_eq!(xorshift_seed(None, CHOKE_RNG_SEED), CHOKE_RNG_SEED);
+        assert_eq!(xorshift_seed(None, SUPERSEED_RNG_SEED), SUPERSEED_RNG_SEED);
+
+        let a = xorshift_seed(Some(42), CHOKE_RNG_SEED);
+        let b = xorshift_seed(Some(42), CHOKE_RNG_SEED);
+        assert_eq!(a, b, "one pinned seed derives deterministically");
+        assert_ne!(a, CHOKE_RNG_SEED, "a pinned seed moves the generator");
+        assert_ne!(a, 0, "xorshift64 needs a nonzero state");
+        assert_ne!(
+            xorshift_seed(Some(42), STAT_SHUFFLE_SEED),
+            a,
+            "distinct derivation per generator"
+        );
+        assert_ne!(
+            a,
+            xorshift_seed(Some(43), CHOKE_RNG_SEED),
+            "different pinned seeds diverge"
         );
     }
 }

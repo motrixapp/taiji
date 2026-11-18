@@ -52,6 +52,13 @@ use taiji_domain::hash_fetch::RecoveredPieceLayer;
 pub(super) struct EngineLoop {
     /// Swarm faces (one independent state each; see the faces module).
     pub(super) faces: Vec<FaceState>,
+    /// The loop-level monotonic-clock handle (SPEC G6): cloned from
+    /// `EngineConfig.clock` at assembly — every loop-path "now" read
+    /// (ticks, arms, dial/backoff scheduling, debt cadence) goes
+    /// through it. Default = the real clock (zero behavior change);
+    /// each face's FaceState.clock is a clone of the same handle, so
+    /// one injected manual clock drives the whole engine.
+    pub(super) clock: crate::seam::Clock,
     /// BEP27 private bit (metainfo `private`; the hard gate behind
     /// `EngineCommand::SetDhtEnabled(true)` — runtime enable on a private
     /// engine is always refused, the same rule as libtorrent `torrent.cpp`
@@ -358,7 +365,7 @@ impl EngineLoop {
     /// sets the debt-age origin (the settle-cadence timing anchor).
     pub(super) fn note_dispatch_debt(&mut self, fi: usize) {
         if self.dispatch_debt.insert(fi) && self.dispatch_debt_since.is_none() {
-            self.dispatch_debt_since = Some(Instant::now());
+            self.dispatch_debt_since = Some(self.clock.now());
         }
     }
 
@@ -882,10 +889,11 @@ pub(super) fn spawn_peer_dial(
     // - Punch: exempt (introducer-asserted reachability is fresh external
     // evidence, a standing rule; its outbound rate is already bounded by
     // the dedup window plus the 4/60s PeerTask rate limit).
+    let redial_admit_now = state.clock.now();
     if let DialSource::Redial(_) = &source
         && !state.admission_open_class(
             true,
-            std::time::Instant::now(),
+            redial_admit_now,
             crate::peer_class::classify(Some(addr.ip()), None),
         )
     {
@@ -900,7 +908,7 @@ pub(super) fn spawn_peer_dial(
     let redial = match &source {
         DialSource::Redial(tx) => Some(tx.clone()),
         DialSource::Punch => None,
-        DialSource::Discovery => match state.silent_book.admit(&addr, std::time::Instant::now()) {
+        DialSource::Discovery => match state.silent_book.admit(&addr, state.clock.now()) {
             taiji_domain::silent::SilentVerdict::Allowed => None,
             verdict @ (taiji_domain::silent::SilentVerdict::Backoff
             | taiji_domain::silent::SilentVerdict::Cooldown) => {
@@ -923,7 +931,7 @@ pub(super) fn spawn_peer_dial(
     // entries self-heal via due()'s optimistic deferral, Discovery
     // candidates stay in the candidate table for the next drain round (the
     // same effect as upstream boosts carrying over across ticks).
-    if !matches!(source, DialSource::Punch) && !state.dial_budget.take1(std::time::Instant::now()) {
+    if !matches!(source, DialSource::Punch) && !state.dial_budget.take1(state.clock.now()) {
         debug!(target: "taiji::core::engine", %addr, ?source,
             "dial skipped by connection budget (connection_speed)");
         return false;

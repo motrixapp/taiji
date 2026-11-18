@@ -491,10 +491,10 @@ impl PeerState {
     /// Minimal row constructor (cuid + registration instant; lazy
     /// fields zero) — the bookkeeping write points' row-fetch entry
     /// (the equivalent of the old tables' insert-on-absence).
-    pub(super) fn new(cuid: u64) -> Self {
+    pub(super) fn new(cuid: u64, at: Instant) -> Self {
         PeerState {
             cuid,
-            registered_at: Instant::now(),
+            registered_at: at,
             ip: None,
             meta: None,
             rates: None,
@@ -827,6 +827,11 @@ pub(super) struct FaceState {
     /// instead of a pipeline arm is in the pipeline::SnapshotSyncCell
     /// docs).
     pub(super) snapshot_sync: crate::pipeline::SnapshotSyncCell,
+    /// The face's monotonic-clock handle (SPEC G6): cloned from
+    /// `EngineConfig.clock` at assembly — dispatch/choke face-level
+    /// "now" reads go through it (default = the real clock; the
+    /// simulation harness injects a manual handle through the config).
+    pub(super) clock: crate::seam::Clock,
 }
 
 /// The face's transport-composition supply reading (observation; for
@@ -862,14 +867,15 @@ pub(super) fn face_transport_supply(face: &FaceState) -> (u64, u64, u64, u64) {
 impl FaceState {
     /// cuid row fetch-or-create (the shared bookkeeping write-point
     /// entry): a missing key creates the minimal row
-    /// (`PeerState::new`) — the equivalent of the old tables'
-    /// insert-on-absence; the registration arm creates rows first in
-    /// production, so this entry normally creates nothing.
+    /// (`PeerState::new` — stamped from the face's seam clock) — the
+    /// equivalent of the old tables' insert-on-absence; the
+    /// registration arm creates rows first in production, so this
+    /// entry normally creates nothing.
     pub(super) fn peer_state_row(&mut self, cuid: u64) -> &mut PeerState {
         let row = self
             .peer_state
             .entry(cuid)
-            .or_insert_with(|| PeerState::new(cuid));
+            .or_insert_with(|| PeerState::new(cuid, self.clock.now()));
         // Row key self-consistency (a debug-build invariant; zero
         // cost in release).
         debug_assert_eq!(row.cuid, cuid, "peer_state row key/cuid mismatch");
@@ -1304,7 +1310,7 @@ pub(super) fn recheck_face_completion(
             // / the last-8 window. The completion check itself is
             // untouched (the written basis, the single source of
             // truth).
-            let now = Instant::now();
+            let now = f.clock.now();
             if f.last_mile_final.is_none() {
                 f.last_mile_final = f.last_mile_edge.map(|t| now - t);
             }

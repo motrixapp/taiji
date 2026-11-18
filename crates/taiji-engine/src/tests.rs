@@ -1221,6 +1221,9 @@
         let mut stat_rng = XorShift(0x853C49E6748FEA9Bu64);
         let file_len = piece_count as u64 * merkle::BLOCK_SIZE as u64;
         FaceState {
+            // Real-clock default: the fixture's seam clock (tests that
+            // drive time overwrite this field with a manual handle).
+            clock: crate::seam::Clock::default(),
             kind: FaceKind::V1,
             info_hash: [0u8; 20],
             reserved: Reserved::aria2_default(),
@@ -8224,3 +8227,177 @@ async fn streaming_dispatch_no_duplicate_when_all_inflight() {
             "the readout accumulation semantics matches the return value"
         );
     }
+
+// ------------------------------------------------------------------
+// Determinism-seam driver tests (SPEC G6): a manual clock injected
+// through the face's seam handle (the same handle EngineConfig.clock
+// hands the assembled engine) drives the timeout/backoff boundary
+// transitions; the public config surface accepts the injection.
+// ------------------------------------------------------------------
+
+/// Timeout-path boundary (SPEC G6): the dispatch reissue window — an
+/// unconfirmed in-flight block becomes takeover-eligible exactly at
+/// [`DISPATCH_REISSUE_WINDOW`] (the unowned-mark fallback window; the
+/// same shape as the stale-claim row in the spread table, with time
+/// driven by the manual clock instead of a pre-stamped past instant).
+/// One nanosecond before the boundary the claim is fresh (no
+/// takeover); at exactly the boundary the block is re-dispatched to a
+/// peer.
+#[tokio::test]
+async fn manual_clock_drives_reissue_takeover_at_the_boundary() {
+    let mut roots = Vec::new();
+    // The spread-table fixture shape: 48 single-block pieces, three
+    // fully advertising unchoked peers.
+    async fn seeded_face(
+        root: &tokio_util::sync::CancellationToken,
+    ) -> (FaceState, Vec<tokio::io::DuplexStream>) {
+        let mut face = adv_face(48);
+        let mut remotes = Vec::new();
+        for cuid in 1..=3u64 {
+            let (handle, remote) = choke_peer_pair(root).await;
+            face.peers.push(handle);
+            face.peer_cuids.push(cuid);
+            note_peer_bitfield(&mut face, cuid, &[0xFF; 6]);
+            remotes.push(remote);
+        }
+        (face, remotes)
+    }
+
+    // Pre-boundary round: piece 0's mark ages to window-1ns — still
+    // fresh, so nothing dispatches (every piece claimed).
+    let root = tokio_util::sync::CancellationToken::new();
+    let (mut face, remotes) = seeded_face(&root).await;
+    roots.push(root);
+    let t0 = Instant::now();
+    let manual = ManualClock::new(t0);
+    face.clock = manual.clock();
+    seed_blocks_sent(&mut face, 0, t0, &[(0, BlockState::InFlight)]);
+    manual.advance(DISPATCH_REISSUE_WINDOW - Duration::from_nanos(1));
+    for p in 1..48u64 {
+        seed_blocks_sent(&mut face, p, manual.now(), &[(0, BlockState::InFlight)]);
+    }
+    dispatch_face(&mut face, 0);
+    assert!(
+        dispatch_owner(&face, 0, 0).is_none(),
+        "1ns before the boundary the in-flight mark is fresh: no takeover"
+    );
+    let _keep_alive: Vec<tokio::io::DuplexStream> = remotes;
+
+    // Boundary round: a fresh face, piece 0's mark aged to exactly the
+    // window — stale, the takeover fires.
+    let root = tokio_util::sync::CancellationToken::new();
+    let (mut face, remotes) = seeded_face(&root).await;
+    roots.push(root);
+    let t1 = Instant::now();
+    let manual = ManualClock::new(t1);
+    face.clock = manual.clock();
+    seed_blocks_sent(&mut face, 0, t1, &[(0, BlockState::InFlight)]);
+    manual.advance(DISPATCH_REISSUE_WINDOW);
+    for p in 1..48u64 {
+        seed_blocks_sent(&mut face, p, manual.now(), &[(0, BlockState::InFlight)]);
+    }
+    dispatch_face(&mut face, 0);
+    assert!(
+        dispatch_owner(&face, 0, 0).is_some(),
+        "at exactly the reissue window the stale mark is taken over and \
+         re-dispatched (everything else claimed fresh -> piece 0 is the \
+         only dispatchable piece)"
+    );
+    let _keep_alive: Vec<tokio::io::DuplexStream> = remotes;
+
+    for root in roots {
+        root.cancel();
+    }
+}
+
+/// External-reachability (SPEC G6): the engine's public config surface
+/// carries the seams. The assembly function's output defaults to the
+/// real clock / OS entropy (behavior-identical), accepts an injected
+/// manual clock + pinned RNG through its public fields, and
+/// driver-path reads observe the injected values — the peer-row
+/// registration stamp (`PeerState::new` via `peer_state_row`) and the
+/// choke round's unchoke stamp both read the same handle an assembled
+/// engine carries (assembly clones `EngineConfig.clock` into every
+/// face state).
+#[tokio::test]
+async fn public_config_surface_accepts_the_injected_seams() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../taiji-bt/tests/fixtures/hybrid_16k.torrent"),
+    )
+    .unwrap_or_else(|e| panic!("read fixture: {e}"));
+    let meta =
+        taiji_domain::metainfo::Metainfo::parse(&bytes).unwrap_or_else(|e| panic!("parse: {e}"));
+    let mut cfg = crate::config::engine_config(
+        &meta,
+        std::env::temp_dir(),
+        0,
+        [7u8; 20],
+        crate::config::CompletionMode::ReturnOnComplete,
+    )
+    .unwrap_or_else(|e| panic!("assemble: {e}"));
+
+    // Defaults: the real clock (a busy-loop second read advances) and
+    // OS entropy (no pinned seed) — zero behavior difference.
+    let a = cfg.clock.now();
+    let mut b = a;
+    for _ in 0..100_000 {
+        b = cfg.clock.now();
+        if b > a {
+            break;
+        }
+    }
+    assert!(b > a, "the default clock is the real monotonic clock");
+    assert_eq!(cfg.rng.seed(), None, "the default RNG is OS entropy");
+
+    // Public-field injection: a manual clock + a pinned seed.
+    let start = Instant::now();
+    let manual = ManualClock::new(start);
+    cfg.clock = manual.clock();
+    cfg.rng = Rng::from_seed(0xDA7A_5EED);
+    assert_eq!(
+        cfg.clock.now(),
+        start,
+        "the injected handle reads the manual clock"
+    );
+    assert_eq!(cfg.rng.seed(), Some(0xDA7A_5EED));
+
+    // Driver-path observation: the face's clock handle is the same one
+    // assembly would clone from the config — its reads observe
+    // manual-time advances (peer-row stamp + choke-round stamp).
+    let root = tokio_util::sync::CancellationToken::new();
+    let (handle, mut remote) = choke_peer_pair(&root).await;
+    let mut face = adv_face(4);
+    face.clock = cfg.clock.clone();
+    face.peers.push(handle);
+    face.peer_cuids.push(1);
+
+    let stamped = manual.advance(Duration::from_secs(5));
+    assert_eq!(
+        face.peer_state_row(1).registered_at,
+        stamped,
+        "the row constructor stamps from the seam clock"
+    );
+
+    // A seeder choke round lands its unchoke bookkeeping at the manual
+    // clock's current value. Interested is driven by the raw wire
+    // frame (the choke wiring-table convention).
+    use tokio::io::AsyncWriteExt as _;
+    remote
+        .write_all(&[0, 0, 0, 1, 2])
+        .await
+        .unwrap_or_else(|e| panic!("write interested: {e}"));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !face.peers[0].is_interested() {
+        assert!(Instant::now() < deadline, "the interested mirror did not flip");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let choke_at = manual.advance(Duration::from_secs(1));
+    crate::choke::choke_round(&mut face, false);
+    assert_eq!(
+        face.peer_state.get(&1).and_then(|ps| ps.last_unchoke),
+        Some(choke_at),
+        "the choke round's unchoke stamp reads the seam clock"
+    );
+    root.cancel();
+}

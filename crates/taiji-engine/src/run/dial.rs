@@ -181,7 +181,8 @@ impl DialLogSampler {
 ///
 /// Returns false = skip the whole batch (the caller short-circuits).
 pub(super) fn discovery_admission_open(state: &mut EngineLoop) -> bool {
-    if state.admission_open(false, Instant::now()) {
+    let admission_now = state.clock.now();
+    if state.admission_open(false, admission_now) {
         return true;
     }
     debug!(target: "taiji::core::engine",
@@ -264,7 +265,7 @@ pub(super) fn handle_tracker_event(
                 // same stale endpoint once per announce period). The admission
                 // gate already ran batch-level in this arm (before dedup
                 // consumption, backfill chain preserved).
-                if !state.dht_dial_dedup.admit(addr, Instant::now()) {
+                if !state.dht_dial_dedup.admit(addr, state.clock.now()) {
                     continue;
                 }
                 if state.faces[fi]
@@ -279,12 +280,13 @@ pub(super) fn handle_tracker_event(
                 // Candidate entry: tracker source rank = 1<<5 (libtorrent
                 // request_blocks.cpp); the drain wheel composes dialing from
                 // the table by sort key (`run::ecology` module docs).
+                let candidate_now = state.clock.now();
                 super::ecology::push_candidate(
                     state,
                     addr,
                     fi,
                     super::ecology::DialSourceRank::Tracker,
-                    Instant::now(),
+                    candidate_now,
                 );
             }
         }
@@ -338,7 +340,8 @@ pub(super) fn handle_inbound_tcp(
     // libtorrent inbound connection_limit_factor composition,
     // session_impl.cpp:3233-3250; off = the exact pre-class verdict).
     let inbound_class = crate::peer_class::classify_endpoint(&peer_addr, Transport::Tcp);
-    if !state.admission_open_class(true, Instant::now(), inbound_class) {
+    let admit_now = state.clock.now();
+    if !state.admission_open_class(true, admit_now, inbound_class) {
         debug!(target: "taiji::core::engine", %peer_addr,
             class = inbound_class.as_str(),
             registered = state.registered_peers(),
@@ -519,7 +522,8 @@ pub(super) fn handle_inbound_utp(
     // uTP class is governed separately from TCP). A local uTP endpoint
     // is class local — the 150% local budget applies instead.
     let inbound_class = crate::peer_class::classify_endpoint(&peer_addr, Transport::Utp);
-    if !state.admission_open_class(true, Instant::now(), inbound_class) {
+    let admit_now = state.clock.now();
+    if !state.admission_open_class(true, admit_now, inbound_class) {
         debug!(target: "taiji::core::engine", %peer_addr,
             class = inbound_class.as_str(),
             registered = state.registered_peers(),
@@ -912,7 +916,7 @@ pub(super) async fn handle_dht_event(
             if !discovery_admission_open(state) {
                 return ControlFlow::Continue(());
             }
-            let now = Instant::now();
+            let now = state.clock.now();
             for addr in peers {
                 // Address hygiene (nodes/values can inject loopback /
                 // link-local / multicast probing — the reject class includes
@@ -1041,7 +1045,7 @@ pub(super) fn handle_pex_event(
     if !discovery_admission_open(state) {
         return ControlFlow::Continue(());
     }
-    let now = Instant::now();
+    let now = state.clock.now();
     // Address hygiene: fresh addresses pass the single-point check before
     // entering introducer bookkeeping — bogon/mapped forms must not enter
     // hp_book (a derived key of the rendezvous query face); dropped addresses
@@ -1175,7 +1179,7 @@ pub(super) fn handle_redial_sweep(
     token: &CancellationToken,
     metrics: Option<&SessionMetrics>,
 ) {
-    for (fi, addr) in state.redial_pool.due(Instant::now()) {
+    for (fi, addr) in state.redial_pool.due(state.clock.now()) {
         if let Some(block) = state.ban_book.guard.load().blocks(addr.ip(), epoch_secs()) {
             debug!(target: "taiji::core::engine", %addr, block = %block,
                 "redial skipped by IpGuard: pool entry dropped");
@@ -1236,7 +1240,7 @@ pub(super) fn handle_redial_report(
             state.redial_pool.note_result(
                 &report.addr,
                 taiji_domain::redial::RedialOutcome::Failed,
-                Instant::now(),
+                state.clock.now(),
             );
         }
     }

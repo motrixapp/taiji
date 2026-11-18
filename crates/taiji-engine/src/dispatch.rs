@@ -2380,13 +2380,9 @@ impl FileRecovery {
 
     /// Records a failure (peer-switch memory + the consecutive failure
     /// count; the over-cap fallback clears the set — see
-    /// [`RECOVERY_TRIED_CAP`]).
-    pub(super) fn note_failure(&mut self, cuid: u64) {
-        self.note_failure_at(cuid, Instant::now());
-    }
-
-    /// Clock-injectable form of [`Self::note_failure`] (drives the
-    /// cooldown-table tests; production always uses [`Instant::now`]).
+    /// [`RECOVERY_TRIED_CAP`]). `now` comes from the caller's seam
+    /// clock (the driver passes the face clock; cooldown-table tests
+    /// inject instants directly).
     pub(super) fn note_failure_at(&mut self, cuid: u64, now: Instant) {
         self.attempts = self.attempts.saturating_add(1);
         if self.tried.len() >= RECOVERY_TRIED_CAP {
@@ -2549,6 +2545,7 @@ pub(super) fn handle_recovery_reply(
     file_idx: usize,
     block: usize,
     reply: Result<HashFetch, RecoveryFetchFail>,
+    now: Instant,
 ) {
     let Some(rec) = book.files.get_mut(&file_idx) else {
         return;
@@ -2585,18 +2582,18 @@ pub(super) fn handle_recovery_reply(
             Err(e) => {
                 debug!(target: "taiji::core::engine", face = fi,
                     file_index = file_idx, block, error = ?e, "recovery reply not stageable");
-                rec.note_failure(cuid);
+                rec.note_failure_at(cuid, now);
             }
         },
         Ok(HashFetch::Rejected) => {
             debug!(target: "taiji::core::engine", face = fi, file_index = file_idx,
                 block, "recovery fetch rejected by peer");
-            rec.note_failure(cuid);
+            rec.note_failure_at(cuid, now);
         }
         Err(e) => {
             debug!(target: "taiji::core::engine", face = fi, file_index = file_idx,
                 block, fail = ?e, "recovery fetch failed");
-            rec.note_failure(cuid);
+            rec.note_failure_at(cuid, now);
         }
     }
     if rec.attempts == HASH_FETCH_MAX_ATTEMPTS {
@@ -2678,7 +2675,7 @@ pub(super) fn drive_recovery(
                 // budget exhausted -> wait for a new peer or cooldown
                 // expiry (self-healing: no re-probing tried peers before
                 // expiry, allowed after).
-                let tried_now = active_tried(rec, Instant::now());
+                let tried_now = active_tried(rec, face.clock.now());
                 let mut order = recovery_peer_order(face, lo, hi, &busy, &tried_now);
                 if order.is_empty() && rec.attempts < HASH_FETCH_MAX_ATTEMPTS {
                     order =
@@ -2709,7 +2706,8 @@ pub(super) fn drive_recovery(
 
 /// The recovery reply-event arm body (the EngineLoop glue lives in
 /// run::arms — EngineLoop's visibility domain; this function only makes
-/// bookkeeping decisions).
+/// bookkeeping decisions). The failure-cooldown stamp reads the face's
+/// seam clock (one sample shared with the drive pass).
 pub(super) fn handle_recovery_reply_and_drive(
     fi: usize,
     face: &mut FaceState,
@@ -2719,7 +2717,8 @@ pub(super) fn handle_recovery_reply_and_drive(
     block: usize,
     reply: Result<HashFetch, RecoveryFetchFail>,
 ) {
-    handle_recovery_reply(fi, book, file_idx, block, reply);
+    let now = face.clock.now();
+    handle_recovery_reply(fi, book, file_idx, block, reply, now);
     drive_recovery(face, fi, book, deliver);
 }
 /// Dispatch-reply drain entry: takes the [`FaceState`] receipt / in-flight
@@ -3542,7 +3541,7 @@ pub(super) fn dispatch_face_selected_with_stream(
                     // trigger). In-row single write: state + owner (the
                     // peer_cuids index, replacing the block_dispatch global
                     // table) + one piece-level timestamp refresh.
-                    let at = Instant::now();
+                    let at = face.clock.now();
                     let row_blocks = face
                         .piece_bytes
                         .get(piece as usize)
@@ -3628,7 +3627,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // current behavior); the bitmap is rebuilt in place (`reset` keeps
     // capacity).
     let two_phase = two_phase_ledger();
-    let claims_now = Instant::now();
+    let claims_now = face.clock.now();
     scratch.claimed.reset(face.piece_count);
     rebuild_claimed_into(face, claims_now, two_phase, &mut scratch.claimed);
     let claimed = &mut scratch.claimed;
@@ -3738,7 +3737,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // [`PieceSentLedger`] row (a resume-mid-tail seeds at the resume round
     // — bounded over-wait of one deadline, the conservative direction).
     if tail_active && !tail_deadline.is_zero() {
-        let now_tail = Instant::now();
+        let now_tail = face.clock.now();
         face.endgame_deadline.retain(|&p, _| {
             !done.get(p as usize).copied().unwrap_or(true) && face.blocks_sent.contains_key(&p)
         });
@@ -3817,7 +3816,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // completed face has no tail semantics); scoped to rarest_first (the
     // same range as the endgame gate — endgame_rf always implies it).
     if endgame_rf {
-        let now_edge = Instant::now();
+        let now_edge = face.clock.now();
         if face.last_mile_edge.is_none() && missing_pieces > 0 && missing_pieces <= lastmile_n {
             face.last_mile_edge = Some(now_edge);
         }
@@ -3840,7 +3839,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     if endgame_rf && !edge_live {
         face.endgame_live
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        face.endgame_edge = Some(Instant::now());
+        face.endgame_edge = Some(face.clock.now());
         let (tcp_down, utp_down, tcp_conns, utp_conns) = face_transport_supply(face);
         info!(target: "taiji::core::engine", face = fi,
             missing = missing_pieces, in_flight = claimed.len(),
@@ -3849,7 +3848,8 @@ pub(super) fn dispatch_face_selected_with_stream(
     } else if !endgame_rf && edge_live {
         face.endgame_live
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let seg = face.endgame_edge.take().map(|t| t.elapsed());
+        let exit_now = face.clock.now();
+        let seg = face.endgame_edge.take().map(|t| exit_now - t);
         if let Some(seg) = seg {
             face.endgame_cum += seg;
         }
@@ -3957,7 +3957,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     let endgame_pieces: &Vec<u64> = endgame_pieces;
     let round_copies: &mut std::collections::HashMap<u64, u64> = &mut scratch.round_copies;
     if endgame_rf {
-        let now_round = Instant::now();
+        let now_round = face.clock.now();
         for &p in endgame_pieces.iter() {
             // The window switch (on = the piece's adaptive window upper
             // bound, see [`piece_reissue_window_max`]; off = the fixed 2s
@@ -4043,7 +4043,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // test-driven faces).
     let fast_busy_k = endgame_fast_busy_k();
     if endgame_rf && strict_endgame && !last_mile && fast_busy_k == 0 {
-        let now_inflight = Instant::now();
+        let now_inflight = face.clock.now();
         fill_endgame_peer_inflight(
             face,
             now_inflight,
@@ -4064,7 +4064,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     if endgame_rf && strict_endgame && !last_mile && fast_busy_k >= 1 {
         fill_endgame_peer_busy_pieces(
             face,
-            Instant::now(),
+            face.clock.now(),
             two_phase,
             &mut scratch.endgame_busy_pieces,
         );
@@ -4484,7 +4484,7 @@ fn issue_piece_blocks(face: &mut FaceState, ctx: &mut PieceIssueCtx<'_>, piece: 
     else {
         return 0;
     };
-    let now = Instant::now();
+    let now = face.clock.now();
     // Take the row once; block state / owner / piece-level timestamp all
     // read inline (dissolves the old double lookup of the blocks_sent
     // inner map + the block_dispatch global map; freshness reads the

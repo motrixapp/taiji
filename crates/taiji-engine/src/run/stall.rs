@@ -191,7 +191,7 @@ pub(super) async fn stall_valve_tick(
     // Valve armed gate: the startup segment is not stall evidence (see
     // the constant docs).
     let armed = state.active_secs >= STALL_ARM_MIN_AGE_SECS;
-    let now = Instant::now();
+    let now = state.clock.now();
     if !zero_delta && was_active {
         info!(target: "taiji::core::engine",
             stalled_for = state.stall_valve.zero_secs,

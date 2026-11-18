@@ -968,6 +968,16 @@ mod tests {
             }
         }
     }
+    /// Serializes the two process-global-ledger tests: the ledger is a
+    /// process static (`taiji_io::unverified_budget`), so two
+    /// ledger-wired tests running in parallel inside this binary read
+    /// each other's claims — the eviction test's exact-baseline
+    /// restoration assert below would sample the sibling's 100 B
+    /// mid-flight (a parallel-run false failure, not a ledger bug;
+    /// reproducible ~every other run of this module). The guard
+    /// changes no assertion; non-ledger tests stay parallel.
+    static GLOBAL_LEDGER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Process-wide unverified-byte ledger (cross-surface yielding
     /// semantics): (a) in-cap growth evicts nothing (existing behavior);
     /// (b) global over-cap → this face self-evicts LRU (non-protected
@@ -976,6 +986,9 @@ mod tests {
     /// release everything, used() returns to baseline.
     #[test]
     fn global_ledger_self_eviction_and_release() {
+        let _ledger = GLOBAL_LEDGER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = |p: u32| (p, 0u16);
         // Real-flow shape: cells append first (entry.size grows), then
         // update reports.
@@ -1132,6 +1145,13 @@ mod tests {
     /// clean).
     #[test]
     fn mutation_cache_ledger_claim_drift_fires() {
+        // Same global-ledger serialization as the eviction test above
+        // (this test's 100 B claim is the sibling sample it fails on).
+        // Scope note: the guard outlives `c`, so `c`'s Drop releases
+        // the ledger bytes before the lock does.
+        let _ledger = GLOBAL_LEDGER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut c: WrDiskCache<u32> = WrDiskCache::new_with_ledger_for_tests(1024);
         assert!(c.add(1));
         c.entry_mut(&1)

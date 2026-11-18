@@ -1358,6 +1358,84 @@ mod tests {
         );
     }
 
+    /// Slow-path ladder walk under the manual clock (SPEC G6; the
+    /// redial-backoff class): the full departure -> fast dial -> miss ->
+    /// 60s regime -> (f+1) x 60s failure gradient -> 3-failure eviction
+    /// walk, driven through the exact call shape the driver arms use
+    /// (`handle_redial_sweep`'s `due(clock.now())` +
+    /// `handle_redial_report`'s `note_result(..., clock.now())`), with
+    /// every boundary asserted exactly (1ns before = not due, at the
+    /// wait = due) — over six virtual minutes in microseconds of wall
+    /// time. Pins the arm-level sequencing on top of the domain unit
+    /// tables: the armed miss counts no failure, each failure extends
+    /// the wait by 60s, and the entry leaves at
+    /// [`taiji_domain::redial::REDIAL_MAX_FAILURES`].
+    #[test]
+    fn redial_ladder_walks_boundaries_under_the_manual_clock() {
+        use taiji_domain::redial::{
+            DataDelivered, FAST_RECONNECT_BASE, REDIAL_BASE, REDIAL_MAX_FAILURES, RedialOutcome,
+            RedialPool,
+        };
+
+        use crate::seam::ManualClock;
+        let clock = ManualClock::new(Instant::now());
+        let mut pool = RedialPool::new(64);
+        let addr: SocketAddr = "203.0.113.9:6881".parse().unwrap_or_else(|e| panic!("{e}"));
+        // The pool armed its fast-dial tier iff the process switch was on
+        // at construction (read through the same knob; the boundary
+        // exactness claim holds under either state).
+        let first_wait = if taiji_domain::redial::fast_reconnect_enabled() {
+            FAST_RECONNECT_BASE
+        } else {
+            REDIAL_BASE
+        };
+
+        // The sweep's not-due / due boundary check at one wait value.
+        macro_rules! boundary {
+            ($wait:expr) => {{
+                let due_at = clock.now() + $wait;
+                clock.advance(due_at - Duration::from_nanos(1) - clock.now());
+                assert!(
+                    pool.due(clock.now()).is_empty(),
+                    "1ns before the {:?} wait: nothing due",
+                    $wait
+                );
+                clock.advance(Duration::from_nanos(1));
+                assert_eq!(
+                    pool.due(clock.now()),
+                    vec![(0usize, addr)],
+                    "at exactly the {:?} wait: the redial is due",
+                    $wait
+                );
+            }};
+        }
+
+        // Departure of a data-delivering peer: the 5s fast dial when the
+        // tier is armed (the 60s regime otherwise).
+        pool.note_departure(0, addr, DataDelivered::Yes, clock.now());
+        boundary!(first_wait);
+        // The dial missed (a silent departure): no failure counted, the
+        // wait falls to the 60s regime.
+        pool.note_result(&addr, RedialOutcome::Failed, clock.now());
+        boundary!(REDIAL_BASE);
+        // Failure 1 -> the (f+1) x 60 gradient starts.
+        pool.note_result(&addr, RedialOutcome::Failed, clock.now());
+        boundary!(2 * REDIAL_BASE);
+        // Failure 2 -> 180s.
+        pool.note_result(&addr, RedialOutcome::Failed, clock.now());
+        boundary!(3 * REDIAL_BASE);
+        // Failure 3 = REDIAL_MAX_FAILURES -> eviction (no more dials,
+        // the pool is empty).
+        assert_eq!(REDIAL_MAX_FAILURES, 3, "the frozen eviction cap");
+        pool.note_result(&addr, RedialOutcome::Failed, clock.now());
+        assert_eq!(pool.len(), 0, "the failing peer is evicted at 3 failures");
+        clock.advance(10 * REDIAL_BASE);
+        assert!(
+            pool.due(clock.now()).is_empty(),
+            "an evicted entry never comes due again"
+        );
+    }
+
     /// Dial io failure-class table.
     #[test]
     fn connect_io_class_table() {

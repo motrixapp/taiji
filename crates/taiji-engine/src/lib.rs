@@ -333,6 +333,13 @@ mod tests;
 mod config_tests;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+/// Swarm simulation harness over the determinism seams (SPEC G6): the
+/// `fake_peer + setup_swarm` shape driving choke/dispatch rounds under
+/// a manual clock — the timing-regression layer (optimistic-unchoke
+/// rotation, endgame duplicate caps; module docs carry the scope and
+/// the performance budget).
+mod swarm_sim;
 
 // ---- Public facade (every existing `taiji_core::engine::*` path
 // resolves) ----

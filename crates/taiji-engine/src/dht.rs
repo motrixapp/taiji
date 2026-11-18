@@ -1372,4 +1372,85 @@ mod tests {
         );
         assert_eq!(packet.data.as_ref(), payload);
     }
+
+    /// Slow-path boundary sweep under the manual clock (SPEC G6; the
+    /// connection-admission timeout class): the DHT PeersFound dial
+    /// dedup windows are minute-scale behavior real-time tests cannot
+    /// cover — a dialed address is skipped for the 10min plain window,
+    /// a failed dial extends the window (30min with the
+    /// `BH_DIAL_BACKOFF` switch on, its default; the effective window is
+    /// read through the same knob so the boundary assertions hold under
+    /// either switch state), and a revived peer (successful handshake)
+    /// returns to the plain window. Driven through the exact call shape
+    /// the driver arms use (`admit(addr, clock.now())` /
+    /// `note_failed` / `note_connected`, run/dial.rs), every boundary
+    /// asserted exactly (1ns before = skip, at the window = admit) —
+    /// 40+ virtual minutes in microseconds of wall time.
+    #[test]
+    fn dial_dedup_window_boundaries_under_the_manual_clock() {
+        use crate::seam::ManualClock;
+        use std::time::Duration;
+
+        let addr: std::net::SocketAddr =
+            "203.0.113.7:6881".parse().unwrap_or_else(|e| panic!("{e}"));
+        let clock = ManualClock::new(std::time::Instant::now());
+        let mut dedup = DialDedup::new();
+
+        // Plain window: first admit, then skip until exactly 10min.
+        assert!(dedup.admit(addr, clock.now()), "first dial admits");
+        clock.advance(DHT_DIAL_DEDUP_WINDOW - Duration::from_nanos(1));
+        assert!(
+            !dedup.admit(addr, clock.now()),
+            "1ns before the 10min window: the re-supply is skipped"
+        );
+        clock.advance(Duration::from_nanos(1));
+        assert!(
+            dedup.admit(addr, clock.now()),
+            "at exactly the 10min window: the address is dialable again"
+        );
+
+        // Failed dial: the window extends. The effective failed window is
+        // knob-dependent; the boundary is asserted against whichever is
+        // active (the exactness claim is about the boundary, not the
+        // knob state).
+        let admitted_at = clock.now();
+        dedup.note_failed(&addr);
+        let failed_window = if taiji_io::knobs::dial_backoff_enabled() {
+            DHT_DIAL_DEDUP_FAILED_WINDOW
+        } else {
+            DHT_DIAL_DEDUP_WINDOW
+        };
+        if failed_window > DHT_DIAL_DEDUP_WINDOW {
+            clock.advance(DHT_DIAL_DEDUP_WINDOW);
+            assert!(
+                !dedup.admit(addr, clock.now()),
+                "at the plain 10min window a failed address stays skipped"
+            );
+        }
+        clock.advance(admitted_at + failed_window - Duration::from_nanos(1) - clock.now());
+        assert!(
+            !dedup.admit(addr, clock.now()),
+            "1ns before the failed window: still skipped"
+        );
+        clock.advance(Duration::from_nanos(1));
+        assert!(
+            dedup.admit(addr, clock.now()),
+            "at exactly the failed window: dialable again"
+        );
+
+        // Revival: a successful handshake clears the failed mark — the
+        // next cycle is on the plain window again.
+        dedup.note_failed(&addr);
+        dedup.note_connected(&addr);
+        clock.advance(DHT_DIAL_DEDUP_WINDOW - Duration::from_nanos(1));
+        assert!(
+            !dedup.admit(addr, clock.now()),
+            "revived peer still respects the plain window (1ns before)"
+        );
+        clock.advance(Duration::from_nanos(1));
+        assert!(
+            dedup.admit(addr, clock.now()),
+            "revived peer dialable at exactly the plain window"
+        );
+    }
 }

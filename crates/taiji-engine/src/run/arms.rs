@@ -364,7 +364,11 @@ pub(super) async fn handle_engine_command(
 /// is a net loss).
 fn read_back_block_digests(reader: TorrentReader, goff: u64, nbytes: u64) -> Option<Vec<[u8; 20]>> {
     let mut buf = vec![0u8; usize::try_from(nbytes).ok()?];
-    let n = reader.read_at(goff, &mut buf).ok()?;
+    // Read-once face: the piece bytes exist here only to be hashed into
+    // the good-data digest baseline (libtorrent volatile_read
+    // semantics) — page-cache eviction keeps the evidence pass from
+    // evicting cacheable data.
+    let n = reader.read_at_volatile(goff, &mut buf).ok()?;
     buf.truncate(n);
     const BLOCK: usize = merkle::BLOCK_SIZE as usize;
     Some(buf.chunks(BLOCK).map(|c| Sha1::digest(c).into()).collect())

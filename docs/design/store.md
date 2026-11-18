@@ -562,6 +562,20 @@ upstream anchors live here.
   never mixed across platforms).
 - `flushOSBuffers`: `fsync` — mirrored by `flush_os_buffers`
   (`sync_all` / `FlushFileBuffers`).
+- Read-once page-cache hygiene (upstream anchor: libtorrent
+  `src/pread_storage.cpp:505,697`, `volatile_read` -> the
+  `advise_dont_need` wrapper of `src/file.cpp:315-325`): mirrored by
+  `DiskWriter::read_at_volatile` — Linux advises
+  `posix_fadvise(POSIX_FADV_DONTNEED)` on the completed range via
+  `rustix::fs::fadvise`; macOS applies `fcntl(F_NOCACHE)` once per
+  handle before its first volatile read via
+  `rustix::fs::fcntl_nocache` (the same wrapper now backs
+  `set_bypass_page_cache`, closing the old Unsupported stub); other
+  platforms take the plain-read default. Hint failures are counted
+  (`taiji_disk_cache_advise_failures_total`) and never fail the read
+  (the aria2 ignores-failure stance). Consumers: startup recheck,
+  smart-ban read-back digests, the HTTP checksum prefetch — not the
+  seeding serve face or streaming reads.
 - `allocate`: the three platform branches map to Trunc (ftruncate
   sparse) / Falloc (fast path stubbed to trunc) / Prealloc (zero fill,
   a direct translation of `SingleFileAllocationIterator.cc`, 256 KiB

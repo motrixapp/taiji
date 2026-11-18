@@ -1281,6 +1281,25 @@ pub(crate) fn render(
     out.push_str("taiji_disk_sink_inflight ");
     out.push_str(&snap.disk_sink_inflight.to_string());
     out.push('\n');
+    // Volatile (read-once) reads at the store disk boundary — hash
+    // verification/recheck/checksum-prefetch reads whose page-cache
+    // eviction is advised (libtorrent volatile_read semantics); the
+    // failure counter reports fadvise/F_NOCACHE hint errors (counted,
+    // never fatal — a failed hint degrades to plain cached IO).
+    out.push_str(
+        "# HELP taiji_disk_volatile_reads_total Read-once (volatile) positioned reads at the store disk boundary: hash verification, recheck and checksum-prefetch reads that advise page-cache eviction for the range just read (counted on every platform, hint or not).\n\
+         # TYPE taiji_disk_volatile_reads_total counter\n",
+    );
+    out.push_str("taiji_disk_volatile_reads_total ");
+    out.push_str(&snap.disk_volatile_reads_total.to_string());
+    out.push('\n');
+    out.push_str(
+        "# HELP taiji_disk_cache_advise_failures_total Page-cache hint failures at the volatile-read/no-cache faces (posix_fadvise DONTNEED on Linux, fcntl F_NOCACHE on macOS); non-fatal by design — counted, never failing the read.\n\
+         # TYPE taiji_disk_cache_advise_failures_total counter\n",
+    );
+    out.push_str("taiji_disk_cache_advise_failures_total ");
+    out.push_str(&snap.disk_cache_advise_failures_total.to_string());
+    out.push('\n');
     out.push_str(
         "# HELP taiji_disk_finalize_seconds Finalize/durability operation duration by op (file_fsync = per-task-file fsync — merged accounting includes periodic snapshot beats, not finalize-only; fsync_dir = directory flush after rename; rename = atomic rename; SMB long-tail domain).\n\
          # TYPE taiji_disk_finalize_seconds histogram\n",
@@ -2261,15 +2280,17 @@ mod tests {
     }
 
     /// Disk/finalize family projection: the sink write count/bytes/
-    /// in-flight gauge + the three-op finalize histogram (full op enum,
-    /// trio) + the prealloc histogram. Name/type/label/value asserted
-    /// line by line.
+    /// in-flight gauge + the volatile-read pair + the three-op finalize
+    /// histogram (full op enum, trio) + the prealloc histogram.
+    /// Name/type/label/value asserted line by line.
     #[test]
     fn disk_family_projects_into_metrics() {
         let mut snap = MetricsSnapshot {
             disk_sink_writes_total: 3,
             disk_sink_writes_bytes_total: 12288,
             disk_sink_inflight: 1,
+            disk_volatile_reads_total: 7,
+            disk_cache_advise_failures_total: 2,
             ..MetricsSnapshot::default()
         };
         // Per-bucket injection: rename le=5 <- 1, le=30 <- 2 (cumulative
@@ -2297,6 +2318,10 @@ mod tests {
             "taiji_disk_sink_writes_bytes_total 12288",
             "# TYPE taiji_disk_sink_inflight gauge",
             "taiji_disk_sink_inflight 1",
+            "# TYPE taiji_disk_volatile_reads_total counter",
+            "taiji_disk_volatile_reads_total 7",
+            "# TYPE taiji_disk_cache_advise_failures_total counter",
+            "taiji_disk_cache_advise_failures_total 2",
             "# TYPE taiji_disk_finalize_seconds histogram",
             "taiji_disk_finalize_seconds_bucket{op=\"file_fsync\",le=\"0.01\"} 2",
             "taiji_disk_finalize_seconds_bucket{op=\"file_fsync\",le=\"+Inf\"} 2",
@@ -2334,6 +2359,8 @@ mod tests {
         for line in [
             "taiji_disk_sink_writes_total 0",
             "taiji_disk_sink_inflight 0",
+            "taiji_disk_volatile_reads_total 0",
+            "taiji_disk_cache_advise_failures_total 0",
             "taiji_disk_finalize_seconds_count{op=\"file_fsync\"} 0",
             "taiji_disk_finalize_seconds_count{op=\"fsync_dir\"} 0",
             "taiji_disk_finalize_seconds_count{op=\"rename\"} 0",
@@ -2471,10 +2498,12 @@ mod tests {
             "taiji_block_stage_seconds",
         ];
         // Disk/finalize families (part of the additive-only guard).
-        const B_DISK_FAMILIES: [&str; 5] = [
+        const B_DISK_FAMILIES: [&str; 7] = [
             "taiji_disk_sink_writes_total",
             "taiji_disk_sink_writes_bytes_total",
             "taiji_disk_sink_inflight",
+            "taiji_disk_volatile_reads_total",
+            "taiji_disk_cache_advise_failures_total",
             "taiji_disk_finalize_seconds",
             "taiji_disk_prealloc_seconds",
         ];

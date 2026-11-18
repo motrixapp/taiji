@@ -209,18 +209,24 @@ tower-service = "0.3"
 # code side (the md-5 precedent).
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
-# ( write-path batching): safe wrapper for pwritev on the completed-piece
-# write surface (positioned vectored writes) — hand-rolled iovec/libc
+# ( write-path batching + read-path page-cache hints): safe wrapper for
+# pwritev on the completed-piece write surface (positioned vectored
+# writes), and safe wrappers for posix_fadvise (Linux) / fcntl F_NOCACHE
+# (macOS) on the read-once verification surface — hand-rolled iovec/libc
 # calls are unsafe (vetoed outright by workspace unsafe_code=forbid); std
-# `FileExt::write_vectored_at` is not yet stable
+# `FileExt::write_vectored_at` is still unstable
 # (`unix_file_vectored_at`, verified on 1.98). rustix is already in the
 # lock at 1.1.5 as an existing transitive dependency of the dependency tree
 # (default-features off + std only; the `rustix::io::pwritev` module has no
 # feature gate) — direct-dependency declaration adds zero new external
-# code, versions locked identically, zero drift.
+# code, versions locked identically, zero drift. The `fs` feature was
+# added later for `rustix::fs::{fadvise, fcntl_nocache, Advice}` (the
+# page-cache hint faces): it is an empty feature (no extra crates, no
+# std surface change — it only un-gates the fs module), the minimal
+# flag exposing those APIs.
 # License Apache-2.0 WITH LLVM-exception ( compatible); maintenance status =
 # first-line bytecodealliance (same source as the mio/Greenwich ecosystem).
-rustix = { version = "1.1", default-features = false, features = ["std"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
 # block-arena storage: safe anonymous-mapping wrapper — the
 # pooled 16KiB blocks become per-block mmap/munmap so the idle release
 # face is a plain drop (munmap returns pages on every unix; musl

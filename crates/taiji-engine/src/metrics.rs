@@ -77,6 +77,7 @@
 //! | `taiji_rpc_conn_rejected_total{scope}` | rpc transport guard (conn gate) |
 //! | `taiji_rpc_auth_fail_total` | rpc transport guard (auth failure) |
 //! | `taiji_dns_*` | taiji-io shared resolver (io registry seam) |
+//! | `taiji_disk_volatile_reads_total` / `taiji_disk_cache_advise_failures_total` | store `DiskWriter::read_at_volatile` boundary (io registry disk family seam) |
 //!
 //! Value-range narrowing (honest terms; the ranges below are revised
 //! alongside the observation faces):
@@ -671,6 +672,12 @@ pub struct MetricsSnapshot {
     pub disk_sink_writes_total: u64,
     pub disk_sink_writes_bytes_total: u64,
     pub disk_sink_inflight: u64,
+    /// Read-once (volatile) positioned reads at the store `DiskWriter`
+    /// boundary (recheck / read-then-hash / checksum verification
+    /// prefetch; counted on every platform, hint or not) and the
+    /// fadvise/F_NOCACHE hint failures (counted, never fatal).
+    pub disk_volatile_reads_total: u64,
+    pub disk_cache_advise_failures_total: u64,
     /// Finalize histogram, three ops (file_fsync/fsync_dir/rename;
     /// non-cumulative bucket counts + count + microseconds, indices align
     /// with [`DISK_FINALIZE_BUCKETS_SECONDS`]).
@@ -844,6 +851,8 @@ impl Default for MetricsSnapshot {
             disk_sink_writes_total: 0,
             disk_sink_writes_bytes_total: 0,
             disk_sink_inflight: 0,
+            disk_volatile_reads_total: 0,
+            disk_cache_advise_failures_total: 0,
             disk_finalize_file_fsync_buckets: vec![0; DISK_FINALIZE_BUCKETS_SECONDS.len()],
             disk_finalize_file_fsync_count: 0,
             disk_finalize_file_fsync_sum_us: 0,
@@ -2068,6 +2077,8 @@ impl SessionMetrics {
         snap.disk_sink_writes_total = disk.sink_writes_total;
         snap.disk_sink_writes_bytes_total = disk.sink_writes_bytes_total;
         snap.disk_sink_inflight = disk.sink_inflight;
+        snap.disk_volatile_reads_total = disk.volatile_reads_total;
+        snap.disk_cache_advise_failures_total = disk.cache_advise_failures_total;
         snap.disk_finalize_file_fsync_buckets = disk.finalize_file_fsync.buckets.clone();
         snap.disk_finalize_file_fsync_count = disk.finalize_file_fsync.count;
         snap.disk_finalize_file_fsync_sum_us = disk.finalize_file_fsync.sum_us;
@@ -2740,9 +2751,10 @@ mod tests {
     /// io registry aggregation seam (disk/finalize family): inject an
     /// isolated registry -> feed points via the
     /// [`SessionMetrics::io_registry`] handle -> the snapshot pulls in
-    /// the `disk_*` fields (write count/bytes, in-flight gauge, finalize
-    /// three ops and prealloc histograms aligned with
-    /// [`DISK_FINALIZE_BUCKETS_SECONDS`]); unfed = honest zeros.
+    /// the `disk_*` fields (write count/bytes, in-flight gauge, the
+    /// volatile-read counters, finalize three ops and prealloc
+    /// histograms aligned with [`DISK_FINALIZE_BUCKETS_SECONDS`]);
+    /// unfed = honest zeros.
     #[test]
     fn io_registry_disk_metrics_aggregate_into_snapshot() {
         let registry = Arc::new(taiji_io::metrics::MetricsRegistry::new());
@@ -2750,6 +2762,8 @@ mod tests {
         let zero = m.snapshot();
         assert_eq!(zero.disk_sink_writes_total, 0, "honest zero-value baseline");
         assert_eq!(zero.disk_sink_inflight, 0);
+        assert_eq!(zero.disk_volatile_reads_total, 0);
+        assert_eq!(zero.disk_cache_advise_failures_total, 0);
         assert_eq!(zero.disk_finalize_rename_count, 0);
         assert_eq!(
             zero.disk_finalize_file_fsync_buckets.len(),
@@ -2763,6 +2777,9 @@ mod tests {
         let disk = registry.disk();
         disk.note_sink_write(4096);
         let guard = disk.enter_sink_write();
+        disk.note_volatile_read();
+        disk.note_volatile_read();
+        disk.note_cache_advise_failure();
         disk.observe_finalize(
             taiji_io::metrics::FinalizeOp::FileFsync,
             Duration::from_millis(2),
@@ -2780,6 +2797,8 @@ mod tests {
         let s = m.snapshot();
         assert_eq!(s.disk_sink_writes_total, 1);
         assert_eq!(s.disk_sink_writes_bytes_total, 4096);
+        assert_eq!(s.disk_volatile_reads_total, 2);
+        assert_eq!(s.disk_cache_advise_failures_total, 1);
         assert_eq!(
             s.disk_sink_inflight, 1,
             "in-flight sampled reading (guard not dropped)"

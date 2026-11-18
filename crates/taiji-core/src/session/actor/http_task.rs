@@ -5043,8 +5043,12 @@ async fn run_prefetch(
             w.open_existing(&path, true).ok()?;
             let mut buf = vec![0u8; len];
             let mut total = 0usize;
+            // Read-once face: checksum verification reads the whole file
+            // exactly once to feed the digest (libtorrent volatile_read
+            // semantics) — the page cache should not keep a task-sized
+            // copy of data nobody will re-read.
             while total < buf.len() {
-                match w.read_at(hashed + total as u64, &mut buf[total..]) {
+                match w.read_at_volatile(hashed + total as u64, &mut buf[total..]) {
                     Ok(n) if n > 0 => total += n,
                     _ => return None, // IO failure / short read (file behind bookkeeping)
                 }

@@ -23,8 +23,10 @@
 //! (logged, never silently faked); [`AllocationMode::Prealloc`] is
 //! implemented with plain std zero-fill (direct translation of aria2
 //! `SingleFileAllocationIterator`) and really preallocates on every
-//! platform. Landing the fast path awaits a safe fcntl wrapper (same seam
-//! as F_NOCACHE).
+//! platform. Landing the fast path still awaits a safe wrapper — the
+//! rustix `fs` surface that now covers the F_NOCACHE/fadvise read-side
+//! hints (see [`crate::disk::DiskWriter::read_at_volatile`]) exposes
+//! neither `F_PREALLOCATE` nor `fallocate`.
 //!
 //! Upstream anchor mapping: docs/design/store.md
 

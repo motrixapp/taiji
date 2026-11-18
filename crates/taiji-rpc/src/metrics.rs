@@ -312,6 +312,29 @@ pub(crate) fn render(
     out.push_str("taiji_peer_connections_choked ");
     out.push_str(&snap.conn_choked.to_string());
     out.push('\n');
+    // Connection-class gauge (one class per connection: the address
+    // dimension wins over transport — a local uTP peer counts as local;
+    // the label range is the fixed three-class set, no host/gid). An
+    // observation face: counts regardless of the BH_PEER_CLASS policy
+    // switch.
+    out.push_str(
+        "# HELP taiji_peers_by_class Live peer connections by built-in class (local = LAN/loopback address, wins over the transport dimension; utp = non-local uTP transport; tcp = everything else).\n\
+         # TYPE taiji_peers_by_class gauge\n",
+    );
+    for (class, n) in [
+        ("local", snap.peers_by_class_local),
+        ("tcp", snap.peers_by_class_tcp),
+        ("utp", snap.peers_by_class_utp),
+    ] {
+        write_sample(
+            &mut out,
+            Sample {
+                name: "taiji_peers_by_class",
+                labels: &[("class", class.to_string())],
+                value: n.to_string(),
+            },
+        );
+    }
     // Instrumentation: the per-peer in-flight depth histogram (sampled
     // per connection at the 1s engine tick; cardinality discipline — no
     // per-peer label, gids/addresses never become labels) + an
@@ -1734,6 +1757,9 @@ mod tests {
         snap.conn_tcp_in = 3;
         snap.conn_tcp_out = 9;
         snap.conn_choked = 6;
+        snap.peers_by_class_local = 4;
+        snap.peers_by_class_tcp = 8;
+        snap.peers_by_class_utp = 2;
         snap.peer_bans_total = 2;
         snap.dht_nodes_v4 = 120;
         snap.dht_nodes_v6 = 8;
@@ -1802,6 +1828,9 @@ mod tests {
             "taiji_peer_connections{transport=\"utp\",direction=\"in\"} 0",
             "taiji_peer_connections{transport=\"utp\",direction=\"out\"} 0",
             "taiji_peer_connections_choked 6",
+            "taiji_peers_by_class{class=\"local\"} 4",
+            "taiji_peers_by_class{class=\"tcp\"} 8",
+            "taiji_peers_by_class{class=\"utp\"} 2",
             "taiji_peer_bans_total 2",
             "taiji_dht_nodes{family=\"v4\"} 120",
             "taiji_dht_nodes{family=\"v6\"} 8",
@@ -2564,6 +2593,13 @@ mod tests {
             "# HELP taiji_peer_connections_choked Live connections we currently choke.",
             "# TYPE taiji_peer_connections_choked gauge",
             "taiji_peer_connections_choked 0",
+            // Connection-class gauge (baseline updated explicitly with the
+            // family).
+            "# HELP taiji_peers_by_class Live peer connections by built-in class (local = LAN/loopback address, wins over the transport dimension; utp = non-local uTP transport; tcp = everything else).",
+            "# TYPE taiji_peers_by_class gauge",
+            "taiji_peers_by_class{class=\"local\"} 0",
+            "taiji_peers_by_class{class=\"tcp\"} 0",
+            "taiji_peers_by_class{class=\"utp\"} 0",
             "# HELP taiji_peer_bans_total Peer bans enacted (auto rules, SPEC §13).",
             "# TYPE taiji_peer_bans_total counter",
             "taiji_peer_bans_total 0",

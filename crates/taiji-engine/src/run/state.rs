@@ -512,6 +512,60 @@ impl EngineLoop {
             hard_cap,
         )
     }
+
+    /// Registered class-utp connections across all faces (the
+    /// independent uTP budget's counter; the one-connection-one-class
+    /// assignment means a local uTP peer counts as local, never utp —
+    /// see [`crate::peer_class`]). O(peers) inside the single-writer
+    /// loop, read once per class-aware admission decision.
+    pub(super) fn utp_registered_peers(&self) -> usize {
+        self.faces
+            .iter()
+            .map(|f| {
+                f.peer_state
+                    .values()
+                    .filter(|ps| {
+                        crate::peer_class::classify(ps.ip, ps.meta.as_ref().map(|m| m.transport))
+                            == crate::peer_class::PeerClass::Utp
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Class-aware connection admission (the per-connection form of
+    /// [`EngineLoop::admission_open`], consumed by the inbound accept
+    /// arms and the redial dial gate — the two admission points where
+    /// the incoming connection's address/transport class is known; the
+    /// discovery batch gate stays class-blind by design, its candidates
+    /// are un-handshaken addresses of mixed classes). The class
+    /// dimension is `BH_PEER_CLASS`-gated: off = the exact pre-class
+    /// verdict (zero drift).
+    pub(super) fn admission_open_class(
+        &mut self,
+        hard_cap: bool,
+        now: Instant,
+        class: crate::peer_class::PeerClass,
+    ) -> bool {
+        if !taiji_io::knobs::peer_class_enabled() {
+            return self.admission_open(hard_cap, now);
+        }
+        let speed = self.speed_calc.calculate(now);
+        let download_healthy = self.completed
+            || speed >= taiji_io::knobs::peer_request_speed_limit(PEER_REQUEST_SPEED_LIMIT);
+        class_admission_verdict(
+            self.registered_peers(),
+            self.utp_registered_peers(),
+            class,
+            self.completed,
+            download_healthy,
+            hard_cap,
+            peer_connections_target(),
+            peer_connections_max(),
+            taiji_io::knobs::local_conn_factor(),
+            taiji_io::knobs::utp_max_peers(peer_connections_max()),
+        )
+    }
 }
 
 /// Connection admission decision; reads the effective limits through the
@@ -570,6 +624,69 @@ pub(crate) fn admission_verdict_limits(
     // Slow-download rescue (tightened): during a stall the count may still
     // grow from target up to the hard cap, never beyond.
     !download_healthy && total < max
+}
+
+/// Connection admission with the class dimension (the composition of
+/// libtorrent's inbound gate — the connections limit is scaled by the
+/// **incoming connection's** class factor, `src/session_impl.cpp:
+/// 3233-3250`: the effective limit is `limit x 100 / factor`, so a
+/// local-class connection (factor 150) may be admitted at a total that
+/// already rejects a tcp-class one). Two channels, whichever binds
+/// first wins (min composition, the same semantics as the rate-limit
+/// chain in core limits.rs):
+///
+/// - **total budget** (`admission_verdict_limits` with a class-scaled
+///   `max`): a local-class connection sees `ceil(max x
+///   local_factor_pct / 100)` (`connection_limit_factor = 150`:
+///   "local peers are allowed to exceed the normal connection limit by
+///   50%", `src/session_impl.cpp:668-671`); tcp/utp keep `max`
+///   unchanged. The widening applies only to the local connection's
+///   own verdict — it never re-opens the gate for other classes;
+/// - **independent uTP budget** (class = utp only): `utp_count <
+///   utp_max` — uTP connections are governed separately from TCP (the
+///   second borrowed policy); the default `utp_max = max` keeps the
+///   channel non-binding (uTP is already bounded by the total budget —
+///   status quo until tuned down).
+///
+/// The class dimension is the caller's `BH_PEER_CLASS` read; with it
+/// off the caller takes [`admission_verdict`] instead (the exact
+/// pre-class path — this function is only reached while on).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a decision-table pure function: every limit input is explicit (the seam the tests drive)"
+)]
+pub(crate) fn class_admission_verdict(
+    total: usize,
+    utp_count: usize,
+    class: crate::peer_class::PeerClass,
+    completed: bool,
+    download_healthy: bool,
+    hard_cap: bool,
+    target: usize,
+    max: usize,
+    local_factor_pct: u64,
+    utp_max: usize,
+) -> bool {
+    use crate::peer_class::PeerClass;
+    // Total-budget channel: local widens its own ceiling (ceil(max x
+    // factor / 100)); every other class keeps the plain cap.
+    let class_max = if class == PeerClass::Local {
+        crate::peer_class::local_budget(max, local_factor_pct)
+    } else {
+        max
+    };
+    let base = admission_verdict_limits(
+        total,
+        completed,
+        download_healthy,
+        hard_cap,
+        target,
+        class_max,
+    );
+    // Independent uTP channel (min composition): only the utp class
+    // contends for the separate budget; local uTP peers are class
+    // local and skip this channel entirely.
+    base && !(class == PeerClass::Utp && utp_count >= utp_max)
 }
 
 /// Connection admission hard cap (count of registered peers, inbound
@@ -750,12 +867,21 @@ pub(super) fn spawn_peer_dial(
     // re-connect first (admission tiers: a peer with recent successful
     // interaction outranks a bare discovery address); when over the limit
     // with a healthy download, top-ups pause and entries self-heal via
-    // due()'s optimistic deferral (never dropped);
+    // due()'s optimistic deferral (never dropped). Class dimension: the
+    // address is known, the transport is not (the dial plan may land on
+    // either) — the local-class 150% budget applies to a LAN address,
+    // while the independent uTP channel is not evaluated on this face
+    // (an honest under-approximation: the total budget still bounds the
+    // dial, and the uTP channel is default-inert);
     // - Punch: exempt (introducer-asserted reachability is fresh external
     // evidence, a standing rule; its outbound rate is already bounded by
     // the dedup window plus the 4/60s PeerTask rate limit).
     if let DialSource::Redial(_) = &source
-        && !state.admission_open(true, std::time::Instant::now())
+        && !state.admission_open_class(
+            true,
+            std::time::Instant::now(),
+            crate::peer_class::classify(Some(addr.ip()), None),
+        )
     {
         debug!(target: "taiji::core::engine", %addr, ?source,
             registered = state.registered_peers(),

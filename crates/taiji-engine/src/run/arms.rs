@@ -1210,11 +1210,14 @@ pub(super) fn handle_peer_avail(
             // session_impl.cpp): on an INTERESTED rising edge while choked
             // with a free slot, unchoke immediately (saves one round RTT).
             // The slot test, mode gate, and placement live in the engine
-            // choke module's `preemptive_unchoke`. No dispatch-debt feed
+            // choke module's `preemptive_unchoke` (the connection-class
+            // switch `BH_PEER_CLASS` is read here per event — local-class
+            // rows sit outside the free-slot count while it is on).
+            // No dispatch-debt feed
             // here — the peer's interest in us does not change our request
             // surface (the tail note_dispatch_debt is idempotent and
             // harmless; the arm stays uniform).
-            preemptive_unchoke(face, peer);
+            preemptive_unchoke(face, peer, taiji_io::knobs::peer_class_enabled());
         }
     }
     // Immediate advertisement bookkeeping + dispatch debt (tick-driven):
@@ -1531,14 +1534,15 @@ pub(super) fn handle_peer_left(
     // side; the seeding period keeps its 10s cadence, untouched). The
     // budget-derived slots use the same parameters as the ticker round (the
     // same assembly as `handle_choke_round` — both read points agree at the
-    // same instant).
+    // same instant; the connection-class switch likewise).
     let budget_slots = budget_derived_slots(
         taiji_io::knobs::unchoke_budget_slots_enabled(),
         state.limiter.as_deref(),
     );
+    let class_enabled = taiji_io::knobs::peer_class_enabled();
     if let Some(face) = state.faces.get_mut(fi) {
         if !face.completed {
-            leecher_choke_round(face, &mut state.choke_rng, budget_slots);
+            leecher_choke_round(face, &mut state.choke_rng, budget_slots, class_enabled);
         }
     }
     ControlFlow::Continue(())

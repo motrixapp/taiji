@@ -47,6 +47,7 @@
 //! | `taiji_torrent_bytes_total{direction}` | engine 1s tick delta bridge + terminal flush |
 //! | `taiji_peer_supply_bytes_total{transport}` | same bridge, split by transport (tcp|utp) |
 //! | `taiji_peer_connections{...}` / `_choked` | engine 1s tick (peer_meta/choke mirror) |
+//! | `taiji_peers_by_class{class}` | engine 1s tick (peer_class classify, address-wins) |
 //! | `taiji_peer_bans_total` | engine `BanBook::enact` (ban enforcement) |
 //! | `taiji_redial_attempts_total` / `_connected_total` | redial arm (dial / handshake ok) |
 //! | `taiji_redial_pool_size` | engine 1s gauge tick |
@@ -255,6 +256,11 @@ pub struct EngineGauges {
     /// sink increments, pipeline batch-ack decrements - the "handed to
     /// the pipeline, not yet confirmed" watermark; feeds no decisions).
     block_inflight: AtomicU64,
+    /// Per-class connection counts (local/tcp/utp; one class per
+    /// connection, the address dimension wins — see `peer_class`).
+    peers_local: AtomicU64,
+    peers_tcp: AtomicU64,
+    peers_utp: AtomicU64,
 }
 
 impl EngineGauges {
@@ -311,6 +317,15 @@ impl EngineGauges {
     /// Pre-registered in-flight block counter (1s tick, summed over all faces, SET).
     pub(crate) fn set_block_inflight(&self, inflight: u64) {
         self.block_inflight.store(inflight, Ordering::Relaxed);
+    }
+
+    /// Per-class connection counts (1s tick, summed over faces, SET; an
+    /// observation face — counts regardless of the `BH_PEER_CLASS`
+    /// behavior switch).
+    pub(crate) fn set_peers_by_class(&self, local: u64, tcp: u64, utp: u64) {
+        self.peers_local.store(local, Ordering::Relaxed);
+        self.peers_tcp.store(tcp, Ordering::Relaxed);
+        self.peers_utp.store(utp, Ordering::Relaxed);
     }
 
     fn conn_tcp_in(&self) -> u64 {
@@ -373,6 +388,18 @@ impl EngineGauges {
     fn block_inflight(&self) -> u64 {
         self.block_inflight.load(Ordering::Relaxed)
     }
+
+    fn peers_local(&self) -> u64 {
+        self.peers_local.load(Ordering::Relaxed)
+    }
+
+    fn peers_tcp(&self) -> u64 {
+        self.peers_tcp.load(Ordering::Relaxed)
+    }
+
+    fn peers_utp(&self) -> u64 {
+        self.peers_utp.load(Ordering::Relaxed)
+    }
 }
 
 /// Per-HTTP-task gauge slots (SET semantics; refreshed by the driver's
@@ -432,6 +459,14 @@ pub struct MetricsSnapshot {
     pub conn_utp_in: u64,
     pub conn_utp_out: u64,
     pub conn_choked: u64,
+    /// Per-class connection counts (sum of engine slots; one class per
+    /// connection — the address dimension wins over transport, a local
+    /// uTP peer counts as local; the `taiji_peers_by_class{class}` label
+    /// range local|tcp|utp is fixed, no host/gid labels). An observation
+    /// face: counts regardless of the `BH_PEER_CLASS` behavior switch.
+    pub peers_by_class_local: u64,
+    pub peers_by_class_tcp: u64,
+    pub peers_by_class_utp: u64,
     /// Ban enforcement total (BanBook::enact).
     pub peer_bans_total: u64,
     /// Redial dial attempts (spawn point of the redial scan arm).
@@ -723,6 +758,9 @@ impl Default for MetricsSnapshot {
             conn_utp_in: 0,
             conn_utp_out: 0,
             conn_choked: 0,
+            peers_by_class_local: 0,
+            peers_by_class_tcp: 0,
+            peers_by_class_utp: 0,
             peer_bans_total: 0,
             redial_attempts_total: 0,
             redial_connected_total: 0,
@@ -2108,6 +2146,9 @@ impl SessionMetrics {
                     snap.conn_utp_in += g.conn_utp_in();
                     snap.conn_utp_out += g.conn_utp_out();
                     snap.conn_choked += g.conn_choked();
+                    snap.peers_by_class_local += g.peers_local();
+                    snap.peers_by_class_tcp += g.peers_tcp();
+                    snap.peers_by_class_utp += g.peers_utp();
                     snap.redial_pool_size += g.redial_pool_size();
                     snap.dht_nodes_v4 += g.dht_nodes_v4();
                     snap.dht_nodes_v6 += g.dht_nodes_v6();
@@ -2526,6 +2567,7 @@ mod tests {
         g1.set_conn_choked(1);
         g1.set_dht_nodes(100, 7);
         g1.set_hash_queue_depth(5);
+        g1.set_peers_by_class(2, 5, 1);
         g2.set_conn_tcp(10, 20);
         let s = m.snapshot();
         assert_eq!(s.conn_tcp_in, 13);
@@ -2534,6 +2576,12 @@ mod tests {
         assert_eq!(s.dht_nodes_v4, 100);
         assert_eq!(s.dht_nodes_v6, 7);
         assert_eq!(s.hashpool_queue_depth, 5);
+        // Per-class counts sum across live engine slots (the default
+        // snapshot's honest zeros are covered by the == default assert in
+        // `feed_points_land_in_snapshot`).
+        assert_eq!(s.peers_by_class_local, 2);
+        assert_eq!(s.peers_by_class_tcp, 5);
+        assert_eq!(s.peers_by_class_utp, 1);
         // Slot death (engine exit) -> totals fall back, no dead entries remain.
         drop(g2);
         let s = m.snapshot();

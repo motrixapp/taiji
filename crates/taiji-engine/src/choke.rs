@@ -19,6 +19,7 @@ use taiji_io::rate_limit::LimiterSet;
 
 use crate::dispatch::{endgame_tail_active, peer_holds_missing_piece};
 use crate::faces::{FaceState, XorShift};
+use crate::peer_class::is_local_ip;
 /// Assembly point for budget-derived unchoke slots (opt-in switch
 /// `BH_UNCHOKE_BUDGET_SLOTS`; off by default — zero behavior change).
 /// When the switch is on and the engine limiter is present, N =
@@ -55,10 +56,21 @@ pub(super) fn budget_derived_slots(enabled: bool, limiter: Option<&LimiterSet>) 
 /// `bt::choke::SeederChoke::select_libtorrent` for the divergences).
 /// aria2 fallback mode = the ported ordering (outstanding > recent >
 /// rate, preserved as-is). Unchoke interested peers once complete.
-pub(super) fn choke_round(face: &mut FaceState) {
+///
+/// `class_enabled` (`BH_PEER_CLASS`): interested local-class peers are
+/// exempt from the slot competition — they never enter the decision
+/// input (the 8 slots go to remote peers only) and are unchoked
+/// unconditionally at the round landing (`ignore_unchoke_slots`:
+/// "local peers are always unchoked", libtorrent
+/// `src/session_impl.cpp:663-667`, the local peer class). false = the
+/// exact pre-class path (local peers compete like anyone else).
+pub(super) fn choke_round(face: &mut FaceState, class_enabled: bool) {
     let mode = face.choke.mode();
     let now = Instant::now();
     let mut stats: Vec<PeerStat> = Vec::new();
+    // Local-class exemption (peers indexes of interested LAN peers; the
+    // landing below unchokes them outside the slot budget).
+    let mut local_exempt: Vec<usize> = Vec::new();
     for (i, p) in face.peers.iter().enumerate() {
         if !p.is_interested() {
             continue;
@@ -69,6 +81,10 @@ pub(super) fn choke_round(face: &mut FaceState) {
         // unchanged — fallback semantics locked. Missing rows/fields
         // sample as 0.0 (same verdict as a missing legacy table).
         let cuid = face.peer_cuids.get(i).copied().unwrap_or(u64::MAX);
+        if class_enabled && peer_is_local(face, cuid) {
+            local_exempt.push(i);
+            continue;
+        }
         let upload_speed = if mode == ChokeMode::Libtorrent {
             face.peer_state
                 .get_mut(&cuid)
@@ -115,6 +131,18 @@ pub(super) fn choke_round(face: &mut FaceState) {
             row.am_unchoked = true;
         }
     }
+    // Local-class landing (the round's "always unchoked" half): the
+    // same SendUnchoke + bookkeeping shape as a regular slot, outside
+    // the slot budget. Idempotent per round like the regular landing
+    // (the peer side treats a repeated Unchoke as a no-op).
+    for &i in &local_exempt {
+        let _ = face.peers[i].command(taiji_bt::peer::PeerCommand::SendUnchoke);
+        if let Some(&cuid) = face.peer_cuids.get(i) {
+            let row = face.peer_state_row(cuid);
+            row.last_unchoke = Some(Instant::now());
+            row.am_unchoked = true;
+        }
+    }
 }
 
 /// Leecher choke round (download-phase tit-for-tat): one decision per
@@ -156,10 +184,19 @@ pub(super) fn choke_round(face: &mut FaceState) {
 /// [`budget_derived_slots`] assembly point — the limiter -> decision
 /// seam); None = the existing static `BH_UNCHOKE_SLOTS` path unchanged
 /// (off by default, zero behavior difference).
+///
+/// `class_enabled` (`BH_PEER_CLASS`): local-class peers are exempt from
+/// the slot competition — they never enter the decision input (the 8
+/// total slots go to remote peers only; neither regular nor optimistic)
+/// and land as always-unchoked while interested
+/// (`ignore_unchoke_slots`, "local peers are always unchoked",
+/// libtorrent `src/session_impl.cpp:663-667`). false = the exact
+/// pre-class path (local peers compete like anyone else).
 pub(super) fn leecher_choke_round(
     face: &mut FaceState,
     rng: &mut XorShift,
     budget_slots: Option<usize>,
+    class_enabled: bool,
 ) {
     // Endgame-tail holder gate (the same [`endgame_tail_active`] supply face
     // as the dispatch round's tail policies; the missing inventory is
@@ -188,13 +225,19 @@ pub(super) fn leecher_choke_round(
         .peers
         .iter()
         .enumerate()
-        .map(|(i, p)| {
+        .filter_map(|(i, p)| {
             let cuid = face.peer_cuids.get(i).copied().unwrap_or(u64::MAX);
+            // Local-class exemption: the peer never enters the decision
+            // input (no regular slot, no optimistic pick — the effect
+            // loop below lands it as always-unchoked while interested).
+            if class_enabled && peer_is_local(face, cuid) {
+                return None;
+            }
             // Three reads from one row lookup (last_unchoke, down window,
             // optimistic key); missing rows/fields fall back like a
             // missing legacy table.
             let row = face.peer_state.get(&cuid);
-            PeerStat {
+            Some(PeerStat {
                 // id = cuid (decisions map back to connections by cuid;
                 // same keyspace as am_unchoked / regular_unchoked / the
                 // down window — no re-mapping when a peer leaves).
@@ -216,7 +259,7 @@ pub(super) fn leecher_choke_round(
                         .peer_avail
                         .get(&cuid)
                         .is_some_and(|avail| peer_holds_missing_piece(avail, &missing)),
-            }
+            })
         })
         .collect();
     // The Rng closure must be 'static (`choke::Rng =
@@ -251,7 +294,13 @@ pub(super) fn leecher_choke_round(
         let Some(cuid) = face.peer_cuids.get(i).copied() else {
             continue;
         };
-        let want = unchoked.contains(&cuid);
+        // Local-class landing: always unchoked while interested (the
+        // exemption's effect half — the peer was never in the decision
+        // input, so the decision set alone must not re-choke it). A
+        // local peer losing interest returns to choke through the same
+        // `!want` arm as everyone else (BEP3 landing semantics).
+        let local = class_enabled && peer_is_local(face, cuid);
+        let want = unchoked.contains(&cuid) || (local && face.peers[i].is_interested());
         let current = face.peer_state.get(&cuid).is_some_and(|ps| ps.am_unchoked);
         if want && !current {
             let _ = face.peers[i].command(taiji_bt::peer::PeerCommand::SendUnchoke);
@@ -291,7 +340,11 @@ pub(super) fn leecher_choke_round(
 ///   semantics; the fallback keeps the existing round cadence).
 /// - Lossy events (avail channel full, dropped) degrade to waiting for
 ///   the next round (consistent with round semantics).
-pub(super) fn preemptive_unchoke(face: &mut FaceState, cuid: u64) {
+///
+/// `class_enabled` (`BH_PEER_CLASS`): local-class rows do not consume a
+/// slot in the free-slot count (they are unchoked outside the budget);
+/// false = the exact pre-class count (every am_unchoked row counts).
+pub(super) fn preemptive_unchoke(face: &mut FaceState, cuid: u64, class_enabled: bool) {
     let mode = if face.completed {
         face.choke.mode()
     } else {
@@ -303,7 +356,14 @@ pub(super) fn preemptive_unchoke(face: &mut FaceState, cuid: u64) {
     if face.peer_state.get(&cuid).is_some_and(|ps| ps.am_unchoked) {
         return; // already unchoke'd: level-idempotent (an edge fires once).
     }
-    let unchoked = face.peer_state.values().filter(|ps| ps.am_unchoked).count();
+    // Free-slot count: with the class layer on, local-class rows sit
+    // outside the slot budget and must not crowd remote peers out of
+    // the preemptive pass (the same exemption the rounds apply).
+    let unchoked = face
+        .peer_state
+        .values()
+        .filter(|ps| ps.am_unchoked && !(class_enabled && ps.ip.is_some_and(|ip| is_local_ip(&ip))))
+        .count();
     if unchoked >= UNCHOKE_SLOTS {
         return; // no free slot: wait for the next round.
     }
@@ -319,4 +379,14 @@ pub(super) fn preemptive_unchoke(face: &mut FaceState, cuid: u64) {
     row.last_unchoke = Some(Instant::now());
     debug!(target: "taiji::core::engine", cuid, slots_before = unchoked,
         "preemptive unchoke (interested edge, free slot)");
+}
+
+/// Local-class predicate for one connection row (the address dimension
+/// only — transport never flips it; a missing row or address is not
+/// local, the honest fallback of a test fixture / not-yet-registered
+/// peer).
+fn peer_is_local(face: &FaceState, cuid: u64) -> bool {
+    face.peer_state
+        .get(&cuid)
+        .is_some_and(|ps| ps.ip.is_some_and(|ip| is_local_ip(&ip)))
 }

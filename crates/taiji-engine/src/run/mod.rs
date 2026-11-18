@@ -46,6 +46,7 @@ pub(crate) use state::peer_connections_target;
 #[cfg(test)]
 pub(crate) use state::{
     PEER_CONNECTIONS_MAX, PEER_CONNECTIONS_TARGET, admission_verdict, admission_verdict_limits,
+    class_admission_verdict,
 };
 
 // Stall-valve pure functions: served through the engine namespace as

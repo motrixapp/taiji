@@ -177,6 +177,26 @@ pub(super) fn count_peer_gauges(faces: &[FaceState]) -> (u64, u64, u64, u64, u64
     (tcp_in, tcp_out, utp_in, utp_out, choked)
 }
 
+/// Per-class connection counts (1s tick; the `taiji_peers_by_class`
+/// gauge source): one class per connection — the address dimension
+/// wins (`peer_class::classify`: a local uTP peer counts as local).
+/// Rows without an address/meta fall back like `count_peer_gauges`
+/// (classify's honest defaults). An observation face: it counts
+/// regardless of the `BH_PEER_CLASS` behavior switch.
+pub(super) fn count_peers_by_class(faces: &[FaceState]) -> (u64, u64, u64) {
+    let (mut local, mut tcp, mut utp) = (0u64, 0u64, 0u64);
+    for face in faces {
+        for ps in face.peer_state.values() {
+            match crate::peer_class::classify(ps.ip, ps.meta.as_ref().map(|m| m.transport)) {
+                crate::peer_class::PeerClass::Local => local += 1,
+                crate::peer_class::PeerClass::Tcp => tcp += 1,
+                crate::peer_class::PeerClass::Utp => utp += 1,
+            }
+        }
+    }
+    (local, tcp, utp)
+}
+
 /// tellStatus live snapshot synthesis (face 0 is the canonical face:
 /// hybrid dual faces always have equal piece counts and completion
 /// state propagates across faces — the BEP52-aligned mapping).

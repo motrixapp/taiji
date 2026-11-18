@@ -39,7 +39,7 @@ use crate::faces::{FaceState, face_transport_supply, pex_snapshot};
 use crate::lean_telemetry_enabled;
 use crate::pipeline::BLOCK_CHANNEL_CAPACITY;
 use crate::progress::{EngineEnd, flush_progress_row, progress_row};
-use crate::query::{count_peer_gauges, drain_peer_counters};
+use crate::query::{count_peer_gauges, count_peers_by_class, drain_peer_counters};
 use crate::tracker::epoch_secs;
 /// Autosave period for the torrent_progress counter row; matches the
 /// aria2 `--auto-save-interval` default of 60s (`OptionHandlerFactory.cc`).
@@ -552,6 +552,11 @@ pub(super) async fn handle_seed_tick(
         slot.set_conn_tcp(inb, outb);
         slot.set_conn_utp(utp_in, utp_out);
         slot.set_conn_choked(choked);
+        // Per-class counts (the `taiji_peers_by_class` gauge; an
+        // observation face — independent of the `BH_PEER_CLASS` behavior
+        // switch, it keeps counting with the policy rolled back).
+        let (peers_local, peers_tcp, peers_utp) = count_peers_by_class(&state.faces);
+        slot.set_peers_by_class(peers_local, peers_tcp, peers_utp);
         // Redial pool size (bounded by REDIAL_POOL_CAP).
         slot.set_redial_pool_size(state.redial_pool.len() as u64);
         let depth: u64 = state
@@ -947,17 +952,20 @@ pub(super) async fn autosave_snapshot(
 /// Part 1: budget-derived slots are assembled here; the limiter (an
 /// EngineLoop field) is the budget source for [`budget_derived_slots`]
 /// (the choke decision surface takes it as a parameter; the knob and
-/// bucket rates are read once per 15s round — not a hot path).
+/// bucket rates are read once per 15s round — not a hot path). The
+/// connection-class switch (`BH_PEER_CLASS`, local peers exempt from
+/// slot competition) is read at the same once-per-round point.
 pub(super) fn handle_choke_round(state: &mut EngineLoop) {
     let budget_slots = budget_derived_slots(
         taiji_io::knobs::unchoke_budget_slots_enabled(),
         state.limiter.as_deref(),
     );
+    let class_enabled = taiji_io::knobs::peer_class_enabled();
     for face in &mut state.faces {
         if face.completed {
-            choke_round(face);
+            choke_round(face, class_enabled);
         } else {
-            leecher_choke_round(face, &mut state.choke_rng, budget_slots);
+            leecher_choke_round(face, &mut state.choke_rng, budget_slots, class_enabled);
         }
     }
 }

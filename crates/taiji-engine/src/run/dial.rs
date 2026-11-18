@@ -332,9 +332,15 @@ pub(super) fn handle_inbound_tcp(
     // sits at accept — an equivalent, cheaper point that saves the MSE/BT
     // handshake CPU; from the peer's view both are "connect then close", and
     // reconnection is governed by the peer's own cadence). Slow-download
-    // relief: see [`super::state::EngineLoop::admission_open`].
-    if !state.admission_open(true, Instant::now()) {
+    // relief: see [`super::state::EngineLoop::admission_open`]. Class
+    // dimension (`BH_PEER_CLASS`): the incoming endpoint's class scales its
+    // own budget (a LAN peer's total ceiling is 150% of the cap — the
+    // libtorrent inbound connection_limit_factor composition,
+    // session_impl.cpp:3233-3250; off = the exact pre-class verdict).
+    let inbound_class = crate::peer_class::classify_endpoint(&peer_addr, Transport::Tcp);
+    if !state.admission_open_class(true, Instant::now(), inbound_class) {
         debug!(target: "taiji::core::engine", %peer_addr,
+            class = inbound_class.as_str(),
             registered = state.registered_peers(),
             max = super::state::peer_connections_max(),
             "inbound peer dropped by connection admission (before handshake)");
@@ -506,9 +512,16 @@ pub(super) fn handle_inbound_utp(
         drop(utp_stream);
         return ControlFlow::Break(());
     }
-    // Inbound connection admission gate (the same discipline as the TCP arm).
-    if !state.admission_open(true, Instant::now()) {
+    // Inbound connection admission gate (the same discipline as the TCP
+    // arm), plus the class dimension's independent uTP channel: a
+    // non-local uTP connection additionally contends for
+    // `BH_UTP_MAX_PEERS` (default = the total cap = non-binding; the
+    // uTP class is governed separately from TCP). A local uTP endpoint
+    // is class local — the 150% local budget applies instead.
+    let inbound_class = crate::peer_class::classify_endpoint(&peer_addr, Transport::Utp);
+    if !state.admission_open_class(true, Instant::now(), inbound_class) {
         debug!(target: "taiji::core::engine", %peer_addr,
+            class = inbound_class.as_str(),
             registered = state.registered_peers(),
             max = super::state::peer_connections_max(),
             "inbound utp peer dropped by connection admission (before handshake)");

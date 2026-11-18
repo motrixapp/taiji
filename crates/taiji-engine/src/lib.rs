@@ -255,6 +255,11 @@ mod config;
 mod dht;
 mod dispatch;
 mod faces;
+/// Built-in connection classes (local/tcp/utp): the libtorrent-aligned
+/// address/transport assignment table and the class budget arithmetic
+/// (consumed by the choke round, connection admission, and the
+/// per-class metrics gauge).
+mod peer_class;
 mod pipeline;
 mod progress;
 mod query;

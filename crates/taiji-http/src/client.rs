@@ -268,6 +268,19 @@ pub struct ClientConfig {
     /// reqwest's default false, hyper only pings with active streams
     /// and pooled idle connections are never probed).
     pub http2_keep_alive_interval: Option<Duration>,
+    /// Egress bind address (`--interface`, the aria2-compatible option;
+    /// `None` = the OS default route, zero change): every TCP
+    /// connection the transport opens is bound to this local address
+    /// before connect (reqwest `ClientBuilder::local_address`), so
+    /// HTTP(S) egress leaves through the chosen interface/IP. A family
+    /// mismatch is inherent to the semantics (a v4 bind cannot serve a
+    /// v6 destination — those connects fail, the same as aria2 binding
+    /// a v4-only interface). Part of the shared pool bucket key (a
+    /// different bind = a different transport instance, no
+    /// cross-config connection sharing). Session projection =
+    /// `HttpTaskOpts.local_address` (a startup-time session global, no
+    /// per-task option face).
+    pub local_address: Option<std::net::IpAddr>,
 }
 
 impl Default for ClientConfig {
@@ -295,6 +308,7 @@ impl Default for ClientConfig {
             http2_connection_window: Some(DEFAULT_H2_CONN_WINDOW),
             http2_max_connections: 1,
             http2_keep_alive_interval: None,
+            local_address: None,
         }
     }
 }
@@ -1386,6 +1400,15 @@ fn build_transport(
         let proxy = reqwest::Proxy::all(proxy_url)
             .map_err(|e| HttpError::Transport(format!("invalid proxy url: {e}")))?;
         builder = builder.proxy(proxy);
+    }
+    // Egress bind (`--interface`): None = the OS default route (status
+    // quo). Some = every outbound TCP connection binds this local
+    // address before connect (reqwest local_address; proxies are exempt
+    // by the connect target's family mismatch failing on its own — a
+    // proxied connect still dials the proxy, the bind applies there
+    // too, keeping all HTTP egress on the chosen interface).
+    if let Some(ip) = cfg.local_address {
+        builder = builder.local_address(ip);
     }
     // `--check-certificate=false` surface (default false = verification on).
     builder = builder.danger_accept_invalid_certs(cfg.accept_invalid_certs);

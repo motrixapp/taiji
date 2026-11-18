@@ -393,6 +393,7 @@ fn engine_cfg(
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: *b"-TJ0001-PEXENGINE001",
         announce: announces,
         listen_port: 0,

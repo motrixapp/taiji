@@ -171,6 +171,33 @@ taiji <torrent|magnet> -d <dir>
  with `--enable-rpc`, otherwise startup fails with an error (exit 2) — silent
  ignoring has been removed.
 
+## Egress Binding (`--interface`)
+
+```sh
+taiji --interface 10.0.0.5 <torrent|magnet> -d <dir>   # or an interface name: --interface en0
+```
+
+- **Value**: a single IP address or an interface/device name (aria2
+  semantics). A name resolves through the OS interface table (preferring
+  the device's IPv4 address); an unresolvable value logs one warning and
+  the run continues unbound — never a startup refusal.
+- **Effective faces**: HTTP(S) transport connections (every download
+  form — `taiji http`, URL positional, metalink subtasks, RPC tasks,
+  `--input-file` batches), BT peer TCP dials, and the shared UDP socket
+  (uTP + DHT + UDP tracker announce) — all bind the chosen address
+  before connect, so traffic egresses through the chosen interface (the
+  VPN/corporate-LAN case). Binding a v4 address narrows UDP to the v4
+  face (a wildcard v6 face would leak egress off the chosen interface);
+  the same family narrowing applies to a v6 bind.
+- Startup-only (like `--listen-port`): applies at process start; the RPC
+  option surface has no `interface` key.
+- **Declared narrow residual** (still on the default route, disclosed at
+  startup): the FTP transport (control/data channels are dialed inside
+  the FTP client stack), the magnet metadata/discovery phase (the
+  upgraded payload engine honors the bind), and the HTTP-tracker
+  announce face.
+- Unset = zero change (the OS default route).
+
 ## Torrent Creation
 
 ```sh

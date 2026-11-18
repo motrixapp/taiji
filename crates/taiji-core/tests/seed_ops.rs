@@ -220,6 +220,7 @@ async fn seed_engine_cfg(
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         announce,
         listen_port: 0,

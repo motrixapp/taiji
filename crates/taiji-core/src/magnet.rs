@@ -346,6 +346,14 @@ pub struct MagnetTaskConfig {
     /// session re-pushes the snapshot at ban-config change points, and
     /// live metadata tasks read the latest snapshot on every dial.
     pub ip_guard: Option<IpGuardHandle>,
+    /// Egress bind of the upgraded engine (`--interface`, the session
+    /// startup global; passes through [`EngineConfig::egress`] — the
+    /// torrent activation path injects at the same point in
+    /// build_engine_config). The metadata/discovery phase's own sockets
+    /// stay on the default route (declared narrow residual, see the
+    /// GlobalOptions field doc); the payload engine honors the bind.
+    /// None = unbound, zero change.
+    pub egress: Option<std::net::IpAddr>,
 }
 
 /// The followedBy/following GID chain data face (the basis for the RPC
@@ -1849,6 +1857,11 @@ async fn finalize(
     if !cfg.webseeding_enabled {
         engine_cfg.webseeds.clear();
     }
+    // The egress bind passes to the upgraded engine (`--interface`; the
+    // torrent activation path injects at the same point — without the
+    // passthrough an upgraded magnet task would egress unbound while a
+    // .torrent task honors the session global).
+    engine_cfg.egress = cfg.egress;
     // The session metrics pass to the upgraded engine (tracker announce
     // ok/fail, DHT nodes, connection and byte counters feed points —
     // without the passthrough /metrics reads all zeros with a 0/0
@@ -2357,6 +2370,7 @@ mod tests {
             // Existing cases have no ban face (None = no gate, zero
             // behavior change); ban-gate cases inject their own snapshot.
             ip_guard: None,
+            egress: None,
         };
         let root = CancellationToken::new();
         let end = MagnetEngine::spawn(cfg, &root)
@@ -2445,6 +2459,7 @@ mod tests {
             // Existing cases have no ban face (None = no gate, zero
             // behavior change); ban-gate cases inject their own snapshot.
             ip_guard: None,
+            egress: None,
         };
         let root = CancellationToken::new();
         let end = MagnetEngine::spawn(cfg, &root)
@@ -2696,6 +2711,7 @@ mod tests {
             web: None,
             stats: None,
             ip_guard: None,
+            egress: None,
         }
     }
 
@@ -2850,6 +2866,7 @@ mod tests {
             // Existing cases have no ban face (None = no gate, zero
             // behavior change); ban-gate cases inject their own snapshot.
             ip_guard: None,
+            egress: None,
         };
         let root = CancellationToken::new();
         MagnetEngine::spawn(cfg, &root)
@@ -3052,6 +3069,7 @@ mod tests {
             // Existing cases have no ban face (None = no gate, zero
             // behavior change); ban-gate cases inject their own snapshot.
             ip_guard: None,
+            egress: None,
         };
         let faces = vec![MetaFace {
             index: 0,
@@ -3221,6 +3239,7 @@ mod tests {
             web: None,
             stats: None,
             ip_guard: Some(manual_ban_guard(&[([10, 66, 0, 0], [10, 66, 0, 255])])),
+            egress: None,
         };
         let faces = vec![MetaFace {
             index: 0,
@@ -3339,6 +3358,7 @@ mod tests {
             web: None,
             stats: None,
             ip_guard: Some(guard.clone()),
+            egress: None,
         };
         let faces = vec![MetaFace {
             index: 0,
@@ -3492,6 +3512,7 @@ mod tests {
             web: None,
             stats: None,
             ip_guard: Some(guard),
+            egress: None,
         };
         let root = CancellationToken::new();
         MagnetEngine::spawn(cfg, &root)

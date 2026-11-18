@@ -433,6 +433,12 @@ pub(super) struct DialCtx {
     /// inbound and outbound attach; None = no re-check — the test assembly
     /// form).
     pub(super) client_deny: Option<taiji_bt::peer::ClientDenyCheck>,
+    /// Egress bind address (`EngineConfig::egress`, `--interface`): every
+    /// outbound peer TCP dial binds it before connect (the uTP arm rides
+    /// the demux socket, bound at the UDP face — see spawn_udp_face).
+    /// None = the OS default route (zero change). Copied into each
+    /// [`DialJob`] at assembly; a connection-level value, not per-peer.
+    pub(super) egress: Option<std::net::IpAddr>,
 }
 
 impl DialCtx {
@@ -985,6 +991,10 @@ pub(super) fn spawn_peer_dial(
         // silent-endpoint gate (they may dial); trimming only removes the
         // µTP second try for dead addresses, never the dial itself.
         fails: state.silent_book.fails(&addr),
+        // Egress bind (`--interface`): one value per engine, copied into
+        // every dial job (the TCP arm binds before connect; the uTP arm
+        // already rides the demux socket bound at the UDP face).
+        egress: dial.egress,
     };
     // In-flight dial observation (the 30s pool-curve dial_ifl line):
     // synchronous inc at spawn (the observation lower bound is the truth),

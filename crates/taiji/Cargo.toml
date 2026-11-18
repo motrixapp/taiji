@@ -26,6 +26,13 @@ taiji-io = { path = "../taiji-io" }
 # taiji-http/core edges, frozen-seam note in its lib docs).
 taiji-media = { path = "../taiji-media" }
 taiji-rpc = { path = "../taiji-rpc" }
+# Local interface enumeration for the `--interface` device-name -> address
+# resolution (getifaddrs syscall, once at startup, no network IO; the
+# aria2 `SocketCore::getInterfaceAddress` shape). if-addrs 0.13 is an
+# existing workspace dependency (taiji-core/taiji-engine already consume
+# it; rupnp-locked version, zero lock change). Registration note in the
+# workspace Cargo.toml if-addrs row.
+if-addrs = { workspace = true }
 clap = { workspace = true }
 rand = { workspace = true }
 # : the JSON-RPC request-body surface of `taiji import --purge-via-aria2`.

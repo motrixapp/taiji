@@ -583,6 +583,7 @@ mod tests {
             avail_tx_face: Vec::new(),
             ledger_tx,
             client_deny: None,
+            egress: None,
         }
     }
 

@@ -151,6 +151,7 @@ async fn engine_cfg(port: u16, crypto: CryptoPolicy, seeder: Option<SocketAddr>)
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: format!("http://{tracker}/announce"),
         listen_port: port,

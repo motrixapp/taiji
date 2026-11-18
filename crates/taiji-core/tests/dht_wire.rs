@@ -388,6 +388,7 @@ async fn in_process_dht_swarm_announce_peers_found_dial() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: format!("http://{tracker}/announce"),
         listen_port: port,
@@ -559,6 +560,7 @@ async fn udp_tracker_announce_via_demux() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: format!("udp://{tracker_addr}/announce"),
         listen_port: port,
@@ -656,6 +658,7 @@ async fn dht_state_roundtrip() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: format!("http://{tracker}/announce"),
         listen_port: port,
@@ -932,6 +935,7 @@ async fn dht_peers_found_hygiene_rejects_bogon_values_p122() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: format!("http://{tracker}/announce"),
         listen_port: port,
@@ -1048,6 +1052,7 @@ async fn hot_enable_revives_stalled_trackerless_engine() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: String::new(),
         listen_port: port,
@@ -1138,6 +1143,7 @@ async fn hot_disable_then_reenable_is_reversible_and_idempotent() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: String::new(),
         listen_port: port,
@@ -1213,6 +1219,7 @@ async fn hot_toggle_repeated_cycles_remain_idempotent() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: String::new(),
         listen_port: port,
@@ -1303,6 +1310,7 @@ async fn hot_enable_is_rejected_for_private_engine_bep27() {
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: PEER_ID_ENGINE,
         announce: String::new(),
         listen_port: port,

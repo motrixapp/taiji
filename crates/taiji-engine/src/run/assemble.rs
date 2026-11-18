@@ -348,6 +348,11 @@ pub(super) async fn assemble_engine(
         // EngineConfig defaults = aria2-identical values, zero behavior
         // difference; the CLI/session chain overwrites before spawn).
         tracker_options,
+        // Egress bind (`--interface`): consumed by the UDP face spawn
+        // below (uTP + DHT + UDP tracker ride the demux socket) and by
+        // the DialCtx (every outbound peer TCP dial binds before
+        // connect). None = the OS default route, zero change.
+        egress,
     } = cfg;
     let initial_mask = initial_selection
         .as_deref()
@@ -404,7 +409,7 @@ pub(super) async fn assemble_engine(
     // OS ephemeral port (the existing test surface semantics unchanged).
     let listener = bind_listen_with_fallback(listen_port, token).await;
     let actual_port = listener.as_ref().map(|(_, p)| *p).unwrap_or(listen_port);
-    let udp_face = spawn_udp_face(actual_port, token).await;
+    let udp_face = spawn_udp_face(actual_port, egress, token).await;
 
     // ---- NAT surface (port mapping) ----
     // Once the listen port is known, trigger Map (TCP+UDP; the NatActor
@@ -1057,6 +1062,9 @@ pub(super) async fn assemble_engine(
             // ext handshake `v` identity re-check callback (shares the
             // IpGuard snapshot handle; list hot-reloads apply immediately).
             client_deny: Some(client_v_deny_check(&ban_book.guard)),
+            // Egress bind (`--interface`): copied into every DialJob at
+            // spawn_peer_dial; the TCP arm binds before connect.
+            egress,
         },
         state: EngineLoop {
             faces,

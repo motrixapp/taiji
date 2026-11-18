@@ -216,6 +216,7 @@ async fn dual_tier_failover_then_stop_sequence_persists_tracker_rows() {
         initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
+        egress: None,
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         announce: String::new(),
         listen_port: 0,

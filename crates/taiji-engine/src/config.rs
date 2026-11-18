@@ -261,6 +261,22 @@ pub struct EngineConfig {
     /// existing `TrackerOptions::default()` shape — CLI flags stay
     /// default on those two carriers, a stated difference).
     pub tracker_options: TrackerOptions,
+    /// Egress bind address (`--interface`, the aria2-compatible startup
+    /// option; `None` = the OS default route, zero change). Consumed at
+    /// two engine faces: (a) every outbound peer TCP dial binds this
+    /// local address before connect ([`crate::transit::dial_tcp`] — the
+    /// bind-by-address shape of libtorrent `bind_outgoing_socket`,
+    /// `session_impl.cpp`, SO_BINDTODEVICE being the optional upstream
+    /// extra this build does not need); (b) the UDP demux face (uTP +
+    /// DHT + UDP tracker share one socket per family) binds it instead
+    /// of the unspecified address — **all UDP egress (uTP data, DHT,
+    /// tracker announce) rides the chosen address**; the non-matching
+    /// family's face is not spawned (a wildcard face there would leak
+    /// egress outside the chosen interface — the family mismatch of a
+    /// v4/v6 bind is inherent to the single-value semantics, aria2
+    /// `SocketCore::bindAddress` same shape). The TCP listen socket
+    /// (ingress) stays wildcard — multi-listen is the next phase.
+    pub egress: Option<std::net::IpAddr>,
 }
 
 // Hand-written `Debug` (a derive is impossible: the writer/metadata hooks
@@ -293,6 +309,7 @@ impl std::fmt::Debug for EngineConfig {
             .field("stats", &self.stats)
             .field("preset_progress", &self.preset_progress)
             .field("tracker_options", &self.tracker_options)
+            .field("egress", &self.egress)
             .finish()
     }
 }
@@ -557,6 +574,11 @@ pub fn engine_config(
         // behavior difference); CLI/session chains overwrite per options
         // before spawn.
         tracker_options: TrackerOptions::default(),
+        // Egress bind: not mounted by default (None = the OS default
+        // route, zero change); the CLI/session chains inject the
+        // `--interface` value before spawn (the two consumption faces
+        // are the peer TCP dial and the UDP demux, see the field doc).
+        egress: None,
     })
 }
 

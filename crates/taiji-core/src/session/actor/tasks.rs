@@ -329,6 +329,13 @@ impl SessionActor {
                 }
                 config.dht.engine.message_timeout =
                     std::time::Duration::from_secs(dht_message_timeout);
+                // Egress bind (`--interface`, session startup global):
+                // the engine's TCP peer dials and the UDP demux face
+                // (uTP/DHT/UDP-tracker) bind this address instead of
+                // the unspecified address; None = unpowered, zero
+                // change (the field doc declares the narrow residual —
+                // FTP/metadata-phase faces stay on the default route).
+                config.egress = self.global.interface;
                 config.initial_selection = selected_files.clone();
                 let (engine, join) = DownloadEngine::spawn_controlled(
                     config,
@@ -674,6 +681,11 @@ impl SessionActor {
                     // points, live tasks read the latest at each dial — the
                     // push_all_ban_configs extension).
                     ip_guard: Some(self.meta_guard.clone()),
+                    // Egress bind of the upgraded engine (`--interface`;
+                    // the torrent activation path injects at the same
+                    // point — the metadata phase's own sockets stay on
+                    // the default route, declared residual).
+                    egress: self.global.interface,
                 };
                 // Controlled spawn — upgrade notification face (the upgraded
                 // engine handle returns to the session, followedBy served as
@@ -2672,8 +2684,12 @@ impl SessionActor {
             );
         }
         // Runtime option face: timeouts / credentials / proxy / UA / header
-        // / certificate faces.
-        let http_opts = http_task_runtime_options(&options, &http_task::HttpTaskOpts::default())?;
+        // / certificate faces. The base carries the session-global
+        // egress bind (`--interface`; see with_session_interface).
+        let http_opts = http_task_runtime_options(
+            &options,
+            &http_task::HttpTaskOpts::default().with_session_interface(self.global.interface),
+        )?;
         // `--out` sanitization: basename-only domain — path separators,
         // absolute paths, and parent-directory components escaping `--dir`
         // (the out-of-dir write red line) and option-injection shapes
@@ -3799,7 +3815,8 @@ impl SessionActor {
                 max_download_limit: 0,
                 max_upload_limit: 0,
                 hooks: Arc::new(self.global.hooks.clone()),
-                opts: http_task::HttpTaskOpts::default(),
+                opts: http_task::HttpTaskOpts::default()
+                    .with_session_interface(self.global.interface),
                 restore: Some(row),
                 mirror: None,
                 cookies: snap.cookies,
@@ -3870,7 +3887,8 @@ impl SessionActor {
                 max_download_limit: 0,
                 max_upload_limit: 0,
                 hooks,
-                opts: http_task::HttpTaskOpts::default(),
+                opts: http_task::HttpTaskOpts::default()
+                    .with_session_interface(self.global.interface),
                 restore: None,
                 mirror: None,
                 cookies: Vec::new(),

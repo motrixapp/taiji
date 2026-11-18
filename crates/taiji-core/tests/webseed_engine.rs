@@ -187,6 +187,7 @@ async fn engine_downloads_from_webseed_only() {
         initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
+        egress: None,
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         // Empty announce = no tracker: the minimal isolation for
         // pure-webseed supply — zero BT peers is this acceptance's

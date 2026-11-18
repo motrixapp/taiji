@@ -526,6 +526,7 @@ mod tests {
             // behavior change); ban-gate-specific cases inject their
             // own snapshot.
             ip_guard: None,
+            egress: None,
         };
         let root = CancellationToken::new();
         MagnetEngine::spawn(cfg, &root)

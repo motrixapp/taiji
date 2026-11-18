@@ -10,7 +10,7 @@
 //!
 //! Upstream anchor mapping: docs/design/engine.md.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -687,6 +687,12 @@ pub(super) struct DialJob {
     /// allocation) — passed through to PeerConfig for the
     /// connection read-side FrameCodec.
     pub(super) block_arena: Option<Arc<taiji_io::block_arena::BlockArena>>,
+    /// Egress bind address (`--interface`, copied from
+    /// [`super::state::DialCtx::egress`] at assembly): [`dial_tcp`]
+    /// binds it before connect; None = the OS default route. uTP arms
+    /// are unaffected here (they ride the demux socket, bound at the
+    /// UDP face).
+    pub(super) egress: Option<IpAddr>,
 }
 
 /// uTP outbound dial request: destination address + reply end (None
@@ -888,14 +894,41 @@ pub(super) fn outbound_dial_plan(
 
 /// Outbound TCP connect (a 10s budget; returns the failure class —
 /// the INFO result line is aggregated per target by `peer_connect`,
-/// this keeps DEBUG-level granularity).
-pub(super) async fn dial_tcp(addr: SocketAddr) -> Result<TcpStream, &'static str> {
-    let connect = tokio::net::TcpStream::connect(addr);
+/// this keeps DEBUG-level granularity). `bind` = the egress local
+/// address (`--interface`): when set, the socket binds it before
+/// connect (tokio `TcpSocket`; bind-by-address, the shape of
+/// libtorrent `bind_outgoing_socket`, `session_impl.cpp:5368-5456` —
+/// SO_BINDTODEVICE is the optional upstream extra this build does not
+/// need). A bind failure (address vanished / family mismatch) takes
+/// the generic connect-error class with the reason logged — the dial
+/// plan moves on exactly like any other failed attempt, and the
+/// family mismatch is inherent to the single-value semantics (aria2
+/// `SocketCore::bindAddress` binds a v4-only interface the same way).
+pub(super) async fn dial_tcp(
+    addr: SocketAddr,
+    bind: Option<IpAddr>,
+) -> Result<TcpStream, &'static str> {
+    let connect = async {
+        let stream = match bind {
+            None => tokio::net::TcpStream::connect(addr).await?,
+            Some(local) => {
+                let socket = match local {
+                    IpAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+                    IpAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+                }?;
+                // Port 0 = the OS picks the ephemeral source port; only
+                // the address is pinned.
+                socket.bind(SocketAddr::new(local, 0))?;
+                socket.connect(addr).await?
+            }
+        };
+        Ok::<TcpStream, std::io::Error>(stream)
+    };
     match tokio::time::timeout(Duration::from_secs(10), connect).await {
         Ok(Ok(s)) => Ok(s),
         Ok(Err(e)) => {
             let class = super::run::dial::classify_connect_io(e.kind());
-            debug!(target: "taiji::core::engine", %addr, class, %e, "connect failed");
+            debug!(target: "taiji::core::engine", %addr, ?bind, class, %e, "connect failed");
             Err(class)
         }
         Err(_) => {
@@ -980,6 +1013,7 @@ pub(super) async fn peer_connect(job: DialJob) {
         block_arena,
         punch,
         fails,
+        egress,
         // punch_mode stays out of the destructure: the mode gate
         // branches first at the top of the function (the whole job is
         // moved to [`punch_connect_window`]).
@@ -1044,7 +1078,7 @@ pub(super) async fn peer_connect(job: DialJob) {
         }
         match transport {
             Transport::Tcp => {
-                let tcp = match dial_tcp(addr).await {
+                let tcp = match dial_tcp(addr, egress).await {
                     Ok(tcp) => tcp,
                     Err(class) => {
                         dial_attempts.push(class);
@@ -1062,8 +1096,9 @@ pub(super) async fn peer_connect(job: DialJob) {
                         // MSE-first fallback redial = a fresh TCP
                         // connection (same budget; the failed
                         // connection's bytes are not reusable,
-                        // InitiatorMSEHandshakeCommand.cc).
-                        || async move { dial_tcp(addr).await.ok() },
+                        // InitiatorMSEHandshakeCommand.cc) — the egress
+                        // bind applies to the redial too.
+                        || async move { dial_tcp(addr, egress).await.ok() },
                     )
                     .await
                 else {
@@ -1841,12 +1876,79 @@ mod dial_result_log_tests {
             client_deny: None,
             read_pool: None,
             block_arena: None,
+            egress: None,
             punch: false,
             punch_mode: false,
             // The silent-ledger reading defaults to 0 (the full
             // plan); the trim behavior tests override it.
             fails: 0,
         }
+    }
+
+    /// Egress bind (`--interface` -> DialJob.egress -> dial_tcp): the
+    /// configured local address must reach the dial's socket layer,
+    /// observed in two complementary arms. Positive (127.0.0.2
+    /// bindable — Linux routes the whole 127/8 via lo0, macOS after a
+    /// lo0 alias): the accepted peer's address IS the bind and the
+    /// stream's local address agrees. Negative (stock macOS: only
+    /// 127.0.0.1 assigned, the bind is EADDRNOTAVAIL): the dial fails
+    /// against a LIVE listener with the connect-error class — the bind
+    /// was applied (an ignored bind would have connected). The None
+    /// control always runs (the OS pick for a 127.0.0.1 target is
+    /// 127.0.0.1, pinning what the arms are judged against).
+    #[tokio::test]
+    async fn dial_tcp_binds_egress_address() {
+        let bound: IpAddr = "127.0.0.2".parse().unwrap_or_else(|e| panic!("{e}"));
+        let bindable = std::net::TcpListener::bind((bound, 0)).is_ok();
+        if bindable {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap_or_else(|e| panic!("bind: {e}"));
+            let addr = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+            // Bound dial: the server-side peer carries the bind address.
+            let dial = dial_tcp(addr, Some(bound));
+            let accept = listener.accept();
+            let (stream, peer) = tokio::join!(dial, accept);
+            let stream = stream.unwrap_or_else(|class| panic!("bound dial failed: {class}"));
+            let (_sock, peer) = peer.unwrap_or_else(|e| panic!("accept: {e}"));
+            assert_eq!(
+                peer.ip(),
+                bound,
+                "the accepted peer address is the egress bind"
+            );
+            assert_eq!(
+                stream.local_addr().unwrap_or_else(|e| panic!("{e}")).ip(),
+                bound,
+                "the client-side local address agrees"
+            );
+        } else {
+            // Negative arm: a live listener, the dial must fail (the
+            // unassignable bind surfaces as the connect-error class).
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap_or_else(|e| panic!("bind: {e}"));
+            let addr = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+            match dial_tcp(addr, Some(bound)).await {
+                Err("connect-error") => {}
+                other => panic!("the unassignable bind must fail the dial, got: {other:?}"),
+            }
+        }
+        // None control (the status quo): the OS source pick for a
+        // 127.0.0.1 destination is 127.0.0.1, proving the bound
+        // observation is the bind at work, not coincidence.
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("bind: {e}"));
+        let addr2 = listener2.local_addr().unwrap_or_else(|e| panic!("{e}"));
+        let dial = dial_tcp(addr2, None);
+        let accept = listener2.accept();
+        let (_stream, peer) = tokio::join!(dial, accept);
+        let (_sock, peer) = peer.unwrap_or_else(|e| panic!("accept: {e}"));
+        assert_eq!(
+            peer.ip(),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            "unbound control: the OS default source for a loopback target"
+        );
     }
 
     /// Smoke test (the who-was-dialed-why-it-failed INFO line): an

@@ -851,10 +851,11 @@ fn apply_entry(
             }
             cli.auto_save_interval = Some(n);
         }
-        // `interface`: the bind name/IP is stored verbatim (an
-        // acceptance-disclosure face — the connection layer has no
-        // local_addr binding seam, one explicit warning at the run
-        // single point).
+        // `interface`: the bind name/IP is stored verbatim (the egress
+        // bind value face — an IP literal or a device name; parsed once
+        // in run via interface_egress_from_cli, where the name resolves
+        // through the OS interface table and an unresolvable value
+        // warns and runs unbound).
         "interface" => {
             cli_wins!("interface");
             cli.interface = Some(value.to_string());
@@ -1777,7 +1778,10 @@ mod tests {
                 require_crypto: cli.bt_require_crypto,
                 min_level,
             };
-            let opts = crate::build_idle_options(cli, crypto, conn_type);
+            // `--interface` stays unparsed here (the string value face;
+            // the IP/device-name resolution + disclosure happen once in
+            // run — the projection test passes the unbound None).
+            let opts = crate::build_idle_options(cli, crypto, conn_type, None);
             opts.to_session_options(&crate::rpc_config_from_cli(cli))
         };
 

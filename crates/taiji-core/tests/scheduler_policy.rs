@@ -60,6 +60,7 @@ fn spawn_test_engine(
         initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
+        egress: None,
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         // Unreachable tracker: the engine command surface has no network
         // interaction with this test.

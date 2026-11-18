@@ -188,6 +188,11 @@ mod error;
 /// re-exports pointing back here — the engine never references the
 /// session namespace; the feed-point table is in the module docs).
 pub mod metrics;
+/// Opt-in session-metrics JSONL capture (`BH_METRICS_TRACE`, default
+/// off — the offline observability artifact consumed by
+/// `scripts/metrics_report.py`; bounded, warn-and-continue, zero I/O
+/// when the knob is unset).
+pub mod metrics_trace;
 /// Engine recovery face (engine -> session recovery event relay
 /// payloads + recovered-layer persistence row assembly — types and pure
 /// functions belong to the shared vocabulary layer

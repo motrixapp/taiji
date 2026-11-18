@@ -82,6 +82,8 @@
 //! | `BH_PEER_CLASS` | on | exactly `"0"` = off (connection-class policy: local choke-slot exemption + class admission budgets); else on |
 //! | `BH_LOCAL_CONN_FACTOR` | 150 | u64 (no trim), fail->150, clamp [100,500] (%; local budget = ceil(cap x f/100)) |
 //! | `BH_UTP_MAX_PEERS` | single budget | usize after trim, fail/0->caller default (= the current single cap) |
+//! | `BH_METRICS_TRACE` | off | non-empty after trim = Some(path); unset/blank = None (capture off, zero I/O) |
+//! | `BH_METRICS_TRACE_BYTES` | 64MiB | u64 (no trim), fail->64MiB, clamp [1MiB,1GiB] (capture file size cap) |
 //!
 //! # Read-timing classes (zero-behavior-change invariant)
 //!
@@ -1567,6 +1569,55 @@ fn utp_max_peers_of_parts(raw: Option<&str>, default_max: usize) -> usize {
         .unwrap_or(default_max)
 }
 
+/// `BH_METRICS_TRACE` (registry in the module docs): a non-empty value
+/// after trim = `Some(path)` (session-metrics JSONL capture target);
+/// unset/blank = `None` (capture off — the consumer must touch no
+/// filesystem path in that state; zero added I/O). The path's
+/// openability is the consumer's concern (open failure = warn and
+/// continue, never fatal).
+///
+/// Read timing: **construction** — read once where the session-side
+/// trace writer is assembled (session start); not cached (a new
+/// session construction re-reads env).
+pub fn metrics_trace_path() -> Option<std::path::PathBuf> {
+    metrics_trace_path_of_raw(std::env::var("BH_METRICS_TRACE").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested; the env
+/// read shell stays out of the table).
+fn metrics_trace_path_of_raw(raw: Option<&str>) -> Option<std::path::PathBuf> {
+    let v = raw?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(v))
+}
+
+/// Default capture file cap (bytes) for [`metrics_trace_cap_bytes`]:
+/// 64MiB — at the full-snapshot line size (~3KiB at 1 line/s) that is
+/// roughly six hours of coverage, enough for post-hoc analysis of a
+/// whole session without approaching anything disk-filling.
+pub const DEFAULT_METRICS_TRACE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `BH_METRICS_TRACE_BYTES` (registry in the module docs): `u64` parse
+/// (no trim); parse failure/unset -> default 64MiB; effective value
+/// clamped to [1MiB, 1GiB] (the hard bound on the capture file's size
+/// — a bounded-budget discipline: the diagnostic must never be the
+/// thing that fills the disk it is diagnosing).
+///
+/// Read timing: **construction** — same point as
+/// [`metrics_trace_path`]; not cached.
+pub fn metrics_trace_cap_bytes() -> u64 {
+    metrics_trace_cap_bytes_of_raw(std::env::var("BH_METRICS_TRACE_BYTES").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested).
+fn metrics_trace_cap_bytes_of_raw(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_METRICS_TRACE_BYTES)
+        .clamp(1024 * 1024, 1024 * 1024 * 1024)
+}
+
 /// Knob parse decision tables (table-driven; env is process-immutable —
 /// edition 2024 forbids unsafe and tests have no `set_var` — so the
 /// parse faces are driven via the `_of_raw` pure functions; the env read
@@ -2172,5 +2223,52 @@ mod tests {
         assert_eq!(utp_max_peers_of_parts(Some("40"), DEFAULT), 40);
         assert_eq!(utp_max_peers_of_parts(Some(" 40 "), DEFAULT), 40);
         assert_eq!(utp_max_peers_of_parts(Some("1"), DEFAULT), 1);
+    }
+
+    /// `BH_METRICS_TRACE` parse table: unset/blank (including
+    /// whitespace-only) = None (capture off, zero I/O); a non-empty
+    /// value = that path, surrounding trim tolerated.
+    #[test]
+    fn metrics_trace_path_parse_table() {
+        // Default (unset) = None (capture off).
+        assert_eq!(metrics_trace_path_of_raw(None), None);
+        // Blank values = None (empty / whitespace-only — no capture at
+        // an empty path).
+        assert_eq!(metrics_trace_path_of_raw(Some("")), None);
+        assert_eq!(metrics_trace_path_of_raw(Some("   ")), None);
+        // Non-empty = the path (trim tolerated; interior spaces kept).
+        assert_eq!(
+            metrics_trace_path_of_raw(Some("/tmp/trace.jsonl")),
+            Some(std::path::PathBuf::from("/tmp/trace.jsonl"))
+        );
+        assert_eq!(
+            metrics_trace_path_of_raw(Some("  /tmp/with space.jsonl  ")),
+            Some(std::path::PathBuf::from("/tmp/with space.jsonl"))
+        );
+    }
+
+    /// `BH_METRICS_TRACE_BYTES` parse table: default/invalid -> 64MiB;
+    /// legal values pass through after clamp to [1MiB, 1GiB] (the
+    /// bounded-budget guard: the capture cannot be inflated past 1GiB
+    /// or shrunk under 1MiB).
+    #[test]
+    fn metrics_trace_cap_bytes_parse_table() {
+        const MIB: u64 = 1024 * 1024;
+        // Default (unset) = 64MiB.
+        assert_eq!(metrics_trace_cap_bytes_of_raw(None), 64 * MIB);
+        // Invalid (non-numeric / negative sign / empty) = default.
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("abc")), 64 * MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("-1")), 64 * MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("")), 64 * MIB);
+        // Legal values pass through.
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("33554432")), 32 * MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("2097152")), 2 * MIB);
+        // Clamped to [1MiB, 1GiB] (0 -> floor; 2GiB -> ceiling).
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("0")), MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("1048576")), MIB);
+        assert_eq!(
+            metrics_trace_cap_bytes_of_raw(Some("9999999999")),
+            MIB * 1024
+        );
     }
 }

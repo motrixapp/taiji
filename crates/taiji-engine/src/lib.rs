@@ -332,6 +332,12 @@ mod tests;
 /// inline tests; the test bodies are kept verbatim).
 mod config_tests;
 #[cfg(test)]
+/// State-consistency invariant sweep (the per-round self-audit
+/// vehicle over the first-batch remotely-influenced structures; test
+/// builds only — the harness and the in-crate suites call it after
+/// their rounds, nothing of it exists in non-test compilation).
+mod invariant;
+#[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
 /// Swarm simulation harness over the determinism seams (SPEC G6): the

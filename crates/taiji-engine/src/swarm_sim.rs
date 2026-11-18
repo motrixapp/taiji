@@ -499,6 +499,11 @@ impl Swarm {
             self.virtual_elapsed += rest;
         }
         dispatch_face(&mut self.faces[0], 0);
+        // Post-round invariant sweep (the state-audit vehicle: the
+        // request-window book, the choke-round book and the completion
+        // faces re-derive themselves after every virtual-time round —
+        // a mid-round corruption surfaces here, at the round boundary).
+        crate::invariant::sweep_face(&self.faces[0]);
         self.settle().await;
         self.clock.now()
     }
@@ -606,7 +611,12 @@ impl Swarm {
         let need = [self.faces[0].piece_count];
         on_piece_verified(&mut self.faces, 0, index);
         on_piece_written(&mut self.faces, 0, index, &need, None);
-        recheck_face_completion(&mut self.faces, &need, false)
+        let done = recheck_face_completion(&mut self.faces, &need, false);
+        // Post-completion sweep: the verify/write/clear chain moved all
+        // five completion encodings at once — re-derive their agreement
+        // (plus the blocks_sent row clearance) at every piece boundary.
+        crate::invariant::sweep_faces(&self.faces);
+        done
     }
 
     /// Pieces whose ledgers are fully settled (every block in a

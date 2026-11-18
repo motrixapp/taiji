@@ -881,6 +881,153 @@ impl FaceState {
         debug_assert_eq!(row.cuid, cuid, "peer_state row key/cuid mismatch");
         row
     }
+
+    /// Choke-round book sweep (test-build vehicle, run after every
+    /// engine round by `crate::invariant`; nothing of it exists in
+    /// non-test compilation). The peer tables are written by four
+    /// independent writers — the registration arm, the leave arm, the
+    /// choke rounds/preemptive pass, the advertisement arms — all
+    /// remotely influenced through connection lifecycles; each check
+    /// re-derives a property they must preserve jointly:
+    ///
+    /// - `peers`/`peer_cuids` parallel order and cuid uniqueness (the
+    ///   red line the owner-index scheme depends on: slot ownership
+    ///   keys off peer_cuids indexes);
+    /// - every peer_state row sits under its own key and has a live
+    ///   connection slot (registration pushes row + cuid together, the
+    ///   leave arm removes both — a row without a cuid slot is a lost
+    ///   leave, a leak that also freezes its choke stamps);
+    /// - `regular_unchoked` / `parole_peers` reference registered rows
+    ///   only (both are scrubbed by the leave arm — a stale cuid would
+    ///   feed the next round's keep-position key and the parole gate
+    ///   with a ghost);
+    /// - `peer_avail` / `peer_seeds` exist only alongside a peer_state
+    ///   row (the documented avail-row invariant the leave arm's
+    ///   fallback removal defends — an orphaned bitmap keeps skewing
+    ///   the rarity counts forever);
+    /// - no timestamp lies in the future (every stamp is written from
+    ///   this face's own clock — a future stamp means some writer read
+    ///   a different clock, breaking every window/age judgment that
+    ///   subtracts from `now`).
+    #[cfg(test)]
+    pub(super) fn check_peer_book_invariant(&self, now: Instant) {
+        debug_assert_eq!(
+            self.peers.len(),
+            self.peer_cuids.len(),
+            "peers/peer_cuids parallel order broken"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for &cuid in &self.peer_cuids {
+            debug_assert!(
+                seen.insert(cuid),
+                "duplicate cuid {cuid} in peer_cuids (the owner-index bijection)"
+            );
+        }
+        for (&cuid, row) in self.peer_state.iter() {
+            debug_assert_eq!(
+                row.cuid, cuid,
+                "peer_state row key/cuid mismatch (global re-derivation)"
+            );
+            debug_assert!(
+                seen.contains(&cuid),
+                "peer_state row {cuid} has no live connection slot (lost leave?)"
+            );
+            debug_assert!(
+                row.registered_at <= now,
+                "peer {cuid}: registered_at in the future"
+            );
+            if let Some(at) = row.last_unchoke {
+                debug_assert!(at <= now, "peer {cuid}: last_unchoke in the future");
+            }
+            if let Some(at) = row.last_opt_unchoke {
+                debug_assert!(at <= now, "peer {cuid}: last_opt_unchoke in the future");
+            }
+            if let Some(at) = row.utp_mute_since {
+                debug_assert!(at <= now, "peer {cuid}: utp_mute_since in the future");
+            }
+        }
+        for cuid in &self.regular_unchoked {
+            debug_assert!(
+                self.peer_state.contains_key(cuid),
+                "regular_unchoked holds unregistered cuid {cuid} (leave-arm scrub lost)"
+            );
+        }
+        for cuid in &self.parole_peers {
+            debug_assert!(
+                self.peer_state.contains_key(cuid),
+                "parole_peers holds unregistered cuid {cuid} (leave-arm scrub lost)"
+            );
+        }
+        for cuid in self.peer_avail.keys() {
+            debug_assert!(
+                self.peer_state.contains_key(cuid),
+                "peer_avail row for unregistered cuid {cuid} (orphaned bitmap, rarity skew)"
+            );
+        }
+        for cuid in &self.peer_seeds {
+            debug_assert!(
+                self.peer_avail.contains_key(cuid),
+                "peer_seeds member {cuid} without an avail row"
+            );
+        }
+    }
+
+    /// Piece-completion face sweep (test-build vehicle, run after
+    /// every engine round by `crate::invariant`; nothing of it exists
+    /// in non-test compilation). The verified model, the written model,
+    /// their counters, the written bitmap and the completion verdict
+    /// are five redundant encodings of the same progress, advanced by
+    /// different arms (verify events, write events, cross-face
+    /// propagation, selection rebuilds) — each check re-derives the
+    /// encoding agreement wholesale:
+    ///
+    /// - `verified_count` == the verified model's done popcount (they
+    ///   advance together in `on_piece_verified` / at restore);
+    /// - `written_count` == the written model's done popcount == the
+    ///   written bitmap's popcount (`on_piece_written` sets all three
+    ///   at one event);
+    /// - the bitmap-never-leads invariant: every written piece is
+    ///   verified (only bytes that passed verification are on disk —
+    ///   the persisted-bitmap safety argument; `written_progress` may
+    ///   lag `progress`, never lead it);
+    /// - `selected_written_count <= written_count` (the selection
+    ///   rebuild counts a subset of written pieces);
+    /// - the completion verdict is deliberately NOT re-derived here:
+    ///   it depends on the externally supplied `required` /
+    ///   selection mask (recheck face), which the face does not hold —
+    ///   a check without those inputs would be vacuous.
+    #[cfg(test)]
+    pub(super) fn check_completion_invariant(&self) {
+        let mut verified = 0usize;
+        let mut written = 0usize;
+        for i in 0..self.piece_count as u64 {
+            let v = self.progress.piece_done_global(i);
+            let w = self.written_progress.piece_done_global(i);
+            debug_assert!(
+                !w || v,
+                "bitmap-never-leads broken at piece {i}: written but not verified"
+            );
+            debug_assert_eq!(
+                self.written_bits.get(i as usize),
+                w,
+                "written bitmap disagrees with the written model at piece {i}"
+            );
+            verified += usize::from(v);
+            written += usize::from(w);
+        }
+        debug_assert_eq!(
+            self.verified_count, verified,
+            "verified_count != the verified model's done count"
+        );
+        debug_assert_eq!(
+            self.written_count, written,
+            "written_count != the written model's done count"
+        );
+        debug_assert!(
+            self.selected_written_count <= self.written_count,
+            "selected_written_count > written_count (subset violated)"
+        );
+    }
     /// The verified-basis synthesized bitmap (the wire advertisement
     /// face: the registration arm's SendBitfield and RPC query
     /// readings — hash-passed pieces are advertised, matching the HAVE

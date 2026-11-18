@@ -1647,6 +1647,34 @@ impl PieceSentLedger {
             }
         }
     }
+
+    /// Row-level state-consistency check (the self-audit discipline:
+    /// remotely influenced multi-writer structures re-derive their own
+    /// integrity; swept after every engine round by the test-build
+    /// vehicle `crate::invariant` — nothing of it exists in non-test
+    /// compilation; `debug_assert!` keeps the checks honest should the
+    /// fn ever be promoted to a debug production sweep).
+    ///
+    /// WHY the row width: `expected_blocks` is the same derivation the
+    /// two creation sites use (`piece_bytes[piece].div_ceil(BLOCK_SIZE)
+    /// .max(1)`). A row built from a different grid would mis-place
+    /// block coordinates (begin -> slot index silently reads/writes the
+    /// wrong slot), and a zero-width row would silently drop every
+    /// write (`slot()` indexes nothing) — both are wholesale
+    /// re-derivable from the face's piece table, so they are checked
+    /// here instead of trusting the creation sites.
+    #[cfg(test)]
+    pub(super) fn check_invariant(&self, expected_blocks: usize) {
+        debug_assert!(
+            !self.slots.is_empty(),
+            "blocks_sent row with a zero-width slot grid"
+        );
+        debug_assert_eq!(
+            self.slots.len(),
+            expected_blocks,
+            "blocks_sent row width != the piece's block grid"
+        );
+    }
 }
 
 /// Block-arrival event (the transit forwarding task -> the main loop's
@@ -2875,6 +2903,72 @@ pub(super) fn on_block_arrived(face: &mut FaceState, index: u32, begin: u32, now
     // kept so the arrival-arm call face / injectable-clock test shape
     // stays unchanged.
     let _ = now;
+}
+
+/// Request-window book sweep — the face-level companion of
+/// [`PieceSentLedger::check_invariant`] (test-build vehicle, run after
+/// every engine round by `crate::invariant`; nothing of it exists in
+/// non-test compilation). The `blocks_sent` table is the multi-writer
+/// crossroads of the dispatch round, the arrival arm, the reply drain,
+/// the piece-settle clears and the peer-leave owner repair; each check
+/// below re-derives a property those writers must preserve jointly:
+///
+/// - coordinates in range: a row keyed outside the face's piece space
+///   would never be cleared by piece settle and would wedge every
+///   reissue/holder read that trusts `piece < piece_count`;
+/// - row width == the piece's block grid (the same derivation as both
+///   creation sites);
+/// - rows exist only for still-missing pieces: verification clears the
+///   whole row ([`crate::faces::on_piece_verified`]) and the refetch
+///   arm discards rows for done pieces — a surviving row means the
+///   clear path lost a case (its in-flight accounting would keep
+///   supplying a piece that can never verify again);
+/// - slot owners are live `peer_cuids` indexes (or [`NO_OWNER`]):
+///   ownership is the peer_cuids index and the leave arm repairs the
+///   shift via [`PieceSentLedger::reindex_owners`] — an out-of-range
+///   owner is a lost repair, silently mis-attributing every later
+///   hash-failure ban decision;
+/// - with the two-phase switch OFF the `Settling*` states are
+///   documented unreachable (the arrival emission is switch-gated at
+///   the source, transit.rs) — one appearing anyway means a write
+///   bypassed the gate.
+#[cfg(test)]
+pub(super) fn check_blocks_sent_invariant(face: &FaceState) {
+    let two_phase = two_phase_ledger();
+    let block = u64::from(merkle::BLOCK_SIZE);
+    for (&piece, ledger) in face.blocks_sent.iter() {
+        debug_assert!(
+            (piece as usize) < face.piece_count,
+            "blocks_sent row for piece {piece} outside the face's piece space"
+        );
+        let expected = face
+            .piece_bytes
+            .get(piece as usize)
+            .copied()
+            .unwrap_or(block)
+            .div_ceil(block)
+            .max(1) as usize;
+        ledger.check_invariant(expected);
+        debug_assert!(
+            !face.progress.piece_done_global(piece),
+            "blocks_sent row survived verification of piece {piece}"
+        );
+        for (bi, slot) in ledger.slots().iter().enumerate() {
+            if slot.owner != NO_OWNER {
+                debug_assert!(
+                    (slot.owner as usize) < face.peer_cuids.len(),
+                    "piece {piece} block {bi}: owner index {} outside peer_cuids",
+                    slot.owner
+                );
+            }
+            if !two_phase {
+                debug_assert!(
+                    !matches!(slot.state, BlockState::Settling | BlockState::SettlingDup),
+                    "piece {piece} block {bi}: Settling state with the two-phase knob off"
+                );
+            }
+        }
+    }
 }
 
 /// Builds the dispatch spread's "claimed" set (extracted from the dispatch

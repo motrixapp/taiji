@@ -57,6 +57,42 @@ fn as_arr<'a>(v: &'a Value, ctx: &str) -> &'a Vec<Value> {
     }
 }
 
+/// Semantic error grading (the misuse/internal distinction, labels and
+/// statistics only): calls rejected by this layer's input validation
+/// (parameter decode, unknown method) count as misuse; a method that
+/// reached execution and failed inside the session (a lookup of an
+/// unknown GID) counts as internal. The counters are read through the
+/// same snapshot the `taiji_rpc_errors_total{grade}` family renders.
+#[tokio::test]
+async fn rpc_error_grades_count_misuse_and_internal() {
+    let st = state(Some("grade-test-secret"));
+    let zero = st.session.metrics().snapshot();
+    assert_eq!(zero.rpc_error_misuse_total, 0);
+    assert_eq!(zero.rpc_error_internal_total, 0);
+
+    // Misuse 1: parameter decode (the gid parameter must be a string).
+    let r = call_auth(&st, "tellStatus", vec![json!(7)]).await;
+    assert_ne!(r.code, 0, "{:?}", r.payload);
+    // Misuse 2: unknown method (canonical face off -> no aria2.*
+    // aliases).
+    let r = call_auth(&st, "aria2.noSuchMethod", vec![]).await;
+    assert_ne!(r.code, 0, "{:?}", r.payload);
+    // Internal: execution failure inside the session (unknown GID — a
+    // free-form session text, deliberately out of the misuse scope).
+    let r = call_auth(&st, "tellStatus", vec![json!("0000000000000000")]).await;
+    assert_ne!(r.code, 0, "{:?}", r.payload);
+
+    let s = st.session.metrics().snapshot();
+    assert_eq!(
+        s.rpc_error_misuse_total, 2,
+        "param decode + unknown method grade as caller misuse"
+    );
+    assert_eq!(
+        s.rpc_error_internal_total, 1,
+        "the session-execution failure grades as internal"
+    );
+}
+
 #[tokio::test]
 async fn network_change_is_native_authenticated_and_retires_resolution_context() {
     let no_secret = state(None);

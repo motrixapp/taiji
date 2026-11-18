@@ -662,6 +662,10 @@
 
             let mut rng = XorShift(0x2545F4914F6CDD1Du64);
             leecher_choke_round(&mut face, &mut rng, None, true);  // static arm (default-off: no behavior change; class arm on = production default)
+            // Post-round invariant sweep (the state-audit vehicle): the
+            // round just rewrote the choke-round book — re-derive its
+            // integrity (slot sets, key agreement, leave closures).
+            crate::invariant::sweep_face(&face);
             // Read frames from every peer until drained: tally unchoke(1)/
             // choke(0) landings.
             let mut unchoke_by = [0usize; 4];
@@ -707,6 +711,7 @@
             // when round != 0, cc:231-233) -> zero frames in both rows
             // (idempotent landings).
             leecher_choke_round(&mut face, &mut rng, None, true);  // static arm (default-off: no behavior change; class arm on = production default)
+            crate::invariant::sweep_face(&face);
             for remote in remotes.iter_mut() {
                 assert!(
                     read_wire_msg_id(remote).await.is_none(),
@@ -740,6 +745,7 @@
             let mut extra_unchoke = 0usize;
             for _ in 0..2 {
                 leecher_choke_round(&mut face, &mut rng, None, true);  // static arm (default-off: no behavior change; class arm on = production default)
+                crate::invariant::sweep_face(&face);
                 for (i, remote) in remotes.iter_mut().enumerate() {
                     while let Some(id) = read_wire_msg_id(remote).await {
                         match id {
@@ -1208,7 +1214,7 @@
     /// Minimal FaceState (v1 single file, `piece_count` pieces of 16KiB
     /// each, no peer connections) — driven by the pure functions for
     /// advertisement bookkeeping, piece selection, and dispatch gating.
-    fn adv_face(piece_count: usize) -> FaceState {
+    pub(crate) fn adv_face(piece_count: usize) -> FaceState {
         let (block_tx, _rx) = mpsc::channel(1);
         let (fetch_tx, _frx) = mpsc::channel(1);
         // Final-flush barrier seam: the fixture has no pipeline
@@ -3981,6 +3987,11 @@
         // (1) hash pass: the HAVE broadcast is immediate, the progress and
         // advertising bitmaps advance, completion does not flip.
         on_piece_verified(std::slice::from_mut(&mut face), 0, 0);
+        // Post-event invariant sweep (the state-audit vehicle): the
+        // verified half of the completion encodings just moved —
+        // re-derive counters/models/bitmap agreement (written still
+        // empty: the bitmap-never-leads direction is exercised below).
+        crate::invariant::sweep_face(&face);
         let (id, body) = read_wire_frame(&mut remote)
             .await
             .unwrap_or_else(|| panic!("the HAVE frame never arrived after hash pass"));
@@ -4015,6 +4026,7 @@
         // served; completion still does not flip (piece 1 not yet
         // flushed).
         on_piece_written(std::slice::from_mut(&mut face), 0, 0, &[2], None);
+        crate::invariant::sweep_face(&face);
         assert!(face.written_bits.get(0), "flushing sets the written bit");
         let n = partial
             .read_block(0, 0, &mut buf)
@@ -4029,6 +4041,7 @@
         on_piece_verified(std::slice::from_mut(&mut face), 0, 1);
         assert!(!face.completed, "all hash-passed does not equal complete (the written semantics)");
         let all = on_piece_written(std::slice::from_mut(&mut face), 0, 1, &[2], None);
+        crate::invariant::sweep_face(&face);
         assert!(all, "all pieces flushed -> the whole face complete");
         assert!(face.completed, "the face completion flag flips with the last piece written");
 

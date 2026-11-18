@@ -1933,6 +1933,11 @@ fn bt_max_peers_override_of(cli_value: u64, explicit: bool) -> Option<usize> {
 }
 
 fn main() {
+    // Structured panic report (version + build profile + counter
+    // snapshot + backtrace): installed before any runtime/clap work so
+    // every later panic carries its triage package.
+    install_panic_hook();
+
     // Media exec-shim hook (the media spec §8.6): a child spawned by
     // taiji-media's orchestrator re-enters this executable with the
     // `__taiji-media-exec` marker argv; the shim applies the child
@@ -2128,6 +2133,115 @@ fn main() {
     if code != 0 {
         std::process::exit(code);
     }
+}
+
+// ---- Structured panic report (the triage package) ----
+
+/// Process-level metrics slot for the panic hook: armed once when a
+/// session (or the bare engine's observation carrier) exists; a panic
+/// before that still prints the report, with the counters arm
+/// explicitly marked unavailable.
+static PANIC_METRICS: std::sync::OnceLock<Arc<taiji_core::session::metrics::SessionMetrics>> =
+    std::sync::OnceLock::new();
+
+/// Build profile label (`debug_assertions` carries the
+/// invariant-sweep/overflow-check posture — the first triage fork).
+const BUILD_PROFILE: &str = if cfg!(debug_assertions) {
+    "debug"
+} else {
+    "release"
+};
+
+/// The panic report body (fixed, greppable format — the design goal is
+/// "a user paste is enough to act on": version, build profile, panic +
+/// location + thread, the key-counter snapshot, backtrace). Pure
+/// formatting over pre-extracted values so the unit tests pin the
+/// shape without driving a real panic.
+fn format_panic_report(
+    version: &str,
+    payload: &str,
+    location: &str,
+    thread: &str,
+    counters: Option<&str>,
+    backtrace: &str,
+) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("===== taiji panic report =====\n");
+    out.push_str("version: ");
+    out.push_str(version);
+    out.push('\n');
+    out.push_str("build: ");
+    out.push_str(BUILD_PROFILE);
+    out.push('\n');
+    out.push_str("panic: ");
+    out.push_str(payload);
+    out.push('\n');
+    out.push_str("location: ");
+    out.push_str(location);
+    out.push('\n');
+    out.push_str("thread: ");
+    out.push_str(thread);
+    out.push('\n');
+    match counters {
+        Some(c) => {
+            out.push_str("counters: ");
+            out.push_str(c);
+            out.push('\n');
+        }
+        None => out.push_str("counters: unavailable (no session metrics armed yet)\n"),
+    }
+    out.push_str("backtrace:\n");
+    out.push_str(backtrace);
+    out.push_str("\n===== end taiji panic report =====\n");
+    out
+}
+
+/// Arm the panic-report metrics slot (idempotent, first arming wins:
+/// the idle/download+rpc session actor and the bare engine form's
+/// observation carrier share the one process slot).
+fn arm_panic_metrics(metrics: Arc<taiji_core::session::metrics::SessionMetrics>) {
+    let _ = PANIC_METRICS.set(metrics);
+}
+
+/// Install the structured panic hook (the single drop-in point, before
+/// any runtime work so config/engine panics are covered too). Only the
+/// default PRINTING is replaced — panic semantics (unwind and the
+/// process exit paths) are untouched; the process still dies after the
+/// report. The hook formats exactly once at panic time and writes once
+/// to stderr: no logging-stack dependency (it must work before tracing
+/// initializes), no per-field allocations beyond the single report
+/// buffer.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        // Payload extraction (the classic downcast pair; a non-string
+        // payload falls back to the placeholder — never omit the panic
+        // line).
+        let p = info.payload();
+        let payload = if let Some(s) = p.downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = p.downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "<non-string panic payload>"
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let thread = std::thread::current();
+        // force_capture: the report must carry a backtrace even with
+        // RUST_BACKTRACE unset (stable std; no new dependency).
+        let counters = PANIC_METRICS.get().map(|m| m.panic_counter_line());
+        let report = format_panic_report(
+            &taiji_core::version_string(),
+            payload,
+            &location,
+            thread.name().unwrap_or("<unnamed>"),
+            counters.as_deref(),
+            &std::backtrace::Backtrace::force_capture().to_string(),
+        );
+        eprint!("{report}");
+    }));
 }
 
 async fn run(cli: Cli) -> i32 {
@@ -3911,10 +4025,12 @@ async fn run_download(
             // download mode has no /metrics surface). Inject
             // process-level session metrics; at shutdown
             // `block_stage_log_summary` logs the block-stage
-            // histogram summary.
-            c.stats = Some(std::sync::Arc::new(
-                taiji_core::session::metrics::SessionMetrics::new(),
-            ));
+            // histogram summary. The same instance arms the
+            // panic-report slot (a mid-download panic carries the
+            // counter snapshot).
+            let stats = std::sync::Arc::new(taiji_core::session::metrics::SessionMetrics::new());
+            arm_panic_metrics(stats.clone());
+            c.stats = Some(stats);
             // Rate-limit topology ( batch C: the `--max-overall-*`
             // global bucket + the `--max-*` per-task per_torrent bucket;
             // the aria2 UnitNumberOptionHandler "0 = unlimited" same rule
@@ -4323,6 +4439,9 @@ async fn run_idle(cfg: taiji_rpc::RpcConfig, opts: IdleOptions) -> i32 {
     let (session, actor_join) =
         taiji_core::session::SessionActor::spawn_with_persist(session_options, persist.clone());
     let session = Arc::new(session);
+    // Panic-report carrier: the session's metric face arms the
+    // process slot (a later panic carries the counter snapshot).
+    arm_panic_metrics(session.metrics().clone());
     let shutdown = CancellationToken::new();
     let secret_set = cfg.secret.is_some();
     let server = match taiji_rpc::serve(cfg, session.clone(), shutdown.clone()).await {
@@ -5029,6 +5148,8 @@ async fn run_input_file(
         persist.clone(),
     );
     let session = std::sync::Arc::new(session);
+    // Panic-report carrier (the input-file batch form's arming).
+    arm_panic_metrics(session.metrics().clone());
 
     // Create tasks line by line (list order; in-line tab options are
     // written later and override the CLI shared/kind deltas).
@@ -5295,6 +5416,8 @@ async fn run_download_with_rpc(
     let (session, actor_join) =
         taiji_core::session::SessionActor::spawn_with_persist(session_options, persist.clone());
     let session = Arc::new(session);
+    // Panic-report carrier (the download+rpc form's arming).
+    arm_panic_metrics(session.metrics().clone());
     let shutdown = CancellationToken::new();
     let secret_set = cfg.secret.is_some();
     let server = match taiji_rpc::serve(cfg, session.clone(), shutdown.clone()).await {
@@ -5680,6 +5803,68 @@ fn init_tracing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The panic report format (the triage package): every greppable
+    /// marker at its fixed line — version (the getVersion face),
+    /// build, panic payload, location, thread, the counters
+    /// passthrough, the backtrace block, and the closing fence.
+    #[test]
+    fn panic_report_format_is_fixed_and_greppable() {
+        let report = format_panic_report(
+            "taiji/9.9.9",
+            "index out of bounds: the len is 3 but the index is 7",
+            "src/foo.rs:42:13",
+            "worker-1",
+            Some("uptime_s=12 bytes_down=1024 blocks_verified=3 conns_tcp=2"),
+            "   0: foo\n   1: bar",
+        );
+        for marker in [
+            "===== taiji panic report =====",
+            "version: taiji/9.9.9",
+            "build: ",
+            "panic: index out of bounds: the len is 3 but the index is 7",
+            "location: src/foo.rs:42:13",
+            "thread: worker-1",
+            "counters: uptime_s=12 bytes_down=1024 blocks_verified=3 conns_tcp=2",
+            "backtrace:",
+            "   0: foo",
+            "===== end taiji panic report =====",
+        ] {
+            assert!(
+                report.contains(marker),
+                "panic report misses {marker:?}:\n{report}"
+            );
+        }
+    }
+
+    /// A panic before any session exists must say so explicitly rather
+    /// than fabricating a zero counters line (honest-unavailable arm).
+    #[test]
+    fn panic_report_without_metrics_says_unavailable() {
+        let report = format_panic_report("taiji/0.2.0", "boom", "x.rs:1:1", "main", None, "");
+        assert!(
+            report.contains("counters: unavailable (no session metrics armed yet)"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("counters: uptime_s"),
+            "no fabricated counter values: {report}"
+        );
+    }
+
+    /// The version line uses the same frozen getVersion face (the
+    /// `taiji/<semver>` prefix RPC getVersion returns — one version
+    /// string everywhere).
+    #[test]
+    fn panic_report_version_uses_getversion_face() {
+        let version = taiji_core::version_string();
+        assert!(version.starts_with("taiji/"), "frozen prefix: {version}");
+        let report = format_panic_report(&version, "x", "l", "t", None, "");
+        assert!(
+            report.contains(&format!("version: {version}\n")),
+            "{report}"
+        );
+    }
 
     /// Decision table: positional prefix dispatch —
     /// magnet/http(s)/ftp(s) (scheme case-insensitive) go to the

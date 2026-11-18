@@ -1494,6 +1494,27 @@ pub(crate) fn render(
                 .to_string(),
         },
     );
+    // Failed calls by semantic grade (the misuse/internal distinction,
+    // labels only): misuse = rejected by this layer's input validation
+    // (a client bug); internal = the method failed inside
+    // session/engine execution (triage ours).
+    out.push_str(
+        "# HELP taiji_rpc_errors_total Failed JSON-RPC calls by semantic grade (misuse = rejected by RPC input validation, a client bug; internal = method execution failed inside session/engine).\n\
+         # TYPE taiji_rpc_errors_total counter\n",
+    );
+    for (grade, n) in [
+        ("misuse", snap.rpc_error_misuse_total),
+        ("internal", snap.rpc_error_internal_total),
+    ] {
+        write_sample(
+            &mut out,
+            Sample {
+                name: "taiji_rpc_errors_total",
+                labels: &[("grade", grade.to_string())],
+                value: n.to_string(),
+            },
+        );
+    }
     out.push_str(
         "# HELP taiji_rpc_request_duration_seconds JSON-RPC call latency (dispatch entry; gate for RPC p99).\n\
          # TYPE taiji_rpc_request_duration_seconds histogram\n",
@@ -1795,6 +1816,8 @@ mod tests {
         snap.rpc_conn_rejected_total_scope_total = 3;
         snap.rpc_conn_rejected_total_scope_per_ip = 1;
         snap.rpc_auth_fail_total = 2;
+        snap.rpc_error_misuse_total = 5;
+        snap.rpc_error_internal_total = 2;
         // The five peer-leave reasons (explicit rows in the render family).
         snap.peer_leaves_local_total = 3;
         snap.peer_leaves_peer_closed_total = 11;
@@ -1853,6 +1876,8 @@ mod tests {
             "taiji_http_stolen_total 2",
             "taiji_rpc_requests_total{method=\"getVersion\"} 3",
             "taiji_rpc_requests_total{method=\"unknown\"} 1",
+            "taiji_rpc_errors_total{grade=\"misuse\"} 5",
+            "taiji_rpc_errors_total{grade=\"internal\"} 2",
             "taiji_rpc_request_duration_seconds_bucket{le=\"0.001\"} 2",
             "taiji_rpc_request_duration_seconds_bucket{le=\"+Inf\"} 4",
             "taiji_rpc_request_duration_seconds_sum 6",
@@ -2799,6 +2824,12 @@ mod tests {
             "taiji_rpc_requests_total{method=\"taiji.stopRecording\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.clearMediaArchive\"} 0",
             "taiji_rpc_requests_total{method=\"unknown\"} 0",
+            // The misuse/internal error-grade family (labels only; the
+            // baseline review this golden list exists to force).
+            "# HELP taiji_rpc_errors_total Failed JSON-RPC calls by semantic grade (misuse = rejected by RPC input validation, a client bug; internal = method execution failed inside session/engine).",
+            "# TYPE taiji_rpc_errors_total counter",
+            "taiji_rpc_errors_total{grade=\"misuse\"} 0",
+            "taiji_rpc_errors_total{grade=\"internal\"} 0",
             "# HELP taiji_rpc_request_duration_seconds JSON-RPC call latency (dispatch entry; gate for RPC p99).",
             "# TYPE taiji_rpc_request_duration_seconds histogram",
             "taiji_rpc_request_duration_seconds_bucket{le=\"0.001\"} 0",

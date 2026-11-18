@@ -201,6 +201,17 @@ pub(crate) async fn process_call(
     metrics.note_rpc_request(slot);
     let started = std::time::Instant::now();
     let resp = process_call_inner(st, raw_method, params, id, in_multicall, ip).await;
+    // Semantic error grading (labels/statistics only, the misuse vs
+    // internal distinction): every failing call passes here exactly
+    // once — batch items and multicall sub-calls included.
+    if resp.code != 0 {
+        let misuse = resp
+            .payload
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| crate::aria2::error::is_caller_misuse(resp.code, m));
+        metrics.note_rpc_error(misuse);
+    }
     metrics.observe_rpc_duration(started.elapsed());
     resp
 }

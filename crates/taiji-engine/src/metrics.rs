@@ -453,6 +453,14 @@ pub struct MetricsSnapshot {
     /// families sum to the same source as `bytes_down_total`).
     pub bytes_down_tcp_total: u64,
     pub bytes_down_utp_total: u64,
+    /// Failed JSON-RPC calls by semantic grade (the misuse/internal
+    /// distinction; rendered as `taiji_rpc_errors_total{grade="misuse"
+    /// |"internal"}` — misuse = rejected by the RPC layer's own input
+    /// validation, a client bug; internal = the method failed inside
+    /// the session/engine. Labels/statistics only: no error-type
+    /// restructuring).
+    pub rpc_error_misuse_total: u64,
+    pub rpc_error_internal_total: u64,
     /// Connection gauges (sum of engine slots).
     pub conn_tcp_in: u64,
     pub conn_tcp_out: u64,
@@ -753,6 +761,8 @@ impl Default for MetricsSnapshot {
             bytes_up_total: 0,
             bytes_down_tcp_total: 0,
             bytes_down_utp_total: 0,
+            rpc_error_misuse_total: 0,
+            rpc_error_internal_total: 0,
             conn_tcp_in: 0,
             conn_tcp_out: 0,
             conn_utp_in: 0,
@@ -1123,6 +1133,18 @@ pub struct SessionMetrics {
     rpc_conn_rejected_total: AtomicU64,
     rpc_conn_rejected_per_ip: AtomicU64,
     rpc_auth_fail_total: AtomicU64,
+    /// Failed JSON-RPC calls by semantic grade (the misuse/internal
+    /// distinction, labels only): misuse = the call was rejected by
+    /// the RPC layer's own input validation (malformed protocol shape,
+    /// parameter decode, closed value domains, caps, unknown method,
+    /// bad credentials) — a client bug; internal = the method reached
+    /// execution and failed inside the session/engine — triage treats
+    /// those as ours. Rendered as `taiji_rpc_errors_total{grade}`;
+    /// counted at the single dispatch seam (taiji-rpc process_call +
+    /// the payload-level protocol rejections), no error-type
+    /// restructuring anywhere.
+    rpc_error_misuse_total: AtomicU64,
+    rpc_error_internal_total: AtomicU64,
     /// HTTP steal grants (single decision point; the driver feeds
     /// increments polled from runtime stats, the `stolen_total` counter).
     http_stolen_total: AtomicU64,
@@ -1268,6 +1290,8 @@ impl SessionMetrics {
             rpc_conn_rejected_total: AtomicU64::new(0),
             rpc_conn_rejected_per_ip: AtomicU64::new(0),
             rpc_auth_fail_total: AtomicU64::new(0),
+            rpc_error_misuse_total: AtomicU64::new(0),
+            rpc_error_internal_total: AtomicU64::new(0),
             http_stolen_total: AtomicU64::new(0),
             engine_gauges: Mutex::new(Vec::new()),
             http_task_gauges: Mutex::new(Vec::new()),
@@ -1918,6 +1942,58 @@ impl SessionMetrics {
         self.rpc_auth_fail_total.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One failed JSON-RPC call by semantic grade (see the
+    /// `rpc_error_*_total` field docs; the counting seam is taiji-rpc's
+    /// dispatch — every failing call passes it exactly once, batch and
+    /// multicall sub-calls included).
+    pub fn note_rpc_error(&self, misuse: bool) {
+        if misuse {
+            self.rpc_error_misuse_total.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.rpc_error_internal_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// One-line compact counter snapshot for the CLI panic report (the
+    /// triage package: a pasted panic then carries the key session
+    /// counters plus the live engine-gauge sums — connections, DHT
+    /// table size). Fixed key order, one allocation, made only at
+    /// panic time (the hook stays allocation-light: this is the single
+    /// formatting point). The key set is frozen: triage greps it.
+    pub fn panic_counter_line(&self) -> String {
+        let (mut conns_tcp, mut conns_utp, mut dht_nodes) = (0u64, 0u64, 0u64);
+        // Engine gauge sums (the same retain+upgrade loop snapshot()
+        // uses; dead Weak slots die with their engines).
+        if let Ok(mut table) = self.engine_gauges.lock() {
+            table.retain(|w| w.upgrade().is_some());
+            for w in table.iter() {
+                if let Some(g) = w.upgrade() {
+                    conns_tcp += g.conn_tcp_in() + g.conn_tcp_out();
+                    conns_utp += g.conn_utp_in() + g.conn_utp_out();
+                    dht_nodes += g.dht_nodes_v4() + g.dht_nodes_v6();
+                }
+            }
+        }
+        format!(
+            "uptime_s={} bytes_down={} bytes_up={} torrents_completed={} \
+             blocks_verified={} peer_bans={} utp_recv={} utp_drop={} \
+             rpc_auth_fail={} conns_tcp={} conns_utp={} dht_nodes={}",
+            self.started.elapsed().as_secs(),
+            self.bytes_down_total.load(Ordering::Relaxed),
+            self.bytes_up_total.load(Ordering::Relaxed),
+            self.torrent_completed_total.load(Ordering::Relaxed),
+            self.blocks_verified_total.load(Ordering::Relaxed),
+            self.peer_bans_total.load(Ordering::Relaxed),
+            self.utp_recv_total.load(Ordering::Relaxed),
+            self.utp_drop_total.load(Ordering::Relaxed),
+            self.rpc_auth_fail_total.load(Ordering::Relaxed),
+            conns_tcp,
+            conns_utp,
+            dht_nodes,
+        )
+    }
+
     /// Rendering input snapshot (the rpc `/metrics` read entry; live
     /// engine slots summed + all counters).
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -2049,6 +2125,8 @@ impl SessionMetrics {
         snap.rpc_conn_rejected_total_scope_per_ip =
             self.rpc_conn_rejected_per_ip.load(Ordering::Relaxed);
         snap.rpc_auth_fail_total = self.rpc_auth_fail_total.load(Ordering::Relaxed);
+        snap.rpc_error_misuse_total = self.rpc_error_misuse_total.load(Ordering::Relaxed);
+        snap.rpc_error_internal_total = self.rpc_error_internal_total.load(Ordering::Relaxed);
         // io registry aggregation seam (DNS family + HTTP transport
         // family; multiple atomics, non-consistent snapshot - see the
         // module and field docs).
@@ -2229,6 +2307,64 @@ mod tests {
         m.add_utp_packets(0, 0);
         m.add_blocks_verified(0);
         assert_eq!(m.snapshot().bytes_down_total, 10);
+    }
+
+    /// RPC error semantic grades: the two counters are independent and
+    /// land in the snapshot (the misuse/internal distinction the
+    /// `taiji_rpc_errors_total{grade}` family renders).
+    #[test]
+    fn rpc_error_grades_land_in_snapshot() {
+        let m =
+            SessionMetrics::with_io_metrics(Arc::new(taiji_io::metrics::MetricsRegistry::new()));
+        let zero = m.snapshot();
+        assert_eq!(zero.rpc_error_misuse_total, 0);
+        assert_eq!(zero.rpc_error_internal_total, 0);
+        m.note_rpc_error(true);
+        m.note_rpc_error(true);
+        m.note_rpc_error(false);
+        let s = m.snapshot();
+        assert_eq!(s.rpc_error_misuse_total, 2);
+        assert_eq!(s.rpc_error_internal_total, 1);
+    }
+
+    /// The panic-report counter line: fixed key set (triage greps it),
+    /// values reflect the counters, engine-gauge sums default to zero
+    /// with no engine registered.
+    #[test]
+    fn panic_counter_line_has_frozen_keys_and_live_values() {
+        let m =
+            SessionMetrics::with_io_metrics(Arc::new(taiji_io::metrics::MetricsRegistry::new()));
+        let line = m.panic_counter_line();
+        for key in [
+            "uptime_s=",
+            "bytes_down=",
+            "bytes_up=",
+            "torrents_completed=",
+            "blocks_verified=",
+            "peer_bans=",
+            "utp_recv=",
+            "utp_drop=",
+            "rpc_auth_fail=",
+            "conns_tcp=",
+            "conns_utp=",
+            "dht_nodes=",
+        ] {
+            assert!(
+                line.contains(key),
+                "panic counter line misses {key}: {line}"
+            );
+        }
+        assert!(
+            line.contains("bytes_down=0 ") && line.contains("blocks_verified=0"),
+            "fresh instance reads zeros: {line}"
+        );
+        m.add_bytes(1234, 5);
+        m.add_blocks_verified(2);
+        let line = m.panic_counter_line();
+        assert!(
+            line.contains("bytes_down=1234") && line.contains("blocks_verified=2"),
+            "fed counters read back: {line}"
+        );
     }
 
     /// Instrumentation feed points: evicted-byte deltas, per-peer

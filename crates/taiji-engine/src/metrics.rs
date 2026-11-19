@@ -44,7 +44,7 @@
 //! | `taiji_build_info` / `_session_uptime_seconds` | rpc side (process facts) |
 //! | `taiji_panic_total` | actor engine watcher (`JoinError::is_panic`) |
 //! | `taiji_torrent_completed_total` | actor terminal teardown (retire into the table) |
-//! | `taiji_torrent_bytes_total{direction}` | engine 1s tick delta bridge + terminal flush |
+//! | `taiji_torrent_bytes_total{direction}` | counter bridges (`note_supply_down`: 2s/1s ticks + terminal flush + leave arm) |
 //! | `taiji_peer_supply_bytes_total{transport}` | same bridge, split by transport (tcp|utp) |
 //! | `taiji_peer_connections{...}` / `_choked` | engine 1s tick (peer_meta/choke mirror) |
 //! | `taiji_peers_by_class{class}` | engine 1s tick (peer_class classify, address-wins) |
@@ -1336,7 +1336,12 @@ impl SessionMetrics {
         self.torrent_completed_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Byte delta bridge (engine 1s tick + terminal values; down/up directions).
+    /// Byte delta bridge (down/up direction aggregates). Production
+    /// feed = `engine::run::tick::note_supply_down` — the same single
+    /// bridge as the per-transport split (2s slow tick / 1s seed tick /
+    /// final flush / the leave arm's final delta), so the downlink
+    /// aggregate is the split's sum by construction (the documented
+    /// cross-check invariant) and the uplink rides the same bridges.
     pub fn add_bytes(&self, down_delta: u64, up_delta: u64) {
         if down_delta > 0 {
             self.bytes_down_total
@@ -1351,8 +1356,8 @@ impl SessionMetrics {
     /// the single feed = `engine::run::tick::note_supply_down` - three
     /// counting bridges + the leave arm's final-value delta close at the
     /// same point; the two families always sum to `add_bytes`'s downlink
-    /// terms). Label range = the fixed transport enum (tcp|utp), no
-    /// host/gid.
+    /// terms by construction at that bridge). Label range = the fixed
+    /// transport enum (tcp|utp), no host/gid.
     pub fn add_transport_down_bytes(&self, tcp_delta: u64, utp_delta: u64) {
         if tcp_delta > 0 {
             self.bytes_down_tcp_total
@@ -2495,7 +2500,11 @@ mod tests {
         assert_eq!(m.endgame_economics(), (0.0, 0, 0, 0.0, 0.0));
 
         // Two-family delta: snapshot and reader accessor agree; the sum
-        // cross-checks the total downlink terms (768 + 256 = 1024).
+        // cross-checks the total downlink terms (768 + 256 = 1024). In
+        // production both calls share the single bridge
+        // (`run::tick::note_supply_down`: 2s/1s tick + final flush +
+        // the leave arm's final delta), which feeds the aggregate's
+        // downlink as exactly the split's sum — the invariant below.
         m.add_transport_down_bytes(768, 256);
         m.add_bytes(1024, 0);
         let s = m.snapshot();
@@ -2508,8 +2517,14 @@ mod tests {
         );
         assert_eq!(m.transport_supply_bytes(), (768, 256));
 
+        // Uplink aggregate rides the same bridge (the direction half
+        // without a transport split).
+        m.add_bytes(0, 512);
+        assert_eq!(m.snapshot().bytes_up_total, 512);
+
         // Zero deltas pollute nothing (the add_* >0 gates).
         m.add_transport_down_bytes(0, 0);
+        m.add_bytes(0, 0);
         assert_eq!(m.transport_supply_bytes(), (768, 256));
 
         // Endgame redundancy economics: duration slices accumulate + the window pair counts.

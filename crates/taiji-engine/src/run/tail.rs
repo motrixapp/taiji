@@ -316,7 +316,13 @@ pub(super) async fn final_flush(
             &mut state.speed_up,
             &mut state.speed_down,
         );
-        note_supply_down(state, metrics, drained.down_tcp, drained.down_utp);
+        note_supply_down(
+            state,
+            metrics,
+            drained.down_tcp,
+            drained.down_utp,
+            drained.up,
+        );
         // Final endgame in-flight slice checkpoint (the teardown must
         // not drop the endgame segment).
         checkpoint_endgame(metrics, state.faces.iter_mut());

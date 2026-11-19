@@ -375,6 +375,12 @@ pub(super) async fn attach_peer<S>(
     // peer_dht/peer_ext, passed through from the peer's handshake
     // bits.
     peer_fast: bool,
+    // (peer_ext — the BEP10 mirror — is folded into `ext.enabled`
+    // below AND passed separately as `PeerConfig::peer_ext`: the
+    // state-update ext-handshake resends (SetListenPort /
+    // SetUploadOnly) gate on the peer's bit alone, staying
+    // deliverable in seeding state even when the local ext services
+    // (metadata / ut_pex) are off.)
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -438,6 +444,12 @@ pub(super) async fn attach_peer<S>(
         block_arena,
         // BEP6 fast negotiation mirror (the outbound Reject gate).
         peer_fast,
+        // BEP10 negotiation mirror (the Extended-frame send gate,
+        // `PeerConfig::peer_ext`): the peer's handshake bit, passed
+        // separately from the local ext-services gate so the
+        // state-update resends (SetListenPort / SetUploadOnly) stay
+        // correctly gated in every configuration.
+        peer_ext,
         ..PeerConfig::flat()
     };
     let (handle, mut join, mut data_rx) = PeerTask::spawn(&parent, stream, config);

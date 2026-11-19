@@ -13,9 +13,9 @@
 //! the taiji-store `null-store` feature docs).
 //!
 //! Rig notes: the seeder shape is the proven store_pipeline rig
-//! generalized to N pieces, plus a 50ms settling pause between the
-//! handshake response and the bitfield — see the comment at the pause
-//! for the observed startup-race context.
+//! generalized to N pieces; the seeder writes its bitfield back-to-back
+//! with the handshake response (same event-loop beat — the
+//! startup-ordering regression shape, see the same_beat_* tests).
 
 #![cfg(feature = "null-store")]
 
@@ -136,17 +136,9 @@ async fn mini_seeder(content: Vec<u8>, requests: Arc<AtomicUsize>) -> std::net::
                 if sock.write_all(&resp).await.is_err() {
                     return;
                 }
-                // Settling pause before the bitfield: with the bitfield
-                // landing in the same beat as the handshake response,
-                // rig variants were observed where the engine's early
-                // dispatch never fires (interested + extended handshake
-                // sent, zero wire requests ever issued; deterministic
-                // per test-binary layout, gone when the bitfield is
-                // delayed a beat — a startup race in the engine's
-                // ad/unchoke bookkeeping vs dispatch, recorded for
-                // separate investigation). The pause is rig-side only.
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                // Full bitfield (BEP 3): every piece present.
+                // Full bitfield (BEP 3): every piece present, written
+                // back-to-back with the handshake response (same beat —
+                // the startup-ordering regression shape).
                 let mut bitfield = vec![0u8; PIECE_COUNT.div_ceil(8)];
                 for i in 0..PIECE_COUNT {
                     bitfield[i / 8] |= 0x80 >> (i % 8);

@@ -1483,9 +1483,9 @@ async fn build_faces(
                 snapshot_sync: snapshot_sync.clone(),
             }));
             // Availability event aggregation: the face tag is attached by
-            // the forwarding task (lossy drops are fine — rarity is
-            // heuristic, not correctness data; see the bt::peer::PeerConfig
-            // docs).
+            // the forwarding task (the peer-side emission and this hop
+            // both await — availability is dispatch-correctness data, not
+            // a rarity heuristic; see the bt::peer::PeerConfig docs).
             let tag_tx = store.avail_all_tx.clone();
             let fwd_token = store.token.clone();
             tokio::spawn(async move {

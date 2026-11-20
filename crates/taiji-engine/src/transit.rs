@@ -289,14 +289,29 @@ impl LeaveKind {
     /// metrics.rs literal table — across the crate boundary the label
     /// contract's single source is the
     /// [`crate::metrics::MetricsSnapshot`] field docs).
+    ///
+    /// Reconciliation: the projection routes through the bt-side
+    /// close-reason table ([`taiji_bt::close_reason::close_reason_of_end`]
+    /// -> [`taiji_bt::close_reason::CloseReason::close_class`]) — the
+    /// SAME single table the peer-visible `ut_close` wire values derive
+    /// from, so the local counters and the sent frames cannot disagree
+    /// by construction. The five label values themselves are frozen
+    /// (additive only).
     pub(crate) fn of(end: &taiji_bt::peer::PeerEnd) -> LeaveKind {
-        use taiji_bt::peer::PeerEnd;
-        match end {
-            PeerEnd::Clean => LeaveKind::Local,
-            PeerEnd::Cancelled => LeaveKind::Cancelled,
-            PeerEnd::Closed => LeaveKind::PeerClosed,
-            PeerEnd::Io { .. } => LeaveKind::Io,
-            PeerEnd::Violation(_) | PeerEnd::Flooded => LeaveKind::Protocol,
+        LeaveKind::of_close(&taiji_bt::close_reason::close_reason_of_end(end))
+    }
+
+    /// The close-reason half of the projection (the metric label class
+    /// of a wire close reason; kept public to the crate for the
+    /// reconciliation lock tests).
+    pub(crate) fn of_close(reason: &taiji_bt::close_reason::CloseReason) -> LeaveKind {
+        use taiji_bt::close_reason::CloseClass;
+        match reason.close_class() {
+            CloseClass::Local => LeaveKind::Local,
+            CloseClass::Io => LeaveKind::Io,
+            CloseClass::Protocol => LeaveKind::Protocol,
+            CloseClass::Cancelled => LeaveKind::Cancelled,
+            CloseClass::PeerClosed => LeaveKind::PeerClosed,
         }
     }
 }
@@ -1818,6 +1833,41 @@ mod dial_result_log_tests {
         ];
         for (end, want) in cases {
             assert_eq!(LeaveKind::of(&end), want, "end={end:?}");
+        }
+    }
+
+    /// Reconciliation lock (the metric and the wire share one source):
+    /// every wire close reason's five-way class lands on exactly the
+    /// LeaveKind whose label the `taiji_peer_leaves_total{reason}`
+    /// family renders — the local metric therefore derives from the
+    /// same bt-side table that produces the `ut_close` wire values (the
+    /// two faces cannot drift apart; new reasons must extend
+    /// `close_class` alongside their group).
+    #[test]
+    fn leave_kind_close_reason_reconciliation_table() {
+        use taiji_bt::close_reason::{CloseReason as R, UT_CLOSE_NAME};
+        // The extension identity the wire face advertises (guards
+        // against silent renames of the negotiated name).
+        assert_eq!(UT_CLOSE_NAME, "ut_close");
+        let cases = [
+            (R::LocalShutdown, LeaveKind::Local),
+            (R::LocalPolicy, LeaveKind::Local),
+            (R::IoTimedOut, LeaveKind::Io),
+            (R::IoReset, LeaveKind::Io),
+            (R::IoBrokenPipe, LeaveKind::Io),
+            (R::IoOther, LeaveKind::Io),
+            (R::BadPieceIndex, LeaveKind::Protocol),
+            (R::BadBlockCoords, LeaveKind::Protocol),
+            (R::UnsolicitedPiece, LeaveKind::Protocol),
+            (R::OversizeRequest, LeaveKind::Protocol),
+            (R::RequestsWhileChoked, LeaveKind::Protocol),
+            (R::ClientBanned, LeaveKind::Protocol),
+            (R::Flooded, LeaveKind::Protocol),
+            (R::Cancelled, LeaveKind::Cancelled),
+            (R::PeerClosed, LeaveKind::PeerClosed),
+        ];
+        for (reason, want) in cases {
+            assert_eq!(LeaveKind::of_close(&reason), want, "reason={reason:?}");
         }
     }
 

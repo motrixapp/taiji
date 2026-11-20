@@ -31,6 +31,14 @@ pub mod bencode;
 /// Identification != banning.
 pub mod client_id;
 
+/// Peer-visible close reasons (`ut_close` over BEP-10): the stable
+/// gap-grouped value table, the single error -> close-reason mapping
+/// table ([`close_reason::close_reason_of_end`]) that both the wire
+/// face and the local leave-reason metric derive from, and the close
+/// frame codec. Value table contract for peer implementers:
+/// `docs/design/peer-protocol.md`.
+pub mod close_reason;
+
 /// .torrent creator: v1/v2/hybrid generation + piece layers + dual
 /// infohash. The writer is the canonical mirror of the [`filetree`]
 /// parser.

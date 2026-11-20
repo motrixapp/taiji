@@ -592,6 +592,72 @@ local abuse hardening with no reference counterpart; each accepted
 connect is one engine-side hole-punch dial with a 10s budget, so the
 window cap prevents dial churn manufactured by a malicious relay.
 
+## crates/taiji-bt/src/close_reason.rs — ut_close, peer-visible close reasons
+
+`ut_close` is a taiji-local BEP-10 extension (`m` dict key `ut_close`;
+taiji advertises local id 3 — BEP-10 ids are local, any non-zero value
+interoperates). It carries one close-reason integer to the peer at
+disconnect, so an interoperability case has both halves of the evidence
+(the peer's own leave counters and the reason we reported to it). The theme is
+identifier stability: once published, the numeric values are **never
+renumbered** — the table is grouped by category in blocks of ten with
+trailing reserved gaps (the shape of libtorrent's grouped error tables,
+`src/error_code.cpp`), new reasons take free slots inside their group,
+and no later value ever shifts. This table is the contract for peer
+implementers:
+
+| Group | Value | Name | Meaning |
+|---|---|---|---|
+| local | 100 | local-shutdown | we closed via an explicit command (shutdown / dropped command channel) |
+| local | 101 | local-policy | we closed for a local policy reason not distinguishable on the wire |
+| local | 102–109 | *reserved* | future local reasons |
+| transport | 110 | io-timed-out | transport timeout (`ErrorKind::TimedOut`) |
+| transport | 111 | io-reset | connection reset / aborted |
+| transport | 112 | io-broken-pipe | broken pipe / write-zero on write |
+| transport | 113 | io-other | any other transport error |
+| transport | 114–119 | *reserved* | future transport reasons |
+| protocol | 120 | protocol-bad-piece-index | piece index outside swarm addressing |
+| protocol | 121 | protocol-bad-block-coords | block coordinates violate wire request geometry |
+| protocol | 122 | protocol-unsolicited-piece | unsolicited piece push |
+| protocol | 123 | protocol-oversize-request | request length over the 16KiB block cap |
+| protocol | 124 | protocol-requests-while-choked | requests while choked beyond the grace period |
+| protocol | 125 | protocol-client-banned | client identity ban (ext handshake `v` / peer_id) |
+| protocol | 126 | protocol-flooded | message flooding disconnect |
+| protocol | 127–129 | *reserved* | future protocol reasons |
+| lifecycle | 130 | cancelled | engine shutdown cancellation (not churn) |
+| lifecycle | 131 | peer-closed | the peer closed normally (EOF) |
+| lifecycle | 132–139 | *reserved* | future lifecycle reasons |
+
+Value 0 is never sent; values outside the table (including reserved
+slots of a future release) must be logged with the raw number and
+otherwise ignored.
+
+**Negotiation and frame format.** A close frame is sent only when BOTH
+sides advertised `ut_close` in their extended-handshake `m` dict — never
+to a peer that did not negotiate (zero wire change otherwise). The
+outbound frame uses the id the PEER advertised; the frame payload is a
+bencoded dict with the single key `c` (close reason, integer), e.g.
+`d1:ci100ee` (8 bytes). Unknown dict keys are ignored on decode
+(BEP-10 interop convention). Sending is best-effort at disconnect
+(after an io-grade terminal state the write may fail — the frame is
+diagnostics, not protocol). The runtime rollback knob
+`BH_CLOSE_NOTIFY=0` disables advertisement and sending entirely.
+
+**Single source.** The ONE mapping table `close_reason_of_end`
+(`PeerEnd` + io `ErrorKind` subclassification -> reason) drives both the
+wire values and the local `taiji_peer_leaves_total{reason}` metric (via
+the five-way `close_class` projection, engine `LeaveKind::of`): sent
+values and local counters cannot disagree by construction. The metric
+label set (`local|peer-closed|io|protocol|cancelled`) stays frozen —
+the close table subdivides transport/protocol for the peer-visible
+face, the local metric keeps its five published labels.
+
+**Inbound half.** A received close frame is informational only: it is
+rate-guarded by a fixed window (4/60s — a legitimate peer sends at most
+one close frame per connection; over limit = ignore, no disconnect),
+decoded, and logged (known name and raw value); it never reclassifies
+the local leave accounting, which keys on the observed terminal state.
+
 ## crates/taiji-bt/src/peer/read_pool.rs — disk-thread-pool counterpart
 
 libtorrent = one network thread + many disk threads: all network state is

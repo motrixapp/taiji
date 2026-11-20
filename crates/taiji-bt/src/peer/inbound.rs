@@ -288,6 +288,17 @@ pub(super) struct InboundCtx<'a, S: AsyncRead + AsyncWrite + Unpin> {
     /// Inbound BEP-21 upload_only mirror (None = not recorded — see
     /// [`super::PeerConfig::peer_upload_only`]).
     pub(super) peer_upload_only: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// ut_close advertise/consume gate (false = inbound close frames are
+    /// ignored as unknown extensions; see
+    /// [`crate::close_reason`]).
+    pub(super) close_notify: bool,
+    /// The peer's advertised ut_close id (our outbound close frame keys
+    /// off it).
+    pub(super) peer_ut_close_id: &'a mut Option<u8>,
+    /// Inbound ut_close fixed-window origin (ext module constants).
+    pub(super) close_window: &'a mut Instant,
+    /// Inbound ut_close in-window count.
+    pub(super) close_count: &'a mut u32,
     /// Pooled serving wiring (None = the inline form — pool-less
     /// callers keep the exact same behavior). When Some, an inbound
     /// request's disk read goes into the pool and the completion is
@@ -349,6 +360,10 @@ where
         pex_inbound,
         client_deny,
         peer_upload_only,
+        close_notify,
+        peer_ut_close_id,
+        close_window,
+        close_count,
         serve,
     } = ctx;
     // BEP-52 "immediately follows": any inbound message clears the
@@ -894,6 +909,10 @@ where
                     client_deny,
                     client_deny_hit: &mut deny_hit,
                     peer_upload_only,
+                    close_notify,
+                    peer_ut_close_id,
+                    close_window,
+                    close_count,
                 },
             )
             .await;

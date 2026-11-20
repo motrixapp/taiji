@@ -68,7 +68,7 @@
 //! | `taiji_spill_readback_pieces_total` | same delta feed; 0 with spill off |
 //! | `taiji_spill_fallback_destroy_bytes_total` | over-budget destroy bytes (same delta) |
 //! | `taiji_holepunch_*` | seven counters (1s seed tick delta bridge) |
-//! | `taiji_peer_leaves_total{reason}` | five leave reasons (leave arm) |
+//! | `taiji_peer_leaves_total{reason}` | five leave reasons (leave arm; the projection derives from the bt close-reason table — the same single source as the `ut_close` wire values) |
 //! | `taiji_store_write_calls_total` | write calls at the `dyn DiskWriter` boundary |
 //! | `taiji_peer_inflight_depth` / `_active` | 1s tick per-connection sampling |
 //! | `taiji_block_stage_seconds{stage}` | pipeline buffer + verify_pool verify/write |

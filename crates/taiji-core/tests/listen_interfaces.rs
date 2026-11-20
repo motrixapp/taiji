@@ -276,3 +276,153 @@ fn default_session_global_listen_interfaces_empty() {
         "default = empty = the standing single-listen shape (zero change)"
     );
 }
+
+/// Ingress verification (the phase-3 accept-path face): with the
+/// egress bind armed at `127.0.0.1`, an inbound connection arriving on
+/// `[::1]` (the default dual-stack listener's v6 arm — its local
+/// address `::1` is not on the egress allowlist) is rejected at the
+/// door and counted (`taiji_peer_blocked_ingress_total`); the same
+/// engine still serves the matching-local-address arm (127.0.0.1).
+/// Without an egress bind nothing is verified — that arm is the
+/// `multi_listen_faces_serve_handshake_per_face` test above (egress
+/// None, both loopback families served) plus the standing suite.
+#[tokio::test]
+async fn egress_bind_rejects_and_counts_off_allowlist_inbound() {
+    let v6_ok = tokio::net::TcpListener::bind(lo6(0)).await.is_ok();
+    if !v6_ok {
+        eprintln!(
+            "no IPv6 environment: the [::1] rejection arm cannot run; \
+             the 127.0.0.1 admit arm still runs (environment limitation, disclosed)"
+        );
+    }
+    let content = test_content();
+    let tmp = std::env::temp_dir().join(format!(
+        "taiji-listen-ingress-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&tmp).unwrap_or_else(|e| panic!("{e}"));
+    let entries = vec![PlanEntry {
+        path: std::path::PathBuf::from("blob.bin"),
+        length: content.len() as u64,
+        padding: false,
+    }];
+    let layout = Layout::plan_v1_padded(&entries, PIECE_LEN).unwrap_or_else(|e| panic!("{e}"));
+    let mut roots = Vec::new();
+    for c in content.chunks(PIECE_LEN as usize) {
+        roots.push(ExpectedPieceHash::V1(Sha1::digest(c).into()));
+    }
+    let metrics = std::sync::Arc::new(taiji_core::engine::metrics::SessionMetrics::new());
+    let port = free_port("127.0.0.1").await;
+    let root = tokio_util::sync::CancellationToken::new();
+    let cfg = EngineConfig {
+        clock: Default::default(),
+        rng: Default::default(),
+        initial_selection: None,
+        preset_progress: None,
+        tracker_options: taiji_bt::tracker::TrackerOptions::default(),
+        // The option under test: the egress bind arms the ingress
+        // verification (allowlist = exactly this address).
+        egress: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        listen_interfaces: Vec::new(),
+        peer_id: *b"-TJ0001-LISTENINGRES",
+        announce: String::new(),
+        listen_port: port,
+        piece_len: PIECE_LEN,
+        layout,
+        dest: tmp.clone(),
+        seed_after_complete: false,
+        seed: taiji_core::seed::SeedPolicy::default(),
+        writer_factory: None,
+        disk_policy: taiji_store::disk_policy::DiskPolicy::default(),
+        faces: vec![v1_face_config(roots, content.len() as u64)],
+        crypto: taiji_bt::mse::CryptoPolicy::optional(),
+        dht: taiji_core::engine::DhtWireConfig::default(),
+        private: false,
+        peer_exchange: false,
+        metadata_serve: None,
+        limiter: None,
+        hook: None,
+        nat: None,
+        stats: Some(std::sync::Arc::clone(&metrics)),
+        webseeds: Vec::new(),
+    };
+    let engine = DownloadEngine::spawn(cfg, &root);
+
+    if v6_ok {
+        // The rejected arm: connect to [::1], send the handshake — no
+        // handshake may come back (the connection is dropped at the
+        // accept door; EOF/reset, never an info_hash echo), and the
+        // rejection is counted exactly once.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut sock = loop {
+            match tokio::net::TcpStream::connect(lo6(port)).await {
+                Ok(s) => break s,
+                Err(e) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let _ = e;
+                }
+                Err(e) => panic!("[::1] connect kept failing: {e}"),
+            }
+        };
+        let mut hs = [0u8; 68];
+        hs[0] = 19;
+        hs[1..20].copy_from_slice(b"BitTorrent protocol");
+        hs[28..48].copy_from_slice(&INFO_HASH);
+        hs[48..68].copy_from_slice(b"TESTPEERTESTPEER0000");
+        sock.write_all(&hs)
+            .await
+            .unwrap_or_else(|e| panic!("send handshake on [::1]: {e}"));
+        let mut resp = [0u8; 68];
+        let read = tokio::time::timeout(Duration::from_secs(5), sock.read_exact(&mut resp)).await;
+        assert!(
+            read.is_err() || read.unwrap_or_else(|e| panic!("read [::1]: {e}")).is_err(),
+            "the off-allowlist inbound must NOT be answered with a handshake"
+        );
+        // The counter (one feed point per rejected connection): poll
+        // briefly — the rejection happens at accept time, already
+        // before the handshake write above was consumed.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while metrics.peer_blocked_ingress() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the [::1] rejection was never counted"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            metrics.peer_blocked_ingress(),
+            1,
+            "exactly one ingress rejection counted"
+        );
+    }
+
+    // The admitted arm: local address 127.0.0.1 == the egress address
+    // — the engine answers with its handshake (the serving proof).
+    handshake_face(
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
+        "admitted face (127.0.0.1 == egress)",
+    )
+    .await;
+    if !v6_ok {
+        assert_eq!(
+            metrics.peer_blocked_ingress(),
+            0,
+            "no rejection counted on the admit-only environment"
+        );
+    }
+
+    root.cancel();
+    let end = tokio::time::timeout(Duration::from_secs(10), engine)
+        .await
+        .unwrap_or_else(|_| panic!("engine join timeout after cancel"));
+    let end = end.unwrap_or_else(|e| panic!("join: {e}"));
+    assert!(
+        !matches!(end, EngineEnd::Failed(_)),
+        "idle engine must not fail: {end:?}"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}

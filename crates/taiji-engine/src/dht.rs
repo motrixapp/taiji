@@ -299,15 +299,23 @@ fn v6_face_bind_addr(probed: Option<IpAddr>) -> IpAddr {
 
 /// One assembled UDP face of the listen surface (a demux instance plus
 /// its role): `primary` marks the first-bound face of its family — the
-/// family's DHT engine, uTP dial service, and tracker egress routing
-/// ride it (the can_route per-destination face pick is the later
-/// dispatch phase); secondary faces of the same family still serve
-/// ingress (uTP accepts, tracker replies, DHT packets merged into the
-/// family engine via [`spawn_dht_secondary_face`]).
+/// family's DHT engine and inbound gate ride it; secondary faces of
+/// the same family still serve ingress (uTP accepts, tracker replies,
+/// DHT packets merged into the family engine via
+/// [`spawn_dht_secondary_face`]). uTP dials and tracker egress pick a
+/// face per destination through the endpoint route context
+/// ([`crate::listen::pick_route_face`], the phase-3 can_route
+/// dispatch); with one face per family that pick IS the primary.
 pub(super) struct UdpFace {
+    /// The face's endpoint identity (address + netmask + local-network
+    /// classification — the route-dispatch input; the default-path
+    /// faces carry wildcard/probed addresses with a `/0` netmask,
+    /// which route every same-family destination, the standing
+    /// single-face-per-family behavior).
+    pub(super) endpoint: crate::listen::ListenEndpoint,
     pub(super) family: DhtFamily,
-    /// First-bound face of this family (DHT engine + uTP dial +
-    /// tracker egress ride it; the family's gate lives here).
+    /// First-bound face of this family (DHT engine + the family's gate
+    /// live here; the route-dispatch fallback rider).
     pub(super) primary: bool,
     pub(super) channels: udp_demux::DemuxChannels,
     pub(super) handle: UdpDemuxHandle,
@@ -317,13 +325,18 @@ impl UdpFace {
     /// Marks the primary faces in construction order (first of each
     /// family wins; the caller builds the list in listen-face order).
     pub(super) fn mark_primaries(
-        faces: Vec<(DhtFamily, udp_demux::DemuxChannels, UdpDemuxHandle)>,
+        faces: Vec<(
+            crate::listen::ListenEndpoint,
+            udp_demux::DemuxChannels,
+            UdpDemuxHandle,
+        )>,
     ) -> Vec<UdpFace> {
         let mut seen_v4 = false;
         let mut seen_v6 = false;
         faces
             .into_iter()
-            .map(|(family, channels, handle)| {
+            .map(|(endpoint, channels, handle)| {
+                let family = endpoint.family();
                 let primary = match family {
                     DhtFamily::V4 => !seen_v4,
                     DhtFamily::V6 => !seen_v6,
@@ -333,6 +346,7 @@ impl UdpFace {
                     DhtFamily::V6 => seen_v6 = true,
                 }
                 UdpFace {
+                    endpoint,
                     family,
                     primary,
                     channels,
@@ -455,7 +469,7 @@ pub(super) async fn spawn_udp_face(
                     info!(target: "taiji::core::engine", bind = %bind, port,
                         "v6 udp face bound to probed global address ( outbound source = GUA)");
                 }
-                faces.push((family, channels, handle));
+                faces.push((default_face_endpoint(bind, &handle), channels, handle));
             }
             Err(e) if family == DhtFamily::V6 && egress.is_none() => {
                 if bind != IpAddr::V6(Ipv6Addr::UNSPECIFIED) {
@@ -468,7 +482,13 @@ pub(super) async fn spawn_udp_face(
                     match udp_demux::spawn(IpAddr::V6(Ipv6Addr::UNSPECIFIED), config, token.clone())
                         .await
                     {
-                        Ok((channels, handle)) => faces.push((family, channels, handle)),
+                        Ok((channels, handle)) => {
+                            faces.push((
+                                default_face_endpoint(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &handle),
+                                channels,
+                                handle,
+                            ));
+                        }
                         Err(e) => {
                             info!(target: "taiji::core::engine", %e, port,
                                 "v6 udp face unavailable (v4-only UDP: tracker/DHT)");
@@ -498,6 +518,29 @@ pub(super) async fn spawn_udp_face(
              egress pinned to the chosen address)");
     }
     UdpFace::mark_primaries(faces)
+}
+
+/// Default-path face endpoint identity (the phase-3 route context for
+/// [`spawn_udp_face`]'s faces): the bind address with its actual demux
+/// port and a `/0` netmask — the wildcard v4/`[::]` faces short-circuit
+/// at can_route's unspecified arm anyway, and the probed-GUA face has
+/// no netmask source (the probe returns an address only); `/0` routes
+/// every same-family destination, exactly the standing
+/// single-face-per-family pick. Gateway classification (the probe
+/// yields a global address by construction; the user's egress literal
+/// is gateway-classified like any explicit literal, the upstream
+/// `interface_to_endpoints` rule).
+fn default_face_endpoint(bind: IpAddr, handle: &UdpDemuxHandle) -> crate::listen::ListenEndpoint {
+    crate::listen::ListenEndpoint {
+        addr: bind,
+        port: handle.bound_addr().port(),
+        device: String::new(),
+        netmask: match bind {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        },
+        local_network: false,
+    }
 }
 
 /// UDP-face plan under an egress bind (a pure decision, table-tested):

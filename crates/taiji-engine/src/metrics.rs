@@ -49,6 +49,7 @@
 //! | `taiji_peer_connections{...}` / `_choked` | engine 1s tick (peer_meta/choke mirror) |
 //! | `taiji_peers_by_class{class}` | engine 1s tick (peer_class classify, address-wins) |
 //! | `taiji_peer_bans_total` | engine `BanBook::enact` (ban enforcement) |
+//! | `taiji_peer_blocked_ingress_total` | accept paths + uTP inbound pumps (`listen::IngressVerify::admit` reject arm; armed only with `--interface`) |
 //! | `taiji_redial_attempts_total` / `_connected_total` | redial arm (dial / handshake ok) |
 //! | `taiji_redial_pool_size` | engine 1s gauge tick |
 //! | `taiji_dht_nodes{family}` | engine 1s tick (`DhtHandle::snapshot`) |
@@ -477,6 +478,10 @@ pub struct MetricsSnapshot {
     pub peers_by_class_utp: u64,
     /// Ban enforcement total (BanBook::enact).
     pub peer_bans_total: u64,
+    /// Inbound peer connections rejected by the egress interface
+    /// policy (`--interface` set; the accept paths and the uTP inbound
+    /// pumps). Zero while `--interface` is unset (no verification).
+    pub peer_blocked_ingress_total: u64,
     /// Redial dial attempts (spawn point of the redial scan arm).
     pub redial_attempts_total: u64,
     /// Redial handshake successes (the Connected result convergence point).
@@ -772,6 +777,7 @@ impl Default for MetricsSnapshot {
             peers_by_class_tcp: 0,
             peers_by_class_utp: 0,
             peer_bans_total: 0,
+            peer_blocked_ingress_total: 0,
             redial_attempts_total: 0,
             redial_connected_total: 0,
             redial_pool_size: 0,
@@ -1017,6 +1023,13 @@ pub struct SessionMetrics {
     write_isolated_total: AtomicU64,
     panic_total: AtomicU64,
     peer_bans_total: AtomicU64,
+    /// Inbound peer connections rejected by the egress interface
+    /// policy (the `--interface` ingress verification,
+    /// `taiji_peer_blocked_ingress_total`): the accept paths and the
+    /// uTP inbound pumps drop connections whose local address is not
+    /// the egress address (the upstream invalid_local_interface
+    /// shape); zero while `--interface` is unset.
+    peer_blocked_ingress_total: AtomicU64,
     redial_attempts_total: AtomicU64,
     redial_connected_total: AtomicU64,
     /// Peer leave reasons, five kinds (feed = the engine leave arm
@@ -1228,6 +1241,7 @@ impl SessionMetrics {
             write_isolated_total: AtomicU64::new(0),
             panic_total: AtomicU64::new(0),
             peer_bans_total: AtomicU64::new(0),
+            peer_blocked_ingress_total: AtomicU64::new(0),
             redial_attempts_total: AtomicU64::new(0),
             redial_connected_total: AtomicU64::new(0),
             peer_leave_local_total: AtomicU64::new(0),
@@ -1472,6 +1486,21 @@ impl SessionMetrics {
     /// Peer ban enforced (BanBook::enact).
     pub fn note_peer_ban(&self) {
         self.peer_bans_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Inbound peer connection rejected by the egress interface
+    /// policy (the accept-path/uTP-pump ingress verification; armed
+    /// only with `--interface`). pub(crate) = the only feed point is
+    /// [`crate::listen::IngressVerify::admit`].
+    pub(crate) fn note_peer_blocked_ingress(&self) {
+        self.peer_blocked_ingress_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Ingress-rejection counter read (the observation/test face;
+    /// rendered as `taiji_peer_blocked_ingress_total`).
+    pub fn peer_blocked_ingress(&self) -> u64 {
+        self.peer_blocked_ingress_total.load(Ordering::Relaxed)
     }
 
     /// Redial dial attempt (the redial scan arm's spawn point).
@@ -2013,6 +2042,7 @@ impl SessionMetrics {
         snap.bytes_down_tcp_total = self.bytes_down_tcp_total.load(Ordering::Relaxed);
         snap.bytes_down_utp_total = self.bytes_down_utp_total.load(Ordering::Relaxed);
         snap.peer_bans_total = self.peer_bans_total.load(Ordering::Relaxed);
+        snap.peer_blocked_ingress_total = self.peer_blocked_ingress_total.load(Ordering::Relaxed);
         snap.redial_attempts_total = self.redial_attempts_total.load(Ordering::Relaxed);
         snap.redial_connected_total = self.redial_connected_total.load(Ordering::Relaxed);
         snap.mse_arc4_total = self.mse_arc4_total.load(Ordering::Relaxed);

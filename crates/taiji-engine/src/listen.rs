@@ -18,11 +18,11 @@
 //!    wildcard addresses (`0.0.0.0`/`::`) expand to one endpoint per
 //!    enumerated interface address of the same family, deduplicated
 //!    against explicit endpoints (`expand_unspecified_address`,
-//!    `src/session_impl.cpp:254-309` — the BEP 32/45 multi-homed shape;
-//!    the upstream `preferred`/up-state interface filter and the
-//!    local-network classification are simplified away: every
-//!    enumerated address counts, and the route-aware classification is
-//!    the later can_route phase). Enumeration failure or an empty
+//!    `src/session_impl.cpp:254-309` — the BEP 32/45 multi-homed
+//!    shape; the upstream `preferred`/up-state interface filter stays
+//!    simplified away — every enumerated address counts, a declared
+//!    residual in `docs/design/listen-interfaces.md`). Enumeration
+//!    failure or an empty
 //!    expansion degrades to the standing single-wildcard listen shape
 //!    (the platform capability-fallback precedent: Android API>=24
 //!    keeps the unspecified socket when route enumeration is
@@ -48,7 +48,40 @@
 //! reused by a later face once its holder is dropped (the
 //! `listen_socket_t::id` rule, `include/libtorrent/aux_/session_impl.hpp:
 //! 168-170`), so long-lived referents (metrics, observation surfaces,
-//! a future can_route cache) can hold ids safely.
+//! the route context) can hold ids safely.
+//!
+//! **Phase 3 — per-destination dispatch and ingress verification**
+//! (this module's routing surface; upstream anchors):
+//!
+//! - Every expanded endpoint carries the **OS netmask** of its owning
+//!   interface ([`ListenEndpoint::netmask`]; the `expand_devices`
+//!   attachment, `src/session_impl.cpp:311-338`: a literal inside an
+//!   interface's subnet adopts that interface's netmask and device
+//!   name; an unresolvable literal gets the family's `/0` — which
+//!   matches everything, the same upstream default) plus the
+//!   **local-network classification** ([`ListenEndpoint::local_network`]:
+//!   loopback/link-local addresses only — the route-table-dependent
+//!   arm of the upstream classification stays a declared residual).
+//! - [`can_route`] mirrors `listen_socket_t::can_route`
+//!   (`src/session_impl.cpp:340-355`): family gate, v6 scope gate,
+//!   exact/wildcard/subnet arms, and the final "a non-local face
+//!   routes the rest" arm.
+//! - [`pick_route_face`] is the per-destination face pick (the uTP
+//!   socket-choice arm of `bind_outgoing_socket`,
+//!   `src/session_impl.cpp:5408-5437` — "almost, but not quite, like
+//!   can_route()"): the LAST netmask-matching face of the destination
+//!   family wins; no match falls back to the first non-local face of
+//!   the family (the deterministic stand-in for the upstream random
+//!   gateway pick), then to the family primary — single-face and
+//!   unset configs pick exactly the face the phase-2 primary
+//!   discipline picked.
+//! - [`IngressAllowlist`]: with `--interface` set, inbound peer
+//!   connections are verified against the egress address
+//!   (`verify_bound_address`, `src/session_impl.cpp:5483-5512` — the
+//!   accept-path rejection at `src/session_impl.cpp:3146-3190`,
+//!   `peer_blocked_alert::invalid_local_interface`); rejections are
+//!   counter-observed (`taiji_peer_blocked_ingress_total`), never
+//!   alerted or logged per packet.
 //!
 //! Interaction with the phase-1 egress bind (`--interface`,
 //! [`crate::config::EngineConfig::egress`]): the egress family narrows
@@ -98,9 +131,10 @@ pub struct ListenInterface {
     pub port: u16,
 }
 
-/// One expanded listen endpoint: the bind address a face will hold
-/// (upstream `listen_endpoint_t` minus ssl/flags; the OS netmask
-/// attachment of `expand_devices` is deferred to the can_route phase).
+/// One expanded listen endpoint: the bind address a face will hold,
+/// with the phase-3 routing context (upstream `listen_endpoint_t` minus
+/// ssl/flags: the OS netmask of the owning interface, the local-network
+/// classification, and the originating device name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListenEndpoint {
     /// Concrete bind address (wildcards are fully expanded away; an
@@ -108,10 +142,26 @@ pub struct ListenEndpoint {
     /// degradation path, never a wildcard bind sneaking through).
     pub addr: IpAddr,
     pub port: u16,
-    /// Originating device name (empty for IP-literal entries; filled
-    /// for device-name and device-expanded entries — informational
-    /// until the can_route phase consumes it).
+    /// Originating device name (empty for IP-literal entries that no
+    /// interface row claims; device-name, wildcard-expanded, and
+    /// subnet-adopted literal entries carry the owning device's name).
     pub device: String,
+    /// OS netmask of the owning interface (the `expand_devices`
+    /// attachment, `src/session_impl.cpp:311-338`): a literal inside an
+    /// interface's subnet adopts that interface's netmask (and device
+    /// name); an unresolvable literal gets the family's `/0`, which
+    /// [`match_addr_mask`] treats as match-everything (the same
+    /// upstream default for "we can't find which device this is for").
+    pub netmask: IpAddr,
+    /// Local-network classification (the address-classification subset
+    /// of the upstream flag: loopback or link-local bind addresses on
+    /// expanded endpoints — upstream `interface_to_endpoints`
+    /// `src/session_impl.cpp:2066-2068` and `expand_unspecified_address`
+    /// `:297-302`; the `!is_global` route-table-dependent arm and the
+    /// user `l` suffix are not expressible here, a declared residual).
+    /// Consumed by [`can_route`]'s final arm and the
+    /// [`pick_route_face`] gateway fallback.
+    pub local_network: bool,
 }
 
 impl ListenEndpoint {
@@ -128,6 +178,222 @@ impl ListenEndpoint {
             IpAddr::V4(_) => DhtFamily::V4,
             IpAddr::V6(_) => DhtFamily::V6,
         }
+    }
+}
+
+/// The family's `/0` (match-everything) netmask for unresolvable
+/// endpoints (upstream `build_netmask(0, family)`).
+fn zero_netmask(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+    }
+}
+
+/// `(a & mask) == (b & mask)` (upstream `match_addr_mask`,
+/// `src/enum_net.cpp:582-604`): all three addresses must share one
+/// family. The upstream v6 scope-id comparison lives in
+/// [`can_route`] here instead (one gate, same verdict).
+pub fn match_addr_mask(a: IpAddr, b: IpAddr, mask: IpAddr) -> bool {
+    if a.is_ipv4() != b.is_ipv4() || a.is_ipv4() != mask.is_ipv4() {
+        return false;
+    }
+    match (a, b, mask) {
+        (IpAddr::V4(a), IpAddr::V4(b), IpAddr::V4(m)) => {
+            (u32::from(a) & u32::from(m)) == (u32::from(b) & u32::from(m))
+        }
+        (IpAddr::V6(a), IpAddr::V6(b), IpAddr::V6(m)) => {
+            let (a, b, m) = (a.octets(), b.octets(), m.octets());
+            a.iter()
+                .zip(b.iter())
+                .zip(m.iter())
+                .all(|((x, y), mm)| (x & mm) == (y & mm))
+        }
+        // unreachable: the family gate above already returned
+        _ => false,
+    }
+}
+
+/// Link-local predicate (upstream `is_link_local`,
+/// `src/enum_net.cpp`): v4 `169.254.0.0/16` (RFC 3927), v6
+/// `fe80::/10`.
+fn is_link_local_addr(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            let b = v6.octets();
+            b[0] == 0xfe && (b[1] & 0xc0) == 0x80
+        }
+    }
+}
+
+/// Whether this endpoint's socket may reach `dest` (upstream
+/// `listen_socket_t::can_route`, `src/session_impl.cpp:340-355`; the
+/// proxy arm has no taiji counterpart — no proxy faces exist):
+///
+/// | arm | verdict |
+/// |---|---|
+/// | family mismatch | false |
+/// | v6 and scope ids differ | false (taiji listen endpoints are scope-less `std` addresses — local scope is always 0, so a scoped destination never matches) |
+/// | exact address equality | true |
+/// | wildcard local address | true (the default-path faces) |
+/// | netmask match | true |
+/// | otherwise | `!local_network` (a gateway-classified face routes the rest; a local-network face refuses off-subnet destinations) |
+pub fn can_route(endpoint: &ListenEndpoint, dest: SocketAddr) -> bool {
+    if endpoint.addr.is_ipv4() != dest.is_ipv4() {
+        return false;
+    }
+    // Scope gate: the local endpoint carries no scope id (std IpAddr
+    // cannot represent one; the grammar cannot express scoped binds),
+    // so any scoped destination mismatches — the oracle's
+    // link-local cross-device disambiguation degenerates to "scoped
+    // destinations only route via scoped faces", of which this build
+    // has none.
+    if let SocketAddr::V6(v6) = dest {
+        if v6.scope_id() != 0 {
+            return false;
+        }
+    }
+    if endpoint.addr == dest.ip() {
+        return true;
+    }
+    if endpoint.addr.is_unspecified() {
+        return true;
+    }
+    if match_addr_mask(dest.ip(), endpoint.addr, endpoint.netmask) {
+        return true;
+    }
+    !endpoint.local_network
+}
+
+/// One face's route-dispatch entry: the endpoint identity (address +
+/// netmask + classification) with the primary marker, carrying the
+/// per-face rider being dispatched to (a demux handle, a dial-service
+/// channel, ...).
+#[derive(Clone)]
+pub struct RouteFace<T> {
+    /// The face's endpoint (the dispatch predicate input).
+    pub endpoint: ListenEndpoint,
+    /// First-bound face of the family (the fallback rider; see
+    /// [`pick_route_face`]).
+    pub primary: bool,
+    /// The dispatched rider.
+    pub rider: T,
+}
+
+impl<T> RouteFace<T> {
+    /// Address family (the dispatch grouping key).
+    pub fn family(&self) -> DhtFamily {
+        self.endpoint.family()
+    }
+}
+
+/// Per-destination face pick across one family's faces (the uTP
+/// socket-choice arm of upstream `bind_outgoing_socket`,
+/// `src/session_impl.cpp:5408-5437` — "this is almost, but not quite,
+/// like can_route()"): same-family faces only; the LAST netmask-matching
+/// face wins (the upstream loop overwrites its match per hit); with no
+/// netmask match the fallback is the first non-local face of the family
+/// (the deterministic stand-in for the upstream random pick among
+/// gateway faces — same candidate set, minus the randomness, for
+/// observable dispatch), then the family primary (single-face configs
+/// keep the phase-2 primary pick exactly). `None` = no same-family
+/// face (the dial/send fails, the existing family-unavailable class).
+pub fn pick_route_face<T>(faces: &[RouteFace<T>], dest: SocketAddr) -> Option<&RouteFace<T>> {
+    let family = match dest {
+        SocketAddr::V4(_) => DhtFamily::V4,
+        SocketAddr::V6(_) => DhtFamily::V6,
+    };
+    let mut netmask_match = None;
+    let mut gateway = None;
+    let mut primary = None;
+    for face in faces {
+        if face.family() != family {
+            continue;
+        }
+        if primary.is_none() && face.primary {
+            primary = Some(face);
+        }
+        if gateway.is_none() && !face.endpoint.local_network {
+            gateway = Some(face);
+        }
+        if match_addr_mask(face.endpoint.addr, dest.ip(), face.endpoint.netmask) {
+            netmask_match = Some(face);
+        }
+    }
+    netmask_match.or(gateway).or(primary)
+}
+
+/// Egress allowlist for ingress verification (upstream
+/// `verify_bound_address`, `src/session_impl.cpp:5483-5512`, reduced to
+/// taiji's single-value `--interface` semantics): when the egress bind
+/// is armed, an inbound peer connection's local address must equal the
+/// egress address. The upstream device-name arm (resolve the owning
+/// device via the cached interface table) is structurally absorbed:
+/// taiji's CLI resolves device names to one address before the engine
+/// boundary, so the engine-side allowlist is always a literal. `None`
+/// (egress unset) = zero verification, the status quo.
+#[derive(Debug, Clone)]
+pub struct IngressAllowlist {
+    egress: IpAddr,
+}
+
+impl IngressAllowlist {
+    /// Arm from the egress bind (`None` = unset = no verification).
+    pub fn resolve(egress: Option<IpAddr>) -> Option<Self> {
+        egress.map(|egress| Self { egress })
+    }
+
+    /// Whether an inbound connection with this local address may pass
+    /// (the IP-literal arm; a family mismatch is inherently a
+    /// non-match).
+    pub fn allows(&self, local: IpAddr) -> bool {
+        local == self.egress
+    }
+}
+
+/// Ingress verification state for the accept paths (the TCP face
+/// accept tasks, the default-path dual-stack merge, and the per-face
+/// uTP inbound pumps): the egress allowlist plus the rejection
+/// counter. Default (egress unset) admits every local address with
+/// zero counting — the status quo. When armed, an inbound connection
+/// whose local address is not on the egress allowlist is dropped at
+/// the door and counted (`taiji_peer_blocked_ingress_total`) — the
+/// upstream `invalid_local_interface` rejection, counter-observed
+/// instead of alerted (no alert storms, no per-packet logs).
+#[derive(Clone, Default)]
+pub(crate) struct IngressVerify {
+    allow: Option<IngressAllowlist>,
+    metrics: Option<std::sync::Arc<crate::metrics::SessionMetrics>>,
+}
+
+impl IngressVerify {
+    /// Arm from the egress bind and the session metrics slot
+    /// (`None, None` = the status quo: no verification, no counting).
+    pub(crate) fn new(
+        egress: Option<IpAddr>,
+        metrics: Option<std::sync::Arc<crate::metrics::SessionMetrics>>,
+    ) -> Self {
+        Self {
+            allow: IngressAllowlist::resolve(egress),
+            metrics,
+        }
+    }
+
+    /// Verdict for one inbound connection's local address: `true` =
+    /// admitted; `false` = rejected (the counter increment happens
+    /// here — one feed point per rejected connection, Relaxed).
+    pub(crate) fn admit(&self, local: IpAddr) -> bool {
+        let Some(allow) = &self.allow else {
+            return true;
+        };
+        let ok = allow.allows(local);
+        if !ok {
+            if let Some(m) = &self.metrics {
+                m.note_peer_blocked_ingress();
+            }
+        }
+        ok
     }
 }
 
@@ -199,15 +465,28 @@ pub fn parse_listen_interfaces(input: &str) -> (Vec<ListenInterface>, Vec<String
     (out, errs)
 }
 
+/// One OS interface-table row (getifaddrs): device name, address, and
+/// the address's OS netmask (the phase-3 route context source).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceAddr {
+    pub name: String,
+    pub addr: IpAddr,
+    pub netmask: IpAddr,
+}
+
 /// OS interface-table enumeration (getifaddrs via if-addrs, an
 /// existing workspace dependency — a local syscall, no network IO).
-/// Returns `(name, address)` pairs in table order.
-pub fn enumerate_interface_addrs() -> std::io::Result<Vec<(String, IpAddr)>> {
+/// Returns rows in table order, each carrying the address's netmask.
+pub fn enumerate_interface_addrs() -> std::io::Result<Vec<InterfaceAddr>> {
     Ok(if_addrs::get_if_addrs()?
         .into_iter()
-        .map(|i| {
-            let ip = i.ip();
-            (i.name, ip)
+        .map(|i| InterfaceAddr {
+            netmask: match &i.addr {
+                if_addrs::IfAddr::V4(v4) => IpAddr::V4(v4.netmask),
+                if_addrs::IfAddr::V6(v6) => IpAddr::V6(v6.netmask),
+            },
+            addr: i.ip(),
+            name: i.name,
         })
         .collect())
 }
@@ -220,23 +499,32 @@ pub fn enumerate_interface_addrs() -> std::io::Result<Vec<(String, IpAddr)>> {
 /// Steps (upstream `reopen_listen_sockets` shape,
 /// `src/session_impl.cpp:2090-2230`):
 ///
-/// 1. IP literals pass through as-is (device empty); an unspecified
-///    literal (`0.0.0.0`/`::`) becomes a wildcard to expand;
+/// 1. IP literals pass through as-is (device empty until the netmask
+///    step backfills the owning device); an unspecified literal
+///    (`0.0.0.0`/`::`) becomes a wildcard to expand;
 /// 2. device names expand to one endpoint per matching interface
-///    address (`interface_to_endpoints`);
+///    address (`interface_to_endpoints`), each carrying the row's
+///    netmask and the loopback/link-local local-network
+///    classification;
 /// 3. wildcards expand to one endpoint per same-family interface
 ///    address, deduplicated against the explicit set
 ///    (`expand_unspecified_address` — the BEP 32/45 per-interface
-///    shape; the `preferred`/up-state filters are simplified away, see
-///    the module docs);
-/// 4. the egress bind family (`--interface`) narrows the set — an
+///    shape, same netmask/classification attachment; the
+///    `preferred`/up-state filters are simplified away, see the
+///    module docs);
+/// 4. literal endpoints adopt the owning interface's netmask: the
+///    first row whose subnet contains the literal (`expand_devices`,
+///    `src/session_impl.cpp:311-338` — device backfilled); a literal
+///    no row claims keeps the family's `/0` (match-everything) and the
+///    gateway classification;
+/// 5. the egress bind family (`--interface`) narrows the set — an
 ///    egress-bound engine keeps only same-family endpoints (the UDP
 ///    leak rationale of [`crate::dht::udp_face_plan`]);
-/// 5. the final list is deduplicated by `(addr, port)` (first entry
+/// 6. the final list is deduplicated by `(addr, port)` (first entry
 ///    wins; stable order = spec order, then table order).
 pub fn expand_listen_interfaces(
     specs: &[ListenInterface],
-    ifaces: &[(String, IpAddr)],
+    ifaces: &[InterfaceAddr],
     egress: Option<IpAddr>,
 ) -> (Vec<ListenEndpoint>, Vec<String>) {
     let mut eps: Vec<ListenEndpoint> = Vec::new();
@@ -249,27 +537,38 @@ pub fn expand_listen_interfaces(
                     addr,
                     port: spec.port,
                     device: String::new(),
+                    netmask: zero_netmask(addr),
+                    local_network: false,
                 });
             } else {
                 eps.push(ListenEndpoint {
                     addr,
                     port: spec.port,
                     device: String::new(),
+                    netmask: zero_netmask(addr),
+                    // Literals stay gateway-classified until (and
+                    // unless) the netmask step adopts an owning row —
+                    // upstream `interface_to_endpoints` flags literal
+                    // entries only from the user `l` suffix.
+                    local_network: false,
                 });
             }
             continue;
         }
         // Device name: every address of the matching interface becomes
         // an endpoint (multi-address expansion — the phase-1
-        // single-pick resolution gives way to the full set here).
+        // single-pick resolution gives way to the full set here),
+        // carrying the row's netmask and classification.
         let mut matched = false;
-        for (name, ip) in ifaces {
-            if name == &spec.device {
+        for row in ifaces {
+            if row.name == spec.device {
                 matched = true;
                 eps.push(ListenEndpoint {
-                    addr: *ip,
+                    addr: row.addr,
                     port: spec.port,
                     device: spec.device.clone(),
+                    netmask: row.netmask,
+                    local_network: is_local_class(row.addr),
                 });
             }
         }
@@ -285,14 +584,16 @@ pub fn expand_listen_interfaces(
     // dedups by address+port, ignoring the device name).
     for uep in wildcards {
         let mut expanded = 0;
-        for (name, ip) in ifaces {
-            if ip.is_ipv4() != uep.addr.is_ipv4() {
+        for row in ifaces {
+            if row.addr.is_ipv4() != uep.addr.is_ipv4() {
                 continue;
             }
             let candidate = ListenEndpoint {
-                addr: *ip,
+                addr: row.addr,
                 port: uep.port,
-                device: name.clone(),
+                device: row.name.clone(),
+                netmask: row.netmask,
+                local_network: is_local_class(row.addr),
             };
             if eps.iter().any(|e| e.key() == candidate.key()) {
                 continue;
@@ -305,6 +606,24 @@ pub fn expand_listen_interfaces(
                 "listen-interfaces wildcard `{}` expanded to no interface address (skipped)",
                 uep.addr
             ));
+        }
+    }
+    // Netmask adoption for literals (`expand_devices`): the first row
+    // whose subnet contains the literal donates netmask + device name;
+    // unclaimed literals keep the /0 + gateway classification set
+    // above (upstream: "we can't find which device this is for, just
+    // assume we can't reach anything on it" — mechanically a /0 mask,
+    // which matches everything).
+    for ep in &mut eps {
+        if !ep.device.is_empty() {
+            continue;
+        }
+        if let Some(row) = ifaces
+            .iter()
+            .find(|row| match_addr_mask(row.addr, ep.addr, row.netmask))
+        {
+            ep.netmask = row.netmask;
+            ep.device = row.name.clone();
         }
     }
     // Egress family narrowing (phase-1 interaction: an egress-bound
@@ -323,6 +642,13 @@ pub fn expand_listen_interfaces(
     let mut seen = std::collections::HashSet::new();
     eps.retain(|e| seen.insert(e.key()));
     (eps, warns)
+}
+
+/// Local-network classification of an expanded (non-literal) endpoint
+/// address: loopback or link-local (the route-table-free subset of the
+/// upstream disjunction; see [`ListenEndpoint::local_network`]).
+fn is_local_class(addr: IpAddr) -> bool {
+    addr.is_loopback() || is_link_local_addr(addr)
 }
 
 /// One bound listen face: the assembled socket set entry carrying the
@@ -527,15 +853,27 @@ mod tests {
     fn v6(seg: u16) -> IpAddr {
         IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, seg, 0, 0, 0, 0, 1))
     }
+    /// /64 v6 netmask (the standard on-link prefix).
+    fn v6_mask64() -> IpAddr {
+        IpAddr::V6(Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0, 0, 0, 0))
+    }
 
-    fn iface_table() -> Vec<(String, IpAddr)> {
+    fn row(name: &str, addr: IpAddr, netmask: IpAddr) -> InterfaceAddr {
+        InterfaceAddr {
+            name: name.into(),
+            addr,
+            netmask,
+        }
+    }
+
+    fn iface_table() -> Vec<InterfaceAddr> {
         vec![
-            ("lo0".into(), v4(127, 0, 0, 1)),
-            ("en0".into(), v4(192, 168, 1, 5)),
-            ("en0".into(), v6(1)),
-            ("en1".into(), v4(10, 0, 0, 5)),
-            ("utun0".into(), v4(10, 8, 0, 2)),
-            ("utun0".into(), v6(2)),
+            row("lo0", v4(127, 0, 0, 1), v4(255, 0, 0, 0)),
+            row("en0", v4(192, 168, 1, 5), v4(255, 255, 255, 0)),
+            row("en0", v6(1), v6_mask64()),
+            row("en1", v4(10, 0, 0, 5), v4(255, 0, 0, 0)),
+            row("utun0", v4(10, 8, 0, 2), v4(255, 255, 255, 0)),
+            row("utun0", v6(2), v6_mask64()),
         ]
     }
 
@@ -677,9 +1015,9 @@ mod tests {
         assert_eq!(warns.len(), 1);
 
         // A v6 wildcard on a v4-only table.
-        let v4_only: Vec<(String, IpAddr)> = iface_table()
+        let v4_only: Vec<InterfaceAddr> = iface_table()
             .into_iter()
-            .filter(|(_, ip)| ip.is_ipv4())
+            .filter(|r| r.addr.is_ipv4())
             .collect();
         let specs = vec![spec("[::]:6881")];
         let (eps, warns) = expand_listen_interfaces(&specs, &v4_only, None);
@@ -712,7 +1050,9 @@ mod tests {
     }
 
     /// Final dedup by (addr, port): a device and an explicit literal
-    /// resolving to the same bind produce one endpoint (first wins).
+    /// resolving to the same bind produce one endpoint (first wins —
+    /// the surviving literal's device field is the netmask-adoption
+    /// backfill, the upstream expand_devices rule).
     #[test]
     fn expand_dedups_same_bind() {
         let specs = vec![spec("192.168.1.5:6881"), spec("en0:6881")];
@@ -724,9 +1064,348 @@ mod tests {
         );
         assert!(
             eps.iter()
-                .any(|e| e.addr == v4(192, 168, 1, 5) && e.device.is_empty())
+                .any(|e| e.addr == v4(192, 168, 1, 5) && e.device == "en0")
         );
         assert!(eps.iter().any(|e| e.addr == v6(1)));
+    }
+
+    // ---- phase 3: netmask + classification attachment (expand_devices) ----
+
+    /// A literal inside an interface's subnet adopts that interface's
+    /// netmask and device name; a literal no row claims keeps the /0
+    /// and stays gateway-classified (upstream expand_devices).
+    #[test]
+    fn expand_literal_adopts_owning_row_netmask() {
+        // Same-subnet literal (192.168.1.77 inside en0's /24).
+        let specs = vec![spec("192.168.1.77:6881")];
+        let (eps, _) = expand_listen_interfaces(&specs, &iface_table(), None);
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].netmask, v4(255, 255, 255, 0), "en0's /24 adopted");
+        assert_eq!(eps[0].device, "en0", "owning device backfilled");
+
+        // Unclaimed literal: /0 netmask, no device, gateway class.
+        let specs = vec![spec("203.0.113.9:6881")];
+        let (eps, _) = expand_listen_interfaces(&specs, &iface_table(), None);
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].netmask, v4(0, 0, 0, 0), "no row -> /0");
+        assert!(eps[0].device.is_empty());
+        assert!(!eps[0].local_network);
+
+        // v6 literal inside utun0's /64.
+        let specs = vec![spec("[2001:db8:2::9]:6881")];
+        let (eps, _) = expand_listen_interfaces(&specs, &iface_table(), None);
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0].netmask, v6_mask64());
+        assert_eq!(eps[0].device, "utun0");
+    }
+
+    /// Expanded rows carry the table netmask; loopback/link-local
+    /// expanded addresses classify local-network (the address-class
+    /// subset of the upstream flag), global ones stay gateway.
+    #[test]
+    fn expand_rows_carry_netmask_and_classification() {
+        let specs = vec![spec("lo0:6881"), spec("en0:6881"), spec("utun0:6881")];
+        let (eps, _) = expand_listen_interfaces(&specs, &iface_table(), None);
+        let find = |a: IpAddr| {
+            eps.iter()
+                .find(|e| e.addr == a)
+                .unwrap_or_else(|| panic!("{a}"))
+        };
+        let lo = find(v4(127, 0, 0, 1));
+        assert_eq!(lo.netmask, v4(255, 0, 0, 0));
+        assert!(lo.local_network, "loopback row classifies local");
+        let en0 = find(v4(192, 168, 1, 5));
+        assert_eq!(en0.netmask, v4(255, 255, 255, 0));
+        assert!(!en0.local_network, "global row stays gateway");
+
+        // A link-local row classifies local too.
+        let table = vec![row(
+            "en2",
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+            v6_mask64(),
+        )];
+        let (eps, _) = expand_listen_interfaces(&[spec("en2:6881")], &table, None);
+        assert!(eps[0].local_network, "fe80:: row classifies local");
+
+        // Wildcard expansion attaches the same way.
+        let (eps, _) = expand_listen_interfaces(&[spec("0.0.0.0:6881")], &iface_table(), None);
+        let lo = eps
+            .iter()
+            .find(|e| e.addr == v4(127, 0, 0, 1))
+            .unwrap_or_else(|| panic!("lo"));
+        assert!(lo.local_network);
+        assert_eq!(lo.netmask, v4(255, 0, 0, 0));
+    }
+
+    // ---- phase 3: can_route / match_addr_mask / pick_route_face ----
+
+    /// match_addr_mask truth table (upstream enum_net.cpp:582-604):
+    /// subnet containment both ways, family mismatch no, mask family
+    /// mismatch no, /0 matches everything.
+    #[test]
+    fn match_addr_mask_table() {
+        let m24 = v4(255, 255, 255, 0);
+        assert!(match_addr_mask(
+            v4(192, 168, 1, 5),
+            v4(192, 168, 1, 99),
+            m24
+        ));
+        assert!(!match_addr_mask(
+            v4(192, 168, 1, 5),
+            v4(192, 168, 2, 99),
+            m24
+        ));
+        // Cross-family never matches, regardless of mask family.
+        assert!(!match_addr_mask(v4(10, 0, 0, 1), v6(1), m24));
+        assert!(!match_addr_mask(
+            v4(10, 0, 0, 1),
+            v4(10, 0, 0, 2),
+            v6_mask64()
+        ));
+        // /0 = match-everything (the unclaimed-literal netmask).
+        assert!(match_addr_mask(
+            v4(1, 2, 3, 4),
+            v4(5, 6, 7, 8),
+            v4(0, 0, 0, 0)
+        ));
+        // v6 /64 containment.
+        assert!(match_addr_mask(
+            v6(1),
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0x999)),
+            v6_mask64()
+        ));
+        assert!(!match_addr_mask(v6(1), v6(2), v6_mask64()));
+    }
+
+    fn face_ep(addr: IpAddr, netmask: IpAddr, local_network: bool) -> ListenEndpoint {
+        ListenEndpoint {
+            addr,
+            port: 6881,
+            device: String::new(),
+            netmask,
+            local_network,
+        }
+    }
+
+    fn dest(addr: IpAddr) -> SocketAddr {
+        SocketAddr::new(addr, 4242)
+    }
+
+    /// can_route truth table (upstream session_impl.cpp:340-355 arms,
+    /// in order): family gate, v6 scope gate, exact, wildcard, subnet,
+    /// final local-network arm.
+    #[test]
+    fn can_route_table() {
+        let en0 = face_ep(v4(192, 168, 1, 5), v4(255, 255, 255, 0), false);
+        // Family gate.
+        assert!(!can_route(&en0, dest(v6(1))), "cross-family no");
+        assert!(!can_route(
+            &face_ep(v6(1), v6_mask64(), false),
+            dest(v4(192, 168, 1, 5))
+        ));
+        // Exact address equality.
+        assert!(can_route(&en0, dest(v4(192, 168, 1, 5))));
+        // Wildcard local (the default-path faces).
+        assert!(can_route(
+            &face_ep(v4(0, 0, 0, 0), v4(0, 0, 0, 0), false),
+            dest(v4(8, 8, 8, 8))
+        ));
+        assert!(can_route(
+            &face_ep(
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                false
+            ),
+            dest(v6(1))
+        ));
+        // Netmask match.
+        assert!(can_route(&en0, dest(v4(192, 168, 1, 99))));
+        // Off-subnet destination from a gateway face: the final arm
+        // routes it (a non-local face is a default-route candidate).
+        assert!(can_route(&en0, dest(v4(8, 8, 8, 8))));
+        // Loopback destination: routable from a gateway face via the
+        // same final arm ("loopback always routable" for gateway
+        // faces; from a local face via its /8).
+        assert!(can_route(&en0, dest(v4(127, 0, 0, 1))));
+        // Final arm: a local-network face refuses off-subnet
+        // destinations; a gateway face routes them.
+        let lo = face_ep(v4(127, 0, 0, 1), v4(255, 0, 0, 0), true);
+        assert!(
+            !can_route(&lo, dest(v4(8, 8, 8, 8))),
+            "local face refuses internet"
+        );
+        assert!(
+            can_route(&lo, dest(v4(127, 0, 0, 9))),
+            "same /8 loopback subnet"
+        );
+        let claimed = face_ep(v4(203, 0, 113, 9), v4(0, 0, 0, 0), false);
+        assert!(
+            can_route(&claimed, dest(v4(8, 8, 8, 8))),
+            "/0 matches everything"
+        );
+    }
+
+    /// v6 scope gate (the oracle's link-local disambiguation): a
+    /// scoped destination never matches a scope-less local endpoint
+    /// (taiji listen endpoints cannot carry a scope id — std IpAddr).
+    #[test]
+    fn can_route_v6_scope_gate() {
+        let ll = face_ep(
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+            v6_mask64(),
+            true,
+        );
+        let scoped = SocketAddr::V6(std::net::SocketAddrV6::new(
+            Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            4242,
+            0,
+            7,
+        ));
+        assert!(!can_route(&ll, scoped), "scope 7 != scope-less local 0");
+        // Same address, no scope: falls through to the exact arm.
+        assert!(can_route(
+            &ll,
+            dest(IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)))
+        ));
+    }
+
+    /// pick_route_face (the bind_outgoing_socket uTP arm): netmask
+    /// match preferred (LAST match wins), same-family only, gateway
+    /// fallback, primary fallback, absent family -> None.
+    #[test]
+    fn pick_route_face_table() {
+        fn faces() -> Vec<RouteFace<&'static str>> {
+            vec![
+                RouteFace {
+                    endpoint: face_ep(v4(10, 0, 0, 5), v4(255, 0, 0, 0), false),
+                    primary: true,
+                    rider: "en1",
+                },
+                RouteFace {
+                    endpoint: face_ep(v4(10, 8, 0, 2), v4(255, 255, 255, 0), false),
+                    primary: false,
+                    rider: "utun0",
+                },
+                RouteFace {
+                    endpoint: face_ep(v6(1), v6_mask64(), false),
+                    primary: true,
+                    rider: "v6",
+                },
+            ]
+        }
+        // Destination inside both subnets: both match, the LAST
+        // (utun0's /24) wins — the upstream overwrite semantics.
+        assert_eq!(
+            pick_route_face(&faces(), dest(v4(10, 8, 0, 7))).map(|f| f.rider),
+            Some("utun0")
+        );
+        // Destination only in en1's /8.
+        assert_eq!(
+            pick_route_face(&faces(), dest(v4(10, 9, 0, 1))).map(|f| f.rider),
+            Some("en1")
+        );
+        // Off-subnet destination: gateway fallback = the first
+        // non-local face (en1, also the primary).
+        assert_eq!(
+            pick_route_face(&faces(), dest(v4(8, 8, 8, 8))).map(|f| f.rider),
+            Some("en1")
+        );
+        // v6 destination -> the v6 face.
+        assert_eq!(
+            pick_route_face(&faces(), dest(v6(1))).map(|f| f.rider),
+            Some("v6")
+        );
+        // No v6 face at all -> None (the dial/send failure class).
+        let v4_only = vec![RouteFace {
+            endpoint: face_ep(v4(10, 0, 0, 5), v4(255, 0, 0, 0), false),
+            primary: true,
+            rider: "en1",
+        }];
+        assert!(pick_route_face(&v4_only, dest(v6(1))).is_none());
+    }
+
+    /// pick_route_face fallback ordering: a loopback primary is skipped
+    /// for the gateway fallback when a non-local sibling exists (the
+    /// upstream with_gateways candidate set); an all-local family
+    /// falls back to the primary (single-face configs keep the
+    /// phase-2 pick exactly).
+    #[test]
+    fn pick_route_face_gateway_fallback_skips_local_primary() {
+        fn lo() -> RouteFace<&'static str> {
+            RouteFace {
+                endpoint: face_ep(v4(127, 0, 0, 1), v4(255, 0, 0, 0), true),
+                primary: true,
+                rider: "lo",
+            }
+        }
+        fn en0() -> RouteFace<&'static str> {
+            RouteFace {
+                endpoint: face_ep(v4(192, 168, 1, 5), v4(255, 255, 255, 0), false),
+                primary: false,
+                rider: "en0",
+            }
+        }
+        fn lo2() -> RouteFace<&'static str> {
+            RouteFace {
+                endpoint: face_ep(v4(127, 0, 0, 2), v4(255, 0, 0, 0), true),
+                primary: false,
+                rider: "lo2",
+            }
+        }
+        // Internet destination: no netmask match; the loopback primary
+        // is not a gateway candidate -> en0.
+        assert_eq!(
+            pick_route_face(&[lo(), en0()], dest(v4(8, 8, 8, 8))).map(|f| f.rider),
+            Some("en0")
+        );
+        // Loopback destination: the lo face's /8 matches directly.
+        assert_eq!(
+            pick_route_face(&[lo(), en0()], dest(v4(127, 0, 0, 9))).map(|f| f.rider),
+            Some("lo")
+        );
+        // All-local family: primary fallback (exact-degeneration rule).
+        assert_eq!(
+            pick_route_face(&[lo(), lo2()], dest(v4(8, 8, 8, 8))).map(|f| f.rider),
+            Some("lo"),
+            "no gateway candidate -> the family primary (phase-2 pick)"
+        );
+    }
+
+    /// Single-face degeneration: one face per family picks that face
+    /// for every destination of the family — exactly the phase-2
+    /// primary discipline (the zero-change guarantee for default,
+    /// egress-bound, and single-entry configs).
+    #[test]
+    fn pick_route_face_single_face_degenerates_to_primary() {
+        let single = vec![RouteFace {
+            endpoint: face_ep(v4(192, 168, 1, 5), v4(255, 255, 255, 0), false),
+            primary: true,
+            rider: "only",
+        }];
+        for d in [v4(192, 168, 1, 99), v4(8, 8, 8, 8), v4(127, 0, 0, 1)] {
+            assert_eq!(
+                pick_route_face(&single, dest(d)).map(|f| f.rider),
+                Some("only"),
+                "single face serves every same-family destination ({d})"
+            );
+        }
+    }
+
+    /// IngressAllowlist: armed from the egress bind; literal equality
+    /// only (the upstream IP arm); family mismatch is a non-match.
+    #[test]
+    fn ingress_allowlist_literal_equality() {
+        assert!(
+            IngressAllowlist::resolve(None).is_none(),
+            "unset = no verification"
+        );
+        let allow = IngressAllowlist::resolve(Some(v4(127, 0, 0, 1))).unwrap_or_else(|| panic!());
+        assert!(allow.allows(v4(127, 0, 0, 1)));
+        assert!(!allow.allows(v4(127, 0, 0, 2)));
+        assert!(
+            !allow.allows(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            "::1 is not 127.0.0.1"
+        );
     }
 
     // ---- diff ----
@@ -745,6 +1424,8 @@ mod tests {
             addr,
             port,
             device: String::new(),
+            netmask: zero_netmask(addr),
+            local_network: false,
         }
     }
 

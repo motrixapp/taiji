@@ -276,6 +276,16 @@ pub(super) async fn bind_listen_with_fallback(
 /// single-arm main-loop consumption (the µTP merge channel's twin,
 /// capacity [`TCP_ACCEPT_MERGE_CAPACITY`]).
 ///
+/// Ingress verification (phase 3): the wildcard listeners' local
+/// address is per-connection, so each accepted stream is checked
+/// against the egress allowlist before delivery — a mismatched local
+/// address drops the stream at the door (stream drop = close) and
+/// increments `taiji_peer_blocked_ingress_total` (the upstream
+/// invalid_local_interface shape, counter-observed). A `local_addr`
+/// read error admits (a cannot-happen-in-practice syscall face — a
+/// new rejection class on the default path is worth less than the
+/// conservative read). Unset egress admits everything: zero change.
+///
 /// Lifecycle (the µTP shape): the task lives with the listeners under
 /// the token; channel closure (the main loop gone) exits it. Error
 /// face: a v4 main-stack accept error does not end the task — back off
@@ -287,6 +297,7 @@ pub(super) async fn bind_listen_with_fallback(
 pub(super) fn spawn_tcp_accept_merge(
     dual: DualStackListener,
     token: CancellationToken,
+    ingress: crate::listen::IngressVerify,
 ) -> mpsc::Receiver<(tokio::net::TcpStream, SocketAddr)> {
     let DualStackListener { v4, v6 } = dual;
     let mut v6_active = v6.is_some();
@@ -297,6 +308,9 @@ pub(super) fn spawn_tcp_accept_merge(
                 _ = token.cancelled() => break,
                 accepted = v4.accept() => match accepted {
                     Ok(pair) => {
+                        if !accept_verified(&ingress, &pair.0) {
+                            continue;
+                        }
                         if tx.send(pair).await.is_err() {
                             // Merge channel closed = the engine main loop has exited (teardown).
                             break;
@@ -315,6 +329,9 @@ pub(super) fn spawn_tcp_accept_merge(
                     }
                 }, if v6_active => match accepted {
                     Ok(pair) => {
+                        if !accept_verified(&ingress, &pair.0) {
+                            continue;
+                        }
                         if tx.send(pair).await.is_err() {
                             break;
                         }
@@ -331,10 +348,25 @@ pub(super) fn spawn_tcp_accept_merge(
     rx
 }
 
+/// Per-stream ingress verdict for the wildcard-listener merge (the
+/// local address is per-connection there): `false` = rejected
+/// (already counted — drop the stream at the door).
+fn accept_verified(ingress: &crate::listen::IngressVerify, stream: &tokio::net::TcpStream) -> bool {
+    stream
+        .local_addr()
+        .map(|a| ingress.admit(a.ip()))
+        .unwrap_or(true)
+}
+
 /// One listen face's TCP accept task (the multi-listen path): feeds
 /// the shared face merge channel (capacity
 /// [`TCP_ACCEPT_MERGE_CAPACITY`], one producer per face — the same
 /// single-arm main-loop consumption as the default v4/v6 merge).
+/// Ingress verification (phase 3): the face binds a concrete address,
+/// so the verdict is the face endpoint against the egress allowlist —
+/// a rejected face still accepts (drains the backlog) and drops each
+/// connection at the door, counting `taiji_peer_blocked_ingress_total`
+/// (the upstream invalid_local_interface shape, counter-observed).
 /// Lifecycle/error face identical to the v4 arm of
 /// [`spawn_tcp_accept_merge`]: an accept error backs off and retries
 /// (never a hot spin); the token or the merge channel closing ends the
@@ -346,6 +378,7 @@ pub(super) fn spawn_face_accept_task(
     endpoint: crate::listen::ListenEndpoint,
     token: CancellationToken,
     tx: mpsc::Sender<(tokio::net::TcpStream, SocketAddr)>,
+    ingress: crate::listen::IngressVerify,
 ) {
     tokio::spawn(async move {
         loop {
@@ -353,6 +386,11 @@ pub(super) fn spawn_face_accept_task(
                 _ = token.cancelled() => break,
                 accepted = listener.accept() => match accepted {
                     Ok(pair) => {
+                        if !ingress.admit(endpoint.addr) {
+                            // Rejected at the door (counted inside
+                            // admit): the stream drops = close.
+                            continue;
+                        }
                         if tx.send(pair).await.is_err() {
                             // Merge channel closed = the engine main loop
                             // has exited (teardown).
@@ -972,7 +1010,8 @@ mod tests {
             "v6 port = same port (two stacks one port principle)"
         );
 
-        let mut rx = spawn_tcp_accept_merge(dual, token.clone());
+        let mut rx =
+            spawn_tcp_accept_merge(dual, token.clone(), crate::listen::IngressVerify::default());
         let c4 = tokio::net::TcpStream::connect(("127.0.0.1", bound))
             .await
             .unwrap_or_else(|e| panic!("127.0.0.1:{bound} connect failed: {e}"));

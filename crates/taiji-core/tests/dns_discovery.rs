@@ -384,6 +384,7 @@ fn config(
         stats: None,
         ip_guard: None,
         egress: None,
+        listen_interfaces: Vec::new(),
     }
 }
 

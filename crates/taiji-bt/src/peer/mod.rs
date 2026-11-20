@@ -135,10 +135,10 @@ pub use config::{
 };
 pub use conn::PeerTask;
 pub use ext::{
-    ExpectedInfoHash, ExtConfig, HOLEPUNCH_CONNECT_LIMIT, HOLEPUNCH_CONNECT_WINDOW,
-    HOLEPUNCH_REQUEST_LIMIT, HOLEPUNCH_REQUEST_WINDOW, MetadataBytes, MetadataFetchSpec,
-    MetadataFetched, MetadataSource, OUTBOUND_UT_HOLEPUNCH_ID, OUTBOUND_UT_METADATA_ID,
-    OUTBOUND_UT_PEX_ID,
+    CLOSE_MESSAGE_LIMIT, CLOSE_MESSAGE_WINDOW, ExpectedInfoHash, ExtConfig,
+    HOLEPUNCH_CONNECT_LIMIT, HOLEPUNCH_CONNECT_WINDOW, HOLEPUNCH_REQUEST_LIMIT,
+    HOLEPUNCH_REQUEST_WINDOW, MetadataBytes, MetadataFetchSpec, MetadataFetched, MetadataSource,
+    OUTBOUND_UT_CLOSE_ID, OUTBOUND_UT_HOLEPUNCH_ID, OUTBOUND_UT_METADATA_ID, OUTBOUND_UT_PEX_ID,
 };
 pub use handle::PeerTaskHandle;
 pub use handshake::{handshake_accept, handshake_accept_any, handshake_exchange};
@@ -164,6 +164,9 @@ mod serve_pool_tests;
 
 #[cfg(test)]
 mod holepunch_tests;
+
+#[cfg(test)]
+mod close_tests;
 
 #[cfg(test)]
 mod seeding_tests;

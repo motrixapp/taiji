@@ -135,6 +135,16 @@ impl DhtInboundGate {
     pub(super) async fn set_engine(&self, tx: Option<mpsc::Sender<udp_demux::InboundPacket>>) {
         let _ = self.engine.send(tx);
     }
+
+    /// Subscribe to the engine slot (the secondary-face merge pumps:
+    /// additional listen faces of the same family forward their demux
+    /// dht packets to the current engine through this slot, following
+    /// runtime warm-up/disable exactly like the primary gate pump).
+    pub(super) fn engine_slot(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<mpsc::Sender<udp_demux::InboundPacket>>> {
+        self.engine.subscribe()
+    }
 }
 
 /// Resident inbound pump (one per family, from assembly; the demux dht
@@ -287,6 +297,113 @@ fn v6_face_bind_addr(probed: Option<IpAddr>) -> IpAddr {
     }
 }
 
+/// One assembled UDP face of the listen surface (a demux instance plus
+/// its role): `primary` marks the first-bound face of its family — the
+/// family's DHT engine and inbound gate ride it; secondary faces of
+/// the same family still serve ingress (uTP accepts, tracker replies,
+/// DHT packets merged into the family engine via
+/// [`spawn_dht_secondary_face`]). uTP dials and tracker egress pick a
+/// face per destination through the endpoint route context
+/// ([`crate::listen::pick_route_face`], the phase-3 can_route
+/// dispatch); with one face per family that pick IS the primary.
+pub(super) struct UdpFace {
+    /// The face's endpoint identity (address + netmask + local-network
+    /// classification — the route-dispatch input; the default-path
+    /// faces carry wildcard/probed addresses with a `/0` netmask,
+    /// which route every same-family destination, the standing
+    /// single-face-per-family behavior).
+    pub(super) endpoint: crate::listen::ListenEndpoint,
+    pub(super) family: DhtFamily,
+    /// First-bound face of this family (DHT engine + the family's gate
+    /// live here; the route-dispatch fallback rider).
+    pub(super) primary: bool,
+    pub(super) channels: udp_demux::DemuxChannels,
+    pub(super) handle: UdpDemuxHandle,
+}
+
+impl UdpFace {
+    /// Marks the primary faces in construction order (first of each
+    /// family wins; the caller builds the list in listen-face order).
+    pub(super) fn mark_primaries(
+        faces: Vec<(
+            crate::listen::ListenEndpoint,
+            udp_demux::DemuxChannels,
+            UdpDemuxHandle,
+        )>,
+    ) -> Vec<UdpFace> {
+        let mut seen_v4 = false;
+        let mut seen_v6 = false;
+        faces
+            .into_iter()
+            .map(|(endpoint, channels, handle)| {
+                let family = endpoint.family();
+                let primary = match family {
+                    DhtFamily::V4 => !seen_v4,
+                    DhtFamily::V6 => !seen_v6,
+                };
+                match family {
+                    DhtFamily::V4 => seen_v4 = true,
+                    DhtFamily::V6 => seen_v6 = true,
+                }
+                UdpFace {
+                    endpoint,
+                    family,
+                    primary,
+                    channels,
+                    handle,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Secondary-face DHT merge pump (multi-listen phase): forwards a
+/// secondary face's demux dht channel into the family engine through
+/// the gate's engine slot — the same warm/disable semantics as the
+/// gate's own pump (disabled = packets dropped, the channel drains via
+/// the demux's best-effort drops; warm = forwarded to the current
+/// engine's inbound channel). Without this pump a second face of a
+/// family would silently drop every inbound DHT packet (a demux
+/// consumer-closed face).
+pub(super) fn spawn_dht_secondary_face(
+    inbound: mpsc::Receiver<udp_demux::InboundPacket>,
+    gate: &std::sync::Arc<DhtInboundGate>,
+    token: CancellationToken,
+) {
+    let mut slot = gate.engine_slot();
+    tokio::spawn(async move {
+        let mut rx = inbound;
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => break,
+                changed = slot.changed() => {
+                    if changed.is_err() {
+                        // Gate dropped (engine teardown).
+                        break;
+                    }
+                }
+                pkt = rx.recv() => match pkt {
+                    Some(p) => {
+                        // Snapshot the current engine target (clone out
+                        // of the watch before any await).
+                        let tx = slot.borrow_and_update().clone();
+                        if let Some(tx) = tx {
+                            // A send failure = engine side closed
+                            // (runtime disable or shutdown): wait for
+                            // the next warm-up like the gate pump.
+                            let _ = tx.send(p).await;
+                        }
+                        // None = DHT disabled: drop (the gate's own
+                        // disable semantics).
+                    }
+                    // demux closed (socket shutdown).
+                    None => break,
+                },
+            }
+        }
+    });
+}
+
 /// Engine-level UDP face: [`udp_demux::spawn`] takes over the
 /// listen-port UDP surface with one shared socket per family — DHT (the
 /// dht channel) and UDP tracker (the tracker channel) share it,
@@ -323,11 +440,17 @@ fn v6_face_bind_addr(probed: Option<IpAddr>) -> IpAddr {
 /// the face degrades as unavailable like any other bind failure. LSD
 /// (BEP14 multicast) keeps its own socket on the default route (a
 /// link-local multicast face, phase-1 residual).
+///
+/// This spawn is the **default-path** face source (no
+/// `taiji.listen-interfaces` entries); the multi-listen path builds
+/// [`UdpFace`]s from the expanded listen endpoints instead (the GUA
+/// probe is a wildcard-bind concern — explicit endpoints bind their
+/// own addresses).
 pub(super) async fn spawn_udp_face(
     port: u16,
     egress: Option<IpAddr>,
     token: &CancellationToken,
-) -> Vec<(DhtFamily, udp_demux::DemuxChannels, UdpDemuxHandle)> {
+) -> Vec<UdpFace> {
     let mut faces = Vec::new();
     // One probe at the assembly point (the bootstrap task separately
     // probes for BEP 42 derivation + the gate, see assemble; both share
@@ -346,7 +469,7 @@ pub(super) async fn spawn_udp_face(
                     info!(target: "taiji::core::engine", bind = %bind, port,
                         "v6 udp face bound to probed global address ( outbound source = GUA)");
                 }
-                faces.push((family, channels, handle));
+                faces.push((default_face_endpoint(bind, &handle), channels, handle));
             }
             Err(e) if family == DhtFamily::V6 && egress.is_none() => {
                 if bind != IpAddr::V6(Ipv6Addr::UNSPECIFIED) {
@@ -359,7 +482,13 @@ pub(super) async fn spawn_udp_face(
                     match udp_demux::spawn(IpAddr::V6(Ipv6Addr::UNSPECIFIED), config, token.clone())
                         .await
                     {
-                        Ok((channels, handle)) => faces.push((family, channels, handle)),
+                        Ok((channels, handle)) => {
+                            faces.push((
+                                default_face_endpoint(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &handle),
+                                channels,
+                                handle,
+                            ));
+                        }
                         Err(e) => {
                             info!(target: "taiji::core::engine", %e, port,
                                 "v6 udp face unavailable (v4-only UDP: tracker/DHT)");
@@ -388,7 +517,30 @@ pub(super) async fn spawn_udp_face(
             "udp faces narrowed to the egress bind family (--interface: uTP/DHT/UDP-tracker \
              egress pinned to the chosen address)");
     }
-    faces
+    UdpFace::mark_primaries(faces)
+}
+
+/// Default-path face endpoint identity (the phase-3 route context for
+/// [`spawn_udp_face`]'s faces): the bind address with its actual demux
+/// port and a `/0` netmask — the wildcard v4/`[::]` faces short-circuit
+/// at can_route's unspecified arm anyway, and the probed-GUA face has
+/// no netmask source (the probe returns an address only); `/0` routes
+/// every same-family destination, exactly the standing
+/// single-face-per-family pick. Gateway classification (the probe
+/// yields a global address by construction; the user's egress literal
+/// is gateway-classified like any explicit literal, the upstream
+/// `interface_to_endpoints` rule).
+fn default_face_endpoint(bind: IpAddr, handle: &UdpDemuxHandle) -> crate::listen::ListenEndpoint {
+    crate::listen::ListenEndpoint {
+        addr: bind,
+        port: handle.bound_addr().port(),
+        device: String::new(),
+        netmask: match bind {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        },
+        local_network: false,
+    }
 }
 
 /// UDP-face plan under an egress bind (a pure decision, table-tested):
@@ -1319,7 +1471,7 @@ mod tests {
         let faces = spawn_udp_face(0, None, &token).await;
         let Some((mut dht_rx, handle)) = faces
             .into_iter()
-            .find_map(|(f, ch, h)| (f == DhtFamily::V6).then_some((ch.dht, h)))
+            .find_map(|f| (f.family == DhtFamily::V6).then_some((f.channels.dht, f.handle)))
         else {
             eprintln!(
                 "skip udp_face_v6_binds_probed_gua_and_serves_loopback: v6 face unbound (no v6 address environment)"

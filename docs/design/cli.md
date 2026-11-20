@@ -488,6 +488,25 @@ value face. Narrow declared residual: the FTP transport, the magnet
 metadata phase, and the HTTP-tracker announce face stay on the default
 route.
 
+`--taiji-listen-interfaces` (extension option, the `taiji.` namespace —
+no aria2 counterpart; the libtorrent `listen_interfaces` shape) is the
+declarative multi-interface listen face, parsed once in `run` (invalid
+entries warn individually and are skipped, never fatal; no suffix
+flags in the grammar — trailing characters after the port digits make
+the entry invalid, a stated minimal-surface divergence). Device names
+expand through the OS interface table at engine assembly (bind-time
+resolution); wildcards (`0.0.0.0`/`::`) expand to one face per
+interface address (BEP 32/45). Each face = one TCP listener + one UDP
+demux (uTP accepts per face; the DHT engine, uTP dial service, and
+tracker UDP egress ride each family's first-bound primary face; DHT
+inbound from secondary faces merges into the family engine through the
+inbound gate). Enumeration failure or an empty expansion degrades to
+the single wildcard listen (warn). Startup-only (like `--listen-port`);
+unset = the standing single-listen behavior. The conf key
+`taiji-listen-interfaces` mirrors the raw value face. Full pipeline
+semantics and the `--interface` combination matrix:
+`docs/design/listen-interfaces.md`.
+
 ### Exit codes
 
 Baseline shared by all modes, checked before mode dispatch: `2` = usage /

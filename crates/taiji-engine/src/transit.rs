@@ -289,14 +289,29 @@ impl LeaveKind {
     /// metrics.rs literal table — across the crate boundary the label
     /// contract's single source is the
     /// [`crate::metrics::MetricsSnapshot`] field docs).
+    ///
+    /// Reconciliation: the projection routes through the bt-side
+    /// close-reason table ([`taiji_bt::close_reason::close_reason_of_end`]
+    /// -> [`taiji_bt::close_reason::CloseReason::close_class`]) — the
+    /// SAME single table the peer-visible `ut_close` wire values derive
+    /// from, so the local counters and the sent frames cannot disagree
+    /// by construction. The five label values themselves are frozen
+    /// (additive only).
     pub(crate) fn of(end: &taiji_bt::peer::PeerEnd) -> LeaveKind {
-        use taiji_bt::peer::PeerEnd;
-        match end {
-            PeerEnd::Clean => LeaveKind::Local,
-            PeerEnd::Cancelled => LeaveKind::Cancelled,
-            PeerEnd::Closed => LeaveKind::PeerClosed,
-            PeerEnd::Io { .. } => LeaveKind::Io,
-            PeerEnd::Violation(_) | PeerEnd::Flooded => LeaveKind::Protocol,
+        LeaveKind::of_close(&taiji_bt::close_reason::close_reason_of_end(end))
+    }
+
+    /// The close-reason half of the projection (the metric label class
+    /// of a wire close reason; kept public to the crate for the
+    /// reconciliation lock tests).
+    pub(crate) fn of_close(reason: &taiji_bt::close_reason::CloseReason) -> LeaveKind {
+        use taiji_bt::close_reason::CloseClass;
+        match reason.close_class() {
+            CloseClass::Local => LeaveKind::Local,
+            CloseClass::Io => LeaveKind::Io,
+            CloseClass::Protocol => LeaveKind::Protocol,
+            CloseClass::Cancelled => LeaveKind::Cancelled,
+            CloseClass::PeerClosed => LeaveKind::PeerClosed,
         }
     }
 }
@@ -711,6 +726,12 @@ pub(super) struct DialJob {
 /// = no uTP face for that family).
 pub(super) type UtpDialReq = (SocketAddr, oneshot::Sender<Option<UtpStream>>);
 
+/// One face's uTP dial route (the phase-3 dispatch entry): the face
+/// endpoint (address + netmask + classification — the
+/// [`crate::listen::pick_route_face`] predicate input) with the
+/// face's delegated-dial request channel as the rider.
+pub(super) type UtpRoute = crate::listen::RouteFace<mpsc::Sender<UtpDialReq>>;
+
 // ---- Punch-dedicated path (holepunch mode) ----
 
 /// Fast-retry cap inside the punch window. Source: libtorrent
@@ -761,30 +782,61 @@ pub(super) fn punch_gave_up_nat(attempts: &[&str]) -> bool {
 /// Failure class of one attempt on the punch-dedicated path.
 pub(super) const PUNCH_CLASS_TIMEOUT: &str = "punch-timeout";
 
-/// uTP outbound dial face: each family's UtpListenerHandle is held by
-/// an exclusive service task (the only consumer of the demuxed uTP
-/// channel; the listener routing table is the connection registry —
-/// outbound connect and accept must consume the same instance), and
-/// dials go through a request channel. The request channel is
-/// bounded(64): dialing is low-frequency (announce/DHT-period
-/// driven), and a full channel awaits backpressure on the dial task —
-/// the whole backpressure/reply wait is bounded by the
-/// [`UtpDial::connect`] budget (default 10s), so a stalled consumer
-/// no longer hangs the dial task indefinitely.
+/// uTP outbound dial face: every uTP-serving listen face's
+/// UtpListenerHandle is held by an exclusive service task (the only
+/// consumer of the demuxed uTP channel; the listener routing table is
+/// the connection registry — outbound connect and accept must consume
+/// the same instance), and dials go through per-face request channels.
+/// The face for one destination is picked by route context
+/// ([`crate::listen::pick_route_face`], the phase-3 can_route
+/// dispatch): the netmask-matching face of the destination family, the
+/// family primary as the fallback — with one face per family (default,
+/// egress-bound, single-entry configs) every pick IS the primary, the
+/// phase-2 behavior exactly. Request channels are bounded(64):
+/// dialing is low-frequency (announce/DHT-period driven), and a full
+/// channel awaits backpressure on the dial task — the whole
+/// backpressure/reply wait is bounded by the [`UtpDial::connect`]
+/// budget (default 10s), so a stalled consumer no longer hangs the
+/// dial task indefinitely.
 #[derive(Clone, Default)]
 pub(super) struct UtpDial {
-    pub(super) v4: Option<mpsc::Sender<UtpDialReq>>,
-    pub(super) v6: Option<mpsc::Sender<UtpDialReq>>,
+    /// One route entry per uTP-serving face (empty = no uTP anywhere:
+    /// every dial fails fast, the family-unavailable semantics).
+    pub(super) routes: Vec<UtpRoute>,
 }
 
 impl UtpDial {
+    /// Single-face seam constructor (test rigs): one route whose
+    /// endpoint routes every same-family destination (the
+    /// pre-dispatch shape — the family-uniform face of the
+    /// default/egress/single-entry paths; production builds the route
+    /// table per bound face in `wire_dht_and_utp`).
+    #[cfg(test)]
+    pub(super) fn single_face(addr: IpAddr, tx: mpsc::Sender<UtpDialReq>) -> Self {
+        let routes = vec![UtpRoute {
+            endpoint: crate::listen::ListenEndpoint {
+                addr,
+                port: 0,
+                device: String::new(),
+                netmask: match addr {
+                    IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                    IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                },
+                local_network: false,
+            },
+            primary: true,
+            rider: tx,
+        }];
+        Self { routes }
+    }
+
     /// Open a uTP connection: `UtpListenerHandle::connect` returns
     /// the stream handle (SYN retransmission/give-up is bounded by
     /// the driver's timeout rounds; the handshake budget =
-    /// [`MSE_HANDSHAKE_TIMEOUT`], see [`handshake_over`]). No uTP face
-    /// for the address family (demux bind failure / missing family)
-    /// -> None = this transport attempt failed; move to the next
-    /// transport per the plan.
+    /// [`MSE_HANDSHAKE_TIMEOUT`], see [`handshake_over`]). No routable
+    /// uTP face for the address family (demux bind failure / missing
+    /// family) -> None = this transport attempt failed; move to the
+    /// next transport per the plan.
     ///
     /// Total budget: this await used to be the only timeout-free point
     /// in the peer_connect chain (both the bounded(64) queue's
@@ -818,11 +870,8 @@ impl UtpDial {
         addr: SocketAddr,
         budget: Option<Duration>,
     ) -> Option<UtpStream> {
-        let tx = if addr.is_ipv4() {
-            self.v4.as_ref()?
-        } else {
-            self.v6.as_ref()?
-        };
+        let route = crate::listen::pick_route_face(&self.routes, addr)?;
+        let tx = &route.rider;
         let (back, rx) = oneshot::channel();
         let dial = async {
             tx.send((addr, back)).await.ok()?;
@@ -1821,6 +1870,41 @@ mod dial_result_log_tests {
         }
     }
 
+    /// Reconciliation lock (the metric and the wire share one source):
+    /// every wire close reason's five-way class lands on exactly the
+    /// LeaveKind whose label the `taiji_peer_leaves_total{reason}`
+    /// family renders — the local metric therefore derives from the
+    /// same bt-side table that produces the `ut_close` wire values (the
+    /// two faces cannot drift apart; new reasons must extend
+    /// `close_class` alongside their group).
+    #[test]
+    fn leave_kind_close_reason_reconciliation_table() {
+        use taiji_bt::close_reason::{CloseReason as R, UT_CLOSE_NAME};
+        // The extension identity the wire face advertises (guards
+        // against silent renames of the negotiated name).
+        assert_eq!(UT_CLOSE_NAME, "ut_close");
+        let cases = [
+            (R::LocalShutdown, LeaveKind::Local),
+            (R::LocalPolicy, LeaveKind::Local),
+            (R::IoTimedOut, LeaveKind::Io),
+            (R::IoReset, LeaveKind::Io),
+            (R::IoBrokenPipe, LeaveKind::Io),
+            (R::IoOther, LeaveKind::Io),
+            (R::BadPieceIndex, LeaveKind::Protocol),
+            (R::BadBlockCoords, LeaveKind::Protocol),
+            (R::UnsolicitedPiece, LeaveKind::Protocol),
+            (R::OversizeRequest, LeaveKind::Protocol),
+            (R::RequestsWhileChoked, LeaveKind::Protocol),
+            (R::ClientBanned, LeaveKind::Protocol),
+            (R::Flooded, LeaveKind::Protocol),
+            (R::Cancelled, LeaveKind::Cancelled),
+            (R::PeerClosed, LeaveKind::PeerClosed),
+        ];
+        for (reason, want) in cases {
+            assert_eq!(LeaveKind::of_close(&reason), want, "reason={reason:?}");
+        }
+    }
+
     /// Log-capturing writer (the sink for the thread-local
     /// set_default subscription).
     #[derive(Clone, Default)]
@@ -2150,10 +2234,7 @@ mod dial_result_log_tests {
             ))
             .await
             .unwrap_or_else(|e| panic!("{e}"));
-        let dial = UtpDial {
-            v4: Some(req_tx),
-            v6: None,
-        };
+        let dial = UtpDial::single_face(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), req_tx);
         let addr: SocketAddr = "127.0.0.1:9462".parse().unwrap_or_else(|e| panic!("{e}"));
         let started = std::time::Instant::now();
         let res = dial
@@ -2177,10 +2258,7 @@ mod dial_result_log_tests {
     #[tokio::test]
     async fn utp_dial_budget_none_passes_through() {
         let (req_tx, mut req_rx) = mpsc::channel::<UtpDialReq>(1);
-        let dial = UtpDial {
-            v4: Some(req_tx),
-            v6: None,
-        };
+        let dial = UtpDial::single_face(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), req_tx);
         let addr: SocketAddr = "127.0.0.1:9463".parse().unwrap_or_else(|e| panic!("{e}"));
         // None = the old unbounded behavior: served normally by a
         // concurrent consumer (zero budget-layer involvement — if a
@@ -2220,10 +2298,7 @@ mod dial_result_log_tests {
         let addr: SocketAddr = "127.0.0.1:9464".parse().unwrap_or_else(|e| panic!("{e}"));
         let mut job = dial_job(addr);
         job.conn_type = PeerConnectionType::Utp;
-        job.utp = UtpDial {
-            v4: Some(req_tx),
-            v6: None,
-        };
+        job.utp = UtpDial::single_face(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), req_tx);
         peer_connect(job).await;
         let text = String::from_utf8(buf.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
             .unwrap_or_else(|e| panic!("{e}"));
@@ -2235,6 +2310,105 @@ mod dial_result_log_tests {
             text.contains("attempts=\"utp-connect\""),
             "missing the utp-connect failure class: {text}"
         );
+    }
+
+    /// Phase-3 per-destination dial dispatch (a two-face rig): one
+    /// route per face; a destination inside the secondary face's
+    /// subnet dials through THAT face's channel, an off-subnet
+    /// destination falls back to the family primary, and a family
+    /// with no face dials None fast (the family-unavailable class).
+    /// Single-face degeneration is the `single_face` constructor's
+    /// every-destination pick (the same routing predicate, pinned in
+    /// `pick_route_face_single_face_degenerates_to_primary`).
+    #[tokio::test]
+    async fn utp_dial_picks_face_by_destination() {
+        let (primary_tx, mut primary_rx) = mpsc::channel::<UtpDialReq>(1);
+        let (secondary_tx, mut secondary_rx) = mpsc::channel::<UtpDialReq>(1);
+        let dial = UtpDial {
+            routes: vec![
+                UtpRoute {
+                    endpoint: crate::listen::ListenEndpoint {
+                        addr: IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5)),
+                        port: 6881,
+                        device: String::new(),
+                        netmask: IpAddr::V4(std::net::Ipv4Addr::new(255, 0, 0, 0)),
+                        local_network: false,
+                    },
+                    primary: true,
+                    rider: primary_tx.clone(),
+                },
+                UtpRoute {
+                    endpoint: crate::listen::ListenEndpoint {
+                        addr: IpAddr::V4(std::net::Ipv4Addr::new(10, 8, 0, 2)),
+                        port: 6881,
+                        device: String::new(),
+                        netmask: IpAddr::V4(std::net::Ipv4Addr::new(255, 255, 255, 0)),
+                        local_network: false,
+                    },
+                    primary: false,
+                    rider: secondary_tx.clone(),
+                },
+            ],
+        };
+        // Inside the secondary /24: the request must appear on the
+        // secondary channel (and only there).
+        let dest: SocketAddr = "10.8.0.7:4242".parse().unwrap_or_else(|e| panic!("{e}"));
+        let call = tokio::spawn({
+            let dial = dial.clone();
+            async move {
+                dial.connect_bounded(dest, Some(Duration::from_secs(5)))
+                    .await
+            }
+        });
+        let (got_dest, got_back) =
+            tokio::time::timeout(Duration::from_secs(2), secondary_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("the secondary face must receive the dial"))
+                .unwrap_or_else(|| panic!("the secondary dial channel closed"));
+        assert_eq!(got_dest, dest);
+        assert!(
+            primary_rx.try_recv().is_err(),
+            "the primary face is not touched"
+        );
+        let _ = got_back.send(None);
+        assert!(
+            call.await.unwrap_or_else(|e| panic!("{e}")).is_none(),
+            "the reply payload passes through"
+        );
+        // Off-subnet (no netmask match): the primary fallback.
+        let dest: SocketAddr = "10.9.0.1:4242".parse().unwrap_or_else(|e| panic!("{e}"));
+        let call = tokio::spawn({
+            let dial = dial.clone();
+            async move {
+                dial.connect_bounded(dest, Some(Duration::from_secs(5)))
+                    .await
+            }
+        });
+        let (got_dest, got_back) = tokio::time::timeout(Duration::from_secs(2), primary_rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("the primary face serves the fallback"))
+            .unwrap_or_else(|| panic!("the primary dial channel closed"));
+        assert_eq!(got_dest, dest);
+        assert!(secondary_rx.try_recv().is_err());
+        let _ = got_back.send(None);
+        let _ = call.await;
+        // v6 destination with a v4-only route table: no routable face
+        // -> None immediately (the family-unavailable class).
+        let dest: SocketAddr = "[2001:db8::1]:4242"
+            .parse()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let started = std::time::Instant::now();
+        let res = dial
+            .connect_bounded(dest, Some(Duration::from_secs(5)))
+            .await;
+        assert!(res.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "no-route returns before any budget wait"
+        );
+        // Keep the remaining sender clones alive until the end: their
+        // drop is what closes the channels, after every probe above.
+        drop((primary_tx, secondary_tx));
     }
 
     /// Dead-address uTP-arm trim four-quadrant table (the
@@ -2376,10 +2550,7 @@ mod dial_result_log_tests {
         let (req_tx, _req_rx_alive) = mpsc::channel::<UtpDialReq>(1);
         let mut job = dial_job(closed);
         job.conn_type = PeerConnectionType::PreferTcp;
-        job.utp = UtpDial {
-            v4: Some(req_tx),
-            v6: None,
-        };
+        job.utp = UtpDial::single_face(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), req_tx);
         job.fails = 2;
         let started = std::time::Instant::now();
         peer_connect(job).await;
@@ -2431,10 +2602,7 @@ mod dial_result_log_tests {
         drop(req_rx); // dead queue: the uTP try returns None fast (no budget wait).
         let mut job = dial_job(closed);
         job.conn_type = PeerConnectionType::PreferTcp;
-        job.utp = UtpDial {
-            v4: Some(req_tx),
-            v6: None,
-        };
+        job.utp = UtpDial::single_face(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), req_tx);
         job.fails = 0;
         peer_connect(job).await;
         let text = String::from_utf8(buf.0.lock().unwrap_or_else(|e| e.into_inner()).clone())

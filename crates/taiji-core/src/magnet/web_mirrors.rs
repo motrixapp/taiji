@@ -527,6 +527,7 @@ mod tests {
             // own snapshot.
             ip_guard: None,
             egress: None,
+            listen_interfaces: Vec::new(),
         };
         let root = CancellationToken::new();
         MagnetEngine::spawn(cfg, &root)

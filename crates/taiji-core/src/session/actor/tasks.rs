@@ -338,6 +338,11 @@ impl SessionActor {
                 // change (the field doc declares the narrow residual —
                 // FTP/metadata-phase faces stay on the default route).
                 config.egress = self.global.interface;
+                // Multi-interface listen face (`taiji.listen-interfaces`,
+                // session startup global): the engine's listen surface
+                // becomes one face per expanded endpoint; empty = the
+                // standing single-wildcard listen shape, zero change.
+                config.listen_interfaces = self.global.listen_interfaces.clone();
                 config.initial_selection = selected_files.clone();
                 let (engine, join) = DownloadEngine::spawn_controlled(
                     config,
@@ -691,6 +696,11 @@ impl SessionActor {
                     // point — the metadata phase's own sockets stay on
                     // the default route, declared residual).
                     egress: self.global.interface,
+                    // Multi-interface listen face
+                    // (`taiji.listen-interfaces`; the torrent activation
+                    // path injects at the same point; empty = the
+                    // standing single-wildcard listen shape).
+                    listen_interfaces: self.global.listen_interfaces.clone(),
                 };
                 // Controlled spawn — upgrade notification face (the upgraded
                 // engine handle returns to the session, followedBy served as

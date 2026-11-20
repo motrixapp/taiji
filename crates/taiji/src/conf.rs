@@ -139,6 +139,11 @@ const CONF_KEYS: &[&str] = &[
     "save-session-interval",
     "auto-save-interval",
     "interface",
+    // The taiji.* extension-namespace face (the same face as the CLI
+    // flag): the multi-interface listen list, stored verbatim (parsed
+    // once in run via listen_interfaces_from_cli — invalid entries
+    // warn individually there, never fatal).
+    "taiji-listen-interfaces",
     "disable-ipv6",
     "dht-entry-point6",
     "ftp-type",
@@ -859,6 +864,14 @@ fn apply_entry(
         "interface" => {
             cli_wins!("interface");
             cli.interface = Some(value.to_string());
+        }
+        // `taiji-listen-interfaces`: the comma list is stored verbatim
+        // (the multi-listen value face; parsed once in run via
+        // listen_interfaces_from_cli — invalid entries warn
+        // individually and are skipped, never fatal).
+        "taiji-listen-interfaces" => {
+            cli_wins!("taiji_listen_interfaces");
+            cli.taiji_listen_interfaces = Some(value.to_string());
         }
         // `disable-ipv6`: the bool value domain matches the CLI flag
         // (an acceptance-disclosure face — the resolution/dial faces
@@ -1581,6 +1594,7 @@ mod tests {
             "save-session-interval" => "0",
             "auto-save-interval" => "60",
             "interface" => "eth0",
+            "taiji-listen-interfaces" => "en0:6881,127.0.0.1:6882",
             "disable-ipv6" | "no-netrc" | "dry-run" | "show-files" => "true",
             "dht-entry-point6" => "router6.example.com:6881",
             "ftp-type" => "binary",
@@ -1781,7 +1795,7 @@ mod tests {
             // `--interface` stays unparsed here (the string value face;
             // the IP/device-name resolution + disclosure happen once in
             // run — the projection test passes the unbound None).
-            let opts = crate::build_idle_options(cli, crypto, conn_type, None);
+            let opts = crate::build_idle_options(cli, crypto, conn_type, None, Vec::new());
             opts.to_session_options(&crate::rpc_config_from_cli(cli))
         };
 
@@ -2026,6 +2040,7 @@ mod tests {
              save-session-interval=90\n\
              auto-save-interval=60\n\
              interface=eth1\n\
+             taiji-listen-interfaces=en0:6881,[::1]:6882\n\
              disable-ipv6=true\n\
              dht-entry-point6=[2001:db8::1]:6881\n\
              ftp-type=ascii\n\
@@ -2056,6 +2071,11 @@ mod tests {
         assert_eq!(cli.save_session_interval, 90);
         assert_eq!(cli.auto_save_interval, Some(60));
         assert_eq!(cli.interface.as_deref(), Some("eth1"));
+        assert_eq!(
+            cli.taiji_listen_interfaces.as_deref(),
+            Some("en0:6881,[::1]:6882"),
+            "the comma list passes through verbatim (bracketed v6 form included)"
+        );
         assert_eq!(cli.disable_ipv6, Some(true));
         assert_eq!(
             cli.dht_entry_point6.as_deref(),

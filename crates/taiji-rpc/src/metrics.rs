@@ -388,6 +388,13 @@ pub(crate) fn render(
     out.push_str(&snap.peer_bans_total.to_string());
     out.push('\n');
     out.push_str(
+        "# HELP taiji_peer_blocked_ingress_total Inbound peer connections rejected by the egress interface policy (armed with --interface; local address not on the egress allowlist).\n\
+         # TYPE taiji_peer_blocked_ingress_total counter\n",
+    );
+    out.push_str("taiji_peer_blocked_ingress_total ");
+    out.push_str(&snap.peer_blocked_ingress_total.to_string());
+    out.push('\n');
+    out.push_str(
         "# HELP taiji_redial_attempts_total Redial-pool dial attempts (, libtorrent min_reconnect_time semantics).\n\
          # TYPE taiji_redial_attempts_total counter\n",
     );
@@ -1782,6 +1789,7 @@ mod tests {
         snap.peers_by_class_tcp = 8;
         snap.peers_by_class_utp = 2;
         snap.peer_bans_total = 2;
+        snap.peer_blocked_ingress_total = 1;
         snap.dht_nodes_v4 = 120;
         snap.dht_nodes_v6 = 8;
         snap.dht_queries_ping_total = 21;
@@ -1855,6 +1863,7 @@ mod tests {
             "taiji_peers_by_class{class=\"tcp\"} 8",
             "taiji_peers_by_class{class=\"utp\"} 2",
             "taiji_peer_bans_total 2",
+            "taiji_peer_blocked_ingress_total 1",
             "taiji_dht_nodes{family=\"v4\"} 120",
             "taiji_dht_nodes{family=\"v6\"} 8",
             "taiji_dht_queries_total{kind=\"ping\"} 21",
@@ -2628,6 +2637,9 @@ mod tests {
             "# HELP taiji_peer_bans_total Peer bans enacted (auto rules, SPEC §13).",
             "# TYPE taiji_peer_bans_total counter",
             "taiji_peer_bans_total 0",
+            "# HELP taiji_peer_blocked_ingress_total Inbound peer connections rejected by the egress interface policy (armed with --interface; local address not on the egress allowlist).",
+            "# TYPE taiji_peer_blocked_ingress_total counter",
+            "taiji_peer_blocked_ingress_total 0",
             "# HELP taiji_redial_attempts_total Redial-pool dial attempts (, libtorrent min_reconnect_time semantics).",
             "# TYPE taiji_redial_attempts_total counter",
             "taiji_redial_attempts_total 0",

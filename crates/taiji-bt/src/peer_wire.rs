@@ -883,6 +883,14 @@ pub struct ExtHandshake {
     /// itself advertises 4 — BEP-10 ids are local, interop does not depend
     /// on the value; see the `crate::holepunch` module docs).
     pub m_ut_holepunch: Option<u8>,
+    /// Outbound ut_close advertisement id (the peer-visible close-reason
+    /// extension, [`crate::close_reason`]): Some = advertise
+    /// `m.ut_close` and consume inbound close frames; None = neither. A
+    /// close frame is sent at disconnect only when BOTH sides advertised
+    /// (the gate = the `BH_CLOSE_NOTIFY` runtime knob, default on; the
+    /// value table is a published contract, see
+    /// [`crate::close_reason::CloseReason`]).
+    pub m_ut_close: Option<u8>,
     pub p: Option<u16>,
     pub v: Option<String>,
     pub metadata_size: Option<u32>,
@@ -898,7 +906,10 @@ impl ExtHandshake {
         let mut dict: Vec<(Vec<u8>, Value)> = Vec::new();
         let mut m_dict: Vec<(Vec<u8>, Value)> = Vec::new();
         // m-dict keys also ascending (encode rejects unordered dicts):
-        // ut_holepunch < ut_metadata < ut_pex.
+        // ut_close < ut_holepunch < ut_metadata < ut_pex.
+        if let Some(id) = self.m_ut_close {
+            m_dict.push((b"ut_close".to_vec(), Value::Int(id as i64)));
+        }
         if let Some(id) = self.m_ut_holepunch {
             m_dict.push((b"ut_holepunch".to_vec(), Value::Int(id as i64)));
         }
@@ -985,6 +996,9 @@ impl ExtHandshake {
                             (b"ut_holepunch", Value::Int(i)) => {
                                 out.m_ut_holepunch = u8::try_from(*i).ok().filter(|id| *id != 0);
                             }
+                            (b"ut_close", Value::Int(i)) => {
+                                out.m_ut_close = u8::try_from(*i).ok().filter(|id| *id != 0);
+                            }
                             _ => {} // unknown extension names ignored (BEP-10 interop)
                         }
                     }
@@ -1011,6 +1025,7 @@ pub struct ExtRegistry {
     ut_metadata: Option<u8>,
     ut_pex: Option<u8>,
     ut_holepunch: Option<u8>,
+    ut_close: Option<u8>,
 }
 
 impl ExtRegistry {
@@ -1023,6 +1038,7 @@ impl ExtRegistry {
             ut_metadata: Some(2),
             ut_pex: Some(1),
             ut_holepunch: None,
+            ut_close: None,
         }
     }
 
@@ -1031,6 +1047,7 @@ impl ExtRegistry {
             ut_metadata: None,
             ut_pex: None,
             ut_holepunch: None,
+            ut_close: None,
         }
     }
 
@@ -1042,6 +1059,7 @@ impl ExtRegistry {
             // the ExtensionMessageRegistry filter — registered dynamically
             // here, BEP-10 m-dict semantics).
             "ut_holepunch" => self.ut_holepunch = Some(id),
+            "ut_close" => self.ut_close = Some(id),
             _ => {} // unknown names not registered (aria2 strBtExtension name table)
         }
     }
@@ -1051,6 +1069,7 @@ impl ExtRegistry {
             "ut_metadata" => self.ut_metadata = None,
             "ut_pex" => self.ut_pex = None,
             "ut_holepunch" => self.ut_holepunch = None,
+            "ut_close" => self.ut_close = None,
             _ => {}
         }
     }
@@ -1060,6 +1079,7 @@ impl ExtRegistry {
             "ut_metadata" => self.ut_metadata,
             "ut_pex" => self.ut_pex,
             "ut_holepunch" => self.ut_holepunch,
+            "ut_close" => self.ut_close,
             _ => None,
         }
     }

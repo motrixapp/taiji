@@ -140,13 +140,15 @@ const LONG_FLAGS: &[&str] = &[
     "max-file-not-found",
     "max-mmap-limit",
     "max-resume-failure-tries",
-    // The domain C misc family (cookies/session/interface).
+    // The domain C misc family (cookies/session/interface) + the
+    // taiji.* extension namespace (the multi-listen face).
     "load-cookies",
     "save-cookies",
     "save-session",
     "save-session-interval",
     "auto-save-interval",
     "interface",
+    "taiji-listen-interfaces",
     "disable-ipv6",
     "dht-entry-point6",
     "ftp-type",

@@ -1370,3 +1370,30 @@ fn dict(pairs: Vec<(&[u8], Value)>) -> Value {
     v.sort_by(|a, b| a.0.cmp(&b.0));
     Value::Dict(v)
 }
+
+/// Default-unset zero-change guard (the multi-listen phase): the
+/// assembly face's `listen_interfaces` default is the empty table —
+/// the standing single-wildcard listen shape. The CLI/session chains
+/// inject the parsed `taiji.listen-interfaces` entries before spawn;
+/// without them the engine must keep the exact pre-option behavior
+/// (the whole existing suite is the behavioral zero-drift proof, this
+/// pins the config-level default).
+#[test]
+fn engine_config_listen_interfaces_default_empty() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../taiji-bt/tests/fixtures/hybrid_16k.torrent");
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read fixture: {e}"));
+    let m = Metainfo::parse(&bytes).unwrap_or_else(|e| panic!("parse: {e}"));
+    let cfg = m
+        .engine_config(
+            std::env::temp_dir(),
+            6881,
+            *b"-TJ0001-DEFAULTCFG00",
+            CompletionMode::Seed,
+        )
+        .unwrap_or_else(|e| panic!("engine_config: {e}"));
+    assert!(
+        cfg.listen_interfaces.is_empty(),
+        "default = empty = the standing single-listen shape (zero change)"
+    );
+}

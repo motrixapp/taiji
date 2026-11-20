@@ -260,6 +260,11 @@ mod config;
 mod dht;
 mod dispatch;
 mod faces;
+/// Declarative multi-interface listen face (`taiji.listen-interfaces`):
+/// parse -> enumerate -> expand -> diff-rebuild (the libtorrent
+/// `listen_interfaces` discipline; empty option = the standing
+/// single-wildcard listen shape, zero change).
+pub mod listen;
 /// Built-in connection classes (local/tcp/utp): the libtorrent-aligned
 /// address/transport assignment table and the class budget arithmetic
 /// (consumed by the choke round, connection admission, and the

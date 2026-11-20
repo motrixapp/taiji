@@ -250,6 +250,19 @@ pub struct PeerConfig {
     /// overwrites it with the peer's handshake bit (transit
     /// `attach_peer`, the same pipeline as `peer_fast`).
     pub peer_ext: bool,
+    /// ut_close advertise/send gate (the peer-visible close-reason
+    /// extension, [`crate::close_reason`]). None = environment default
+    /// (`BH_CLOSE_NOTIFY=0` -> neither advertised nor sent, otherwise
+    /// on — the runtime rollback knob); Some pins the mode for
+    /// deterministic wire tests (the same injection shape as
+    /// [`PeerConfig::read_buf_shrink`]). Production assembly always
+    /// passes None. On = the ext handshake advertises `ut_close`, inbound
+    /// close frames are consumed (rate-guarded, logged), and a close
+    /// frame carrying [`crate::close_reason::close_reason_of_end`] of the
+    /// terminal state is sent at disconnect — only to peers that also
+    /// advertised the extension (both-sides negotiation; zero wire
+    /// change otherwise).
+    pub close_reason: Option<bool>,
 }
 
 /// Client identity re-check callback (-6): input = the peer's
@@ -306,6 +319,7 @@ impl std::fmt::Debug for PeerConfig {
             )
             .field("peer_fast", &self.peer_fast)
             .field("peer_ext", &self.peer_ext)
+            .field("close_reason", &self.close_reason)
             .finish()
     }
 }
@@ -347,6 +361,7 @@ impl PeerConfig {
             block_arena: None,
             peer_fast: true,
             peer_ext: false,
+            close_reason: None,
         }
     }
 }

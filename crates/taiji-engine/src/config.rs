@@ -277,6 +277,21 @@ pub struct EngineConfig {
     /// `SocketCore::bindAddress` same shape). The TCP listen socket
     /// (ingress) stays wildcard — multi-listen is the next phase.
     pub egress: Option<std::net::IpAddr>,
+    /// Declarative multi-interface listen face (`taiji.listen-interfaces`,
+    /// the `taiji.*` extension namespace; a comma list of
+    /// `device-or-IP:port` entries, `[v6]:port` bracket form). Consumed
+    /// at engine assembly ([`crate::listen`]): entries enumerate through
+    /// the OS interface table and expand into per-address listen faces
+    /// — one TCP listener + one UDP demux each (uTP/DHT/UDP-tracker
+    /// riders attach per face; see the module docs for the rider map) —
+    /// with a diff-keyed rebuild seam keyed by `(address, port)`. The
+    /// egress bind family narrows the set (the phase-1 interaction; the
+    /// full matrix in `docs/design/listen-interfaces.md`). Enumeration
+    /// failure or an empty expansion degrades to the standing
+    /// single-wildcard listen shape (warn; the platform capability
+    /// fallback). Startup-only (the same rule as `listen_port`); empty
+    /// = the standing single-listen behavior, zero change.
+    pub listen_interfaces: Vec<crate::listen::ListenInterface>,
     /// Monotonic-clock injection (SPEC G6): default
     /// [`super::Clock::default`] = the real monotonic clock, zero
     /// behavior change. Stored once on the loop state and each face
@@ -327,6 +342,7 @@ impl std::fmt::Debug for EngineConfig {
             .field("preset_progress", &self.preset_progress)
             .field("tracker_options", &self.tracker_options)
             .field("egress", &self.egress)
+            .field("listen_interfaces", &self.listen_interfaces)
             .field("clock", &self.clock)
             .field("rng", &self.rng)
             .finish()
@@ -598,6 +614,12 @@ pub fn engine_config(
         // `--interface` value before spawn (the two consumption faces
         // are the peer TCP dial and the UDP demux, see the field doc).
         egress: None,
+        // Multi-interface listen face: not mounted by default (empty =
+        // the standing single-wildcard listen shape, zero change); the
+        // CLI/session chains inject the parsed
+        // `taiji.listen-interfaces` entries before spawn (consumed by
+        // the engine listen module at assembly).
+        listen_interfaces: Vec::new(),
         // Determinism seams (SPEC G6): both default to the real
         // clock / OS entropy — zero behavior difference; tests and the
         // simulation harness overwrite before spawn (seam module

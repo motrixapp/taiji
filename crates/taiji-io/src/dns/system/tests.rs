@@ -28,14 +28,20 @@ impl Gate {
 }
 // Every test owns this before starting work, including the runtime-shutdown
 // test. A failed assertion must never leave a blocked DNS worker behind.
-struct ReleaseOnDrop(Arc<Gate>);
+struct ReleaseOnDrop(Vec<Arc<Gate>>);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
-        self.0.release();
+        for gate in &self.0 {
+            gate.release();
+        }
     }
 }
 struct GatedLookup {
     gate: Arc<Gate>,
+    /// Per-call gates: physical call n waits on `gates[n - 1]`. `None`
+    /// (the default rig) blocks every call up to `blocked_calls` on the
+    /// single shared `gate` instead.
+    call_gates: Option<Vec<Arc<Gate>>>,
     blocked_calls: usize,
     calls: AtomicUsize,
     active: AtomicUsize,
@@ -48,14 +54,43 @@ impl GatedLookup {
         (
             Arc::new(Self {
                 gate: gate.clone(),
+                call_gates: None,
                 blocked_calls,
                 calls: AtomicUsize::new(0),
                 active: AtomicUsize::new(0),
                 peak: AtomicUsize::new(0),
                 hosts: Mutex::new(Vec::new()),
             }),
-            ReleaseOnDrop(gate),
+            ReleaseOnDrop(vec![gate]),
         )
+    }
+    /// One independent gate per blocked physical call (`release_call`),
+    /// so a test can hold one generation inside the flight registry while
+    /// the coalescing of further retries against it is observed.
+    fn with_call_gates(blocked_calls: usize) -> (Arc<Self>, ReleaseOnDrop) {
+        let gates: Vec<_> = (0..blocked_calls)
+            .map(|_| Arc::new(Gate::default()))
+            .collect();
+        (
+            Arc::new(Self {
+                gate: Arc::new(Gate::default()),
+                call_gates: Some(gates.clone()),
+                blocked_calls,
+                calls: AtomicUsize::new(0),
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                hosts: Mutex::new(Vec::new()),
+            }),
+            ReleaseOnDrop(gates),
+        )
+    }
+    fn release_call(&self, call: usize) {
+        self.call_gates
+            .as_ref()
+            .unwrap_or_else(|| panic!("per-call gates not configured"))
+            .get(call - 1)
+            .unwrap_or_else(|| panic!("physical call {call} has no gate"))
+            .release();
     }
 }
 impl BlockingHostLookup for GatedLookup {
@@ -65,7 +100,10 @@ impl BlockingHostLookup for GatedLookup {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
         if call <= self.blocked_calls {
-            self.gate.wait();
+            match &self.call_gates {
+                Some(gates) => gates[call - 1].wait(),
+                None => self.gate.wait(),
+            }
         }
         self.active.fetch_sub(1, Ordering::SeqCst);
         Ok(vec![ip(if call == 1 { 1 } else { 2 })])
@@ -185,11 +223,41 @@ async fn repeated_logical_timeouts_reuse_physical_work_and_new_cohort_recovers()
     );
 }
 
+/// Causal model, made deterministic: the first request starts physical
+/// call 1 (gated). `invalidate` retires that generation; a
+/// post-invalidation request must WAIT for the old physical call (it
+/// coalesces onto the old flight instead of preempting it) and must never
+/// receive the old generation's answer. When the old call returns, its
+/// already-computed success is discarded and BOTH cohorts' retries
+/// coalesce into exactly ONE replacement physical generation — the
+/// replacement call is gated inside the flight registry, so the second
+/// retry cannot miss it regardless of task-wakeup order — which serves
+/// and caches the fresh answer.
+///
+/// Why the test side is the right side: the resolver's guarantees (the
+/// retired generation's stale answer is rewritten to `Cancelled` under
+/// the registry lock, retries that overlap coalesce, physical lookups
+/// never run concurrently for one host) hold under every scheduling
+/// order, but the previously asserted "exactly two physical calls" also
+/// required the two retries to OVERLAP the replacement flight's
+/// microseconds-long registry lifetime — a scheduling assumption, not a
+/// resolver property. The companion test
+/// [`late_retry_after_replacement_completes_starts_one_fresh_bounded_call`]
+/// forces the other interleaving deterministically (one retry's poll held
+/// back until the replacement generation completed) and shows the third
+/// call it produces is a bounded, fresh re-resolution by the retired
+/// cohort — not a stale answer and not a concurrent duplicate. Gating the
+/// replacement call here pins the same coalescing property without
+/// depending on that scheduling luck.
 #[tokio::test]
 async fn invalidation_waits_for_old_physical_generation_then_caches_fresh_answer() {
-    let (lookup, _release) = GatedLookup::new(1);
+    let (lookup, _release) = GatedLookup::with_call_gates(2);
     let (resolver, metrics) = service(lookup.clone(), 1, 4);
-    let shared = SharedDns::with_policy(Arc::new(resolver), metrics.clone(), DnsPolicy::default());
+    let shared = SharedDns::with_policy(
+        Arc::new(resolver.clone()),
+        metrics.clone(),
+        DnsPolicy::default(),
+    );
     let first = {
         let shared = shared.clone();
         tokio::spawn(async move { shared.resolve_for_transport("version.test", 80).await })
@@ -201,15 +269,127 @@ async fn invalidation_waits_for_old_physical_generation_then_caches_fresh_answer
         tokio::spawn(async move { shared.resolve_for_transport("version.test", 80).await })
     };
     until(|| metrics.dns().snapshot().system_coalesced >= 1).await;
+    // The retired generation is still the only physical call: the new
+    // cohort waits for the old flight instead of preempting it.
     assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
-    lookup.gate.release();
+    lookup.release_call(1);
+    // The old generation's success is discarded (its flight was marked
+    // abandoned before it returned); both cohorts retry into ONE
+    // replacement generation, held in the registry on its own gate.
+    until(|| lookup.calls.load(Ordering::SeqCst) == 2).await;
+    until(|| metrics.dns().snapshot().system_coalesced >= 2).await;
+    {
+        let flights = crate::lock(&resolver.inner.flights);
+        assert_eq!(flights.len(), 1, "exactly one replacement flight exists");
+        assert_eq!(
+            flights
+                .get("version.test")
+                .map(|flight| flight.result.receiver_count()),
+            Some(2),
+            "both cohorts' retries joined the replacement flight"
+        );
+    }
+    lookup.release_call(2);
+    let answer = next
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
+        .unwrap_or_else(|e| panic!("{e}"));
+    // Fresh post-invalidation answer (call 2's ip(2)), never call 1's
+    // stale ip(1).
+    assert_eq!(answer, vec![SocketAddr::new(ip(2), 80)]);
+    assert!(first.await.unwrap_or_else(|e| panic!("{e}")).is_ok());
+    assert_eq!(lookup.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        lookup.peak.load(Ordering::SeqCst),
+        1,
+        "physical lookups never overlap"
+    );
+    assert_eq!(
+        shared.cached_family_list("version.test", ResolveFamily::V4, Instant::now()),
+        Some(vec![ip(2)])
+    );
+}
+
+/// Deterministic reproduction of the scheduling interleaving behind this
+/// test family's historic flake ("3 vs 2 physical calls"): the first
+/// cohort runs on its own runtime/thread, and THIS runtime is pinned
+/// (blocked inside the test task) while the retired old generation
+/// publishes and the first cohort's replacement generation runs to
+/// completion and leaves the flight registry. Only then is the new
+/// cohort's retry polled — into an empty registry, so it starts one
+/// fresh physical call. This pins that the extra call is the correct
+/// outcome of that order: the answer served and cached is fresh (never
+/// the retired generation's stale ip(1); `finish` rewrote it to
+/// `Cancelled` under the registry lock), physical lookups never overlap
+/// (peak == 1), and the total stays bounded at one physical call per
+/// waiter — the resolver's invariants hold in BOTH interleavings, so the
+/// old un-gated "exactly two calls" assertion encoded a scheduler
+/// assumption, not a production bug.
+#[tokio::test]
+async fn late_retry_after_replacement_completes_starts_one_fresh_bounded_call() {
+    let (lookup, _release) = GatedLookup::new(1);
+    let (resolver, metrics) = service(lookup.clone(), 1, 4);
+    let shared = SharedDns::with_policy(
+        Arc::new(resolver.clone()),
+        metrics.clone(),
+        DnsPolicy::default(),
+    );
+    // The first cohort runs on its own runtime/thread, so its
+    // post-invalidation retry proceeds even while THIS runtime is pinned.
+    let first_shared = shared.clone();
+    let first = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| panic!("{e}"));
+        runtime
+            .block_on(async move { first_shared.resolve_for_transport("version.test", 80).await })
+    });
+    until(|| lookup.calls.load(Ordering::SeqCst) == 1).await;
+    shared.invalidate("version.test");
+    let next = {
+        let shared = shared.clone();
+        tokio::spawn(async move { shared.resolve_for_transport("version.test", 80).await })
+    };
+    until(|| metrics.dns().snapshot().system_coalesced >= 1).await;
+    assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    // Pin this current-thread runtime: the new cohort's system retry task
+    // is woken by the old flight's publication but cannot be polled while
+    // the test task blocks here. The first cohort's retry runs to
+    // completion on its own thread; its replacement generation completes
+    // and leaves the registry (calls == 2 and an empty flight map).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut released = false;
+    while !(lookup.calls.load(Ordering::SeqCst) >= 2
+        && crate::lock(&resolver.inner.flights).is_empty())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "replacement generation did not settle"
+        );
+        if !released {
+            lookup.gate.release();
+            released = true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // Unpin: the held-back cohort retries into an empty registry and
+    // starts one fresh physical generation (call 3).
     let answer = next
         .await
         .unwrap_or_else(|e| panic!("{e}"))
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(answer, vec![SocketAddr::new(ip(2), 80)]);
-    assert!(first.await.unwrap_or_else(|e| panic!("{e}")).is_ok());
-    assert_eq!(lookup.calls.load(Ordering::SeqCst), 2);
+    let first_answer = first
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    assert_eq!(first_answer, Ok(vec![SocketAddr::new(ip(2), 80)]));
+    assert_eq!(lookup.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        lookup.peak.load(Ordering::SeqCst),
+        1,
+        "physical lookups never overlap, even across the extra retry"
+    );
     assert_eq!(
         shared.cached_family_list("version.test", ResolveFamily::V4, Instant::now()),
         Some(vec![ip(2)])
@@ -291,7 +471,7 @@ async fn cancelled_waiter_and_new_subscriber_cannot_revive_job_before_start_comm
         .unwrap_or_else(|e| panic!("{e}"));
     guard.execution = Some(permit);
     let before_start = Arc::new(Gate::default());
-    let _release = ReleaseOnDrop(before_start.clone());
+    let _release = ReleaseOnDrop(vec![before_start.clone()]);
     let inspected = Arc::new(AtomicBool::new(false));
     let worker_inspected = inspected.clone();
     let worker_gate = before_start.clone();

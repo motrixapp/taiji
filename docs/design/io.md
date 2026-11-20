@@ -69,6 +69,18 @@ Upstream anchor mapping for the `BH_*` env-knob registry
   Behavior zero-change: the flag only gates the completed-state re-issue
   rounds; the default (off) keeps the always-active announce face.
 
+Knobs without an upstream anchor are taiji-local faces documented only
+in the registry (`knobs.rs` module docs — e.g. `BH_CLOSE_NOTIFY`, the
+`ut_close` rollback switch; `BH_METRICS_TRACE*`, the JSONL capture).
+
+Knob retirement (two releases, never a silent delete): release N marks
+the machine-readable registry row deprecated with its successor (the
+name still parses; the CLI startup scan warns once, naming the
+successor); release N+1 erases the row and the accessor (the name no
+longer parses; a still-set var of that name takes the same scan's
+unknown-knob warning path). The registry-row ↔ read-point sync and both
+retirement steps are locked by the governance tests in `knobs.rs`.
+
 ## redact.rs
 
 - aria2/libtorrent log raw URLs at debug; this crate strips credentials

@@ -2029,6 +2029,13 @@ fn main() {
         log_target,
     );
 
+    // BH_* knob startup scan (once, after the subscriber is up so the
+    // warnings land in the log): deprecated knobs warn naming their
+    // successor (release N of the retirement flow), set names without a
+    // registry row warn as unknown (release N+1 / typos). Active knobs
+    // stay silent (the registry table remains the value authority).
+    taiji_io::knobs::warn_knobs_at_startup();
+
     // Mode restriction for conf-provided enable-rpc (fail-closed):
     // download mode + RPC on + switch source not the command line (=
     // conf-provided) refuses to start. Invariant: download + RPC in one

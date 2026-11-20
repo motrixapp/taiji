@@ -271,3 +271,34 @@ taiji --log-format json --rpc-listen-port 6800 \
   (interactive TTY); redirection to file/pipe is automatically clean (no
   `\x1b` escape sequences), and it is switched off entirely when the
   `NO_COLOR` environment variable is set (no-color.org).
+
+### Session Metrics Trace and Offline Report
+
+`/metrics` is pull-based: whatever happened while nobody was scraping is
+gone. The opt-in capture knob turns the same session metrics snapshot
+into an offline artifact — one JSON line per 1s session tick (every
+snapshot field, keys = the field names):
+
+```sh
+BH_METRICS_TRACE=/tmp/session.jsonl taiji --rpc-listen-port 6800
+# ... run a download, then Ctrl-C / shutdown ...
+python3 scripts/metrics_report.py --input /tmp/session.jsonl
+# -> /tmp/session.jsonl.md (+ chart assets next to it)
+```
+
+- `BH_METRICS_TRACE=<path>` (default off, zero added I/O when unset):
+  the capture opens at session start and closes at shutdown. Failures
+  (unwritable path, full disk) warn and continue — the session is never
+  affected.
+- `BH_METRICS_TRACE_BYTES` (default 64MiB, clamped [1MiB, 1GiB]): the
+  capture file's hard size cap. When the next line would exceed it the
+  file restarts from empty (truncate, not roll — one capped file is a
+  hard total-bytes bound; rolling would multiply cap by generations).
+  Each process run starts a fresh capture.
+- The report has time-series sections for the diagnostic families —
+  throughput (bytes/s), peer supply by class, DHT nodes/queries, and
+  the storage pipeline watermarks. matplotlib is optional: when absent
+  the report degrades to sampled Markdown tables, so the tool runs
+  anywhere python3 does. `python3 scripts/metrics_report.py
+  --self-test` exercises the whole path on synthetic data (safe for
+  CI; needs no matplotlib).

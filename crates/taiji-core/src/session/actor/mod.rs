@@ -1983,6 +1983,10 @@ pub struct SessionActor {
     /// Metrics counter face: actor feed points (terminal completions /
     /// panics) + shared with the rpc render face via SessionHandle.
     metrics: Arc<SessionMetrics>,
+    /// Explicit session-metrics JSONL capture path (the test injection
+    /// seam over the `BH_METRICS_TRACE` knob — production leaves None
+    /// and `run()` reads the knob; consumed once at run() start).
+    metrics_trace_path: Option<std::path::PathBuf>,
     /// Session-level LSD service handle (lazily spawned when bt-lsd=true
     /// and first needed — aria2's receiver is a process-level singleton,
     /// the BtSetup.cc shape; None = not enabled or a startup-failure
@@ -2234,6 +2238,21 @@ impl SessionActor {
         options: super::options::SessionOptions,
         persist: Option<PersistHandle>,
     ) -> (SessionHandle, tokio::task::JoinHandle<()>) {
+        Self::spawn_with_persist_and_metrics_trace(options, persist, None)
+    }
+
+    /// Start a SessionActor + persistence injection + an explicit
+    /// session-metrics JSONL capture path (the test/bench injection seam
+    /// for the capture walk-through — env is process-immutable so tests
+    /// cannot drive the `BH_METRICS_TRACE` knob in-process; production
+    /// keeps [`Self::spawn_with_persist`] and the knob applies, this
+    /// parameter left None). The capture opens at run() start and closes
+    /// at actor teardown (warn-and-continue on open failure).
+    pub fn spawn_with_persist_and_metrics_trace(
+        options: super::options::SessionOptions,
+        persist: Option<PersistHandle>,
+        metrics_trace: Option<std::path::PathBuf>,
+    ) -> (SessionHandle, tokio::task::JoinHandle<()>) {
         // Capacity 64: RPC commands are low-frequency; full = backpressure
         // on the caller.
         let (cmd_tx, cmd_rx) = mpsc::channel::<SessionEnvelope>(64);
@@ -2311,6 +2330,7 @@ impl SessionActor {
             row_seq: 0,
             rows: HashMap::new(),
             metrics: Arc::clone(&metrics),
+            metrics_trace_path: metrics_trace,
             lsd: None,
             lsd_announced: HashMap::new(),
             manual_bans: Vec::new(),
@@ -2549,6 +2569,28 @@ impl SessionActor {
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             t
         });
+        // Session-metrics JSONL capture (opt-in diagnostics; open at
+        // session start, closed at actor teardown — the run()-scope
+        // drop flushes the writer thread). Path source: the explicit
+        // test/bench injection when present, else the BH_METRICS_TRACE
+        // knob; unset/blank + no injection = the disabled state (no
+        // thread, no file, zero I/O — the tick arm below suspends
+        // forever). Failures anywhere in the capture warn and continue
+        // (a diagnostic must never gate the session).
+        let metrics_trace = match self.metrics_trace_path.take() {
+            Some(path) => crate::engine::metrics_trace::MetricsTrace::open_or_warn(
+                &path,
+                taiji_io::knobs::metrics_trace_cap_bytes(),
+            ),
+            None => crate::engine::metrics_trace::MetricsTrace::from_env(),
+        };
+        let metrics_trace_enabled = metrics_trace.is_enabled();
+        let mut metrics_trace_tick = metrics_trace_enabled.then(|| {
+            let period = std::time::Duration::from_secs(1);
+            let mut t = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            t
+        });
         loop {
             tokio::select! {
                            biased;
@@ -2581,21 +2623,40 @@ impl SessionActor {
                                        t.tick().await;
                                    }
             // Disabled shape (save-session-interval = 0 or
-            // the persistence layer absent): the arm suspends
-            // forever (the same pattern as the summary_tick
+            // the persistence layer absent): the arm
+            // suspends forever (the same pattern as the summary_tick
             // None arm).
                                    None => std::future::pending::<()>().await,
                                }
                            } => {
-            // Periodic full flush (the sole consumption point of
-            // `--save-session-interval`; a failure warns and does
-            // not exit — the next period retries, and the shutdown
-            // backstop arm still performs the final closing
-            // flush).
+                               // Periodic full flush (the sole consumption point of
+                               // `--save-session-interval`; a failure warns and does
+                               // not exit — the next period retries, and the shutdown
+                               // backstop arm still performs the final closing
+                               // flush).
                                if let Err(e) = self.save_session().await {
                                    warn!(target: "taiji::core::session", e = %e,
                                        "periodic session save failed");
                                }
+                           }
+                           _ = async {
+                               match metrics_trace_tick.as_mut() {
+                                   Some(t) => {
+                                       t.tick().await;
+                                   }
+            // Capture off (knob unset / open failed): the arm
+            // suspends forever (the summary_tick None-arm pattern;
+            // zero cost).
+                                   None => std::future::pending::<()>().await,
+                               }
+                           } => {
+                               // One MetricsSnapshot per 1s tick as one
+                               // JSONL line (the offline report input; the
+                               // same snapshot source as the rpc /metrics
+                               // render — observation only, no rpc face
+                               // change. A behind writer drops the line
+                               // (counted inside the trace)).
+                               metrics_trace.record(&self.metrics.snapshot());
                            }
                            ev = self.event_rx.recv() => match ev {
                                None => break,

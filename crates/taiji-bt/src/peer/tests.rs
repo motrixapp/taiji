@@ -3309,6 +3309,154 @@ async fn unchoke_emits_avail_event_edge() {
     let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
 }
 
+/// Availability events are lossless under channel pressure: with the
+/// consumer holding a full bounded channel (capacity 1, one HAVE already
+/// queued and undrained — the engine-busy shape), a following Bitfield
+/// must still be delivered, not silently dropped. A Bitfield is one-shot
+/// possession evidence (BEP3: sent immediately after the handshake,
+/// never repeated; a full seeder sends no HAVEs either) and the engine's
+/// dispatch is advertisement-aware — a dropped bitfield empties that
+/// peer to dispatch permanently, which is the single-seeder
+/// same-handshake-beat startup stall shape (the emission used to be a
+/// lossy try_send; it now awaits, backpressuring the read loop until
+/// the consumer drains).
+#[tokio::test]
+async fn bitfield_event_survives_full_avail_channel() {
+    let root = CancellationToken::new();
+    let (local, remote) = tokio::io::duplex(64 * 1024);
+    // Capacity 1: the first queued event fills the channel; the second
+    // emission is the probe (drop under try_send, await under the fix).
+    let (avail_tx, mut avail_rx) = tokio::sync::mpsc::channel(1);
+    let config = PeerConfig {
+        cuid: 42,
+        avail_tx: Some(avail_tx),
+        ..PeerConfig::flat()
+    };
+    let (_handle, join, _data) = PeerTask::spawn(&root, local, config);
+    let (_r, mut w) = tokio::io::split(remote);
+    use tokio::io::AsyncWriteExt as _;
+
+    // HAVE(0) fills the single slot (undrained — the consumer is busy).
+    w.write_all(&[0, 0, 0, 5, 4, 0, 0, 0, 0])
+        .await
+        .unwrap_or_else(|e| panic!("inject have: {e}"));
+    // Bitfield (8 pieces, all present): must queue behind the HAVE.
+    w.write_all(&[0, 0, 0, 2, 5, 0xFF])
+        .await
+        .unwrap_or_else(|e| panic!("inject bitfield: {e}"));
+
+    // Drain both in order within the budget: the HAVE first, then the
+    // Bitfield (the awaited send parks until this drain makes room — a
+    // dropped bitfield surfaces here as the channel going quiet).
+    let ev = tokio::time::timeout(Duration::from_secs(2), avail_rx.recv())
+        .await
+        .unwrap_or_else(|e| panic!("have budget: {e}"))
+        .unwrap_or_else(|| panic!("avail channel closed"));
+    match ev {
+        AvailEvent::Have { peer, index } => {
+            assert_eq!(peer, 42);
+            assert_eq!(index, 0);
+        }
+        other => panic!("expected Have, got {other:?}"),
+    }
+    let ev = tokio::time::timeout(Duration::from_secs(2), avail_rx.recv())
+        .await
+        .unwrap_or_else(|e| panic!("bitfield budget: {e}"))
+        .unwrap_or_else(|| panic!("avail channel closed (bitfield dropped under pressure)"));
+    match ev {
+        AvailEvent::Bitfield { peer, bits } => {
+            assert_eq!(peer, 42, "the event echoes cuid");
+            assert_eq!(bits.as_ref(), &[0xFF], "the bitfield bytes ride along");
+        }
+        other => panic!("expected Bitfield, got {other:?}"),
+    }
+
+    drop(w);
+    root.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
+}
+
+/// The state-update ext-handshake resends (SetListenPort /
+/// SetUploadOnly) are gated on the peer's BEP10 negotiation mirror:
+/// a peer that never declared reserved[5]&0x10 must see zero Extended
+/// frames (an unnegotiated Extended frame is a protocol violation real
+/// clients disconnect on — the connection dies at registration time,
+/// before any request can flow), while a BEP10 peer still receives the
+/// BEP21 upload_only advertisement even with the local ext services off
+/// (`ExtConfig::enabled = false` — the seeding-state contract).
+#[tokio::test]
+async fn ext_handshake_resends_follow_peer_negotiation_not_local_services() {
+    async fn drive(peer_ext: bool) -> Vec<Message> {
+        let root = CancellationToken::new();
+        let (local, remote) = tokio::io::duplex(64 * 1024);
+        // Local ext services OFF (no metadata / no ut_pex): only the
+        // peer's handshake bit can license an Extended frame.
+        let config = PeerConfig {
+            cuid: 7,
+            peer_ext,
+            ext: ExtConfig {
+                enabled: false,
+                ..ExtConfig::default()
+            },
+            ..PeerConfig::flat()
+        };
+        let (handle, join, _data) = PeerTask::spawn(&root, local, config);
+        let _ = handle.command(PeerCommand::SetListenPort(6881));
+        let _ = handle.command(PeerCommand::SetUploadOnly(true));
+        // Sentinel: Shutdown ends the task after the commands (command
+        // order = wire order), so the drained frames prove which resends
+        // fired. Sent as a plain command — `shutdown()` would cancel the
+        // token first and the biased token arm would skip the queue.
+        let _ = handle.command(PeerCommand::Shutdown);
+        let (mut r, _w) = tokio::io::split(remote);
+        let mut reader = FramedRead::new(&mut r, FrameCodec::default());
+        let mut frames = Vec::new();
+        while let Ok(Some(Ok(msg))) =
+            tokio::time::timeout(Duration::from_millis(200), reader.next()).await
+        {
+            frames.push(msg);
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
+        root.cancel();
+        frames
+    }
+
+    // The non-negotiating peer sees no Extended frames at all (both
+    // resends suppressed; zero other outbound expected).
+    let frames = drive(false).await;
+    assert!(
+        frames.is_empty(),
+        "no frame may leave to a non-BEP10 peer, saw {frames:?}"
+    );
+
+    // The BEP10 peer gets both state updates (the listener + the BEP21
+    // upload_only advertisement) despite the local services being off.
+    let frames = drive(true).await;
+    let handshakes: Vec<ExtHandshake> = frames
+        .iter()
+        .filter_map(|m| match m {
+            Message::Extended { ext_id: 0, payload } => {
+                Some(ExtHandshake::decode(payload).unwrap_or_else(|e| panic!("{e:?}")))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        handshakes.len(),
+        2,
+        "SetListenPort + SetUploadOnly each resend once, got {frames:?}"
+    );
+    assert_eq!(handshakes[0].p, Some(6881), "the listener advertisement");
+    assert!(
+        !handshakes[0].upload_only,
+        "upload_only still false at port set"
+    );
+    assert!(
+        handshakes[1].upload_only,
+        "the BEP21 upload_only advertisement reaches the ext peer"
+    );
+}
+
 /// An inbound Interested frame → `AvailEvent::Interested` **rising
 /// edge** (the preemptive unchoke trigger; libtorrent
 /// peer_connection.cpp). Edge table: row 1 first Interested → exactly

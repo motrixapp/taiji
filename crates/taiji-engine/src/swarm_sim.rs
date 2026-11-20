@@ -986,3 +986,131 @@ async fn virtual_time_scenarios_run_in_a_few_wall_seconds() {
         "90 virtual seconds must cost well under a few wall seconds, took {wall:?}"
     );
 }
+
+// ---------------------------------------------------------------------
+// Startup-ordering regression: same-beat advertisement + unchoke
+// ---------------------------------------------------------------------
+
+/// Same-beat startup ordering (the recorded stall shape): a seeder
+/// whose Bitfield lands in the same event-loop beat as its handshake
+/// response gets its availability bookkeeping processed BEFORE the
+/// connection's registration row lands (the run loop's biased select
+/// polls the avail arm ahead of the register arm, so the interleaving
+/// is real), and the peer's Unchoke — answering the attach-time
+/// Interested — can flip the choke mirror inside the same window. This
+/// test drives the three inputs in exactly that adversarial order and
+/// pins the recovery property: every pre-registration dispatch round is
+/// a no-op (the peer is invisible while unregistered), and the FIRST
+/// round after the registration writes must issue wire requests — a
+/// download that never issues requests in this state is the recorded
+/// permanent stall (dispatch is advertisement-aware; the bitfield is
+/// one-shot, so a state where the round sequence never supplies again
+/// never recovers).
+#[tokio::test]
+async fn same_beat_bitfield_and_unchoke_before_registration_still_supplies() {
+    let mut swarm = Swarm::build(8, 16384, 0x5EED_0000_0000_00D4).await;
+
+    // Attach the wire + PeerTask the add_peer way, but keep the
+    // registration writes out — the adversarial ordering below is the
+    // point of the test.
+    let (local, remote) = tokio::io::duplex(64 * 1024);
+    let (handle, join, data_rx) =
+        PeerTask::spawn(&swarm.root, local, taiji_bt::peer::PeerConfig::flat());
+    let arrivals = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&arrivals);
+    tokio::spawn(async move {
+        let mut data_rx = data_rx;
+        while data_rx.recv().await.is_some() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let (reader, writer) = tokio::io::split(remote);
+    let mut peer = FakePeer {
+        cuid: 1,
+        handle,
+        join,
+        reader,
+        writer,
+        arrivals,
+        frames_by_id: HashMap::new(),
+    };
+
+    // (1) The Bitfield bookkeeping lands FIRST (the biased avail arm
+    // runs before the register arm; 8 pieces all present).
+    let bits = [0xFFu8; 1];
+    note_peer_bitfield(&mut swarm.faces[0], 1, &bits);
+    // (2) The pre-registration dispatch round: a no-op over an empty
+    // peer table (the same-beat window's wasted round).
+    dispatch_face(&mut swarm.faces[0], 0);
+    swarm.settle().await;
+    // (3) The Unchoke frame is consumed inside the same window (the
+    // mirror flip — poll-with-deadline, never a fixed sleep).
+    peer.send(&Message::Unchoke).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while peer.handle.is_choking_us() {
+        assert!(
+            Instant::now() < deadline,
+            "the unchoke mirror did not flip in time"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    // (4) Another pre-registration round: still a no-op — and the wire
+    // must show zero requests (the peer is invisible while
+    // unregistered).
+    dispatch_face(&mut swarm.faces[0], 0);
+    swarm.settle().await;
+    let pre = peer.drain_frames(Duration::from_millis(20)).await;
+    assert!(
+        pre.iter().all(|f| !matches!(f, Message::Request { .. })),
+        "no requests may issue before registration (got {pre:?})"
+    );
+
+    // (5) The registration writes (the register arm's row shape: meta +
+    // rate window + the peer_cuids/peers push).
+    {
+        let row = swarm.faces[0].peer_state_row(1);
+        row.meta = Some(PeerMeta {
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 1)),
+            port: 6881,
+            inbound: false,
+            peer_id: [1u8; 20],
+            crypto: taiji_bt::mse::CryptoLevel::Plain,
+            transport: taiji_bt::utp::Transport::Tcp,
+            up: Arc::new(AtomicU64::new(0)),
+            down: Arc::new(AtomicU64::new(0)),
+            upload_only: Arc::new(AtomicBool::new(false)),
+        });
+        let mut w = RateWindow::new();
+        for _ in 0..RateWindow::WINDOW_SECS {
+            w.advance();
+            w.add(100 * 1024);
+        }
+        row.down_window = Some(w);
+    }
+    swarm.faces[0].peer_cuids.push(1);
+    swarm.faces[0].peers.push(peer.handle.clone());
+
+    // (6) The registration round: wire requests MUST issue now — the
+    // advertisement row, the unchoked mirror and the registration are
+    // all in place regardless of the order they landed.
+    dispatch_face(&mut swarm.faces[0], 0);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_request = false;
+    while Instant::now() < deadline {
+        for f in peer.drain_frames(Duration::from_millis(8)).await {
+            if matches!(f, Message::Request { .. }) {
+                saw_request = true;
+            }
+        }
+        if saw_request {
+            break;
+        }
+    }
+    assert!(
+        saw_request,
+        "the first post-registration dispatch round must issue wire requests \
+         (the same-beat stall shape: advertisement + unchoke processed before \
+         the registration row)"
+    );
+    swarm.root.cancel();
+}

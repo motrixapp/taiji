@@ -93,7 +93,13 @@ pub(super) fn handle_slow_tick(
         &mut state.speed_up,
         &mut state.speed_down,
     );
-    note_supply_down(state, metrics, drained.down_tcp, drained.down_utp);
+    note_supply_down(
+        state,
+        metrics,
+        drained.down_tcp,
+        drained.down_utp,
+        drained.up,
+    );
     // Re-issue DHT announce commands. The registry drops an entry after
     // 30min without a re-issue (PURGE); the cadence is
     // dht_cfg.announce_interval, default 15min, matching aria2
@@ -282,7 +288,13 @@ pub(super) async fn handle_seed_tick(
         &mut state.speed_up,
         &mut state.speed_down,
     );
-    note_supply_down(state, metrics, drained.down_tcp, drained.down_utp);
+    note_supply_down(
+        state,
+        metrics,
+        drained.down_tcp,
+        drained.down_utp,
+        drained.up,
+    );
     // Observation surface: a 30s-cadence INFO with the connection mix by
     // transport plus per-transport supply bytes (cumulative and
     // 30s-window rate). Byte readings come from the engine-level
@@ -978,7 +990,10 @@ pub(super) fn handle_choke_round(state: &mut EngineLoop) {
 /// accumulators (`supply_*_down`, data source for the 30s conn-mix log
 /// and the endgame edge log — truthful even in CLI mode without
 /// SessionMetrics) plus the session-counter feed (the only feed site for
-/// the per-transport /metrics counters; used when coexisting with rpc).
+/// the whole byte-counter family: the per-transport split AND the
+/// direction aggregates — the aggregates' downlink is the split's sum by
+/// construction here, preserving the documented cross-check invariant;
+/// used when coexisting with rpc).
 /// Feed sites: the three counter bridges (2s slow tick / 1s seed tick /
 /// final flush) plus the leave arm's final delta.
 pub(super) fn note_supply_down(
@@ -986,11 +1001,13 @@ pub(super) fn note_supply_down(
     metrics: Option<&SessionMetrics>,
     tcp_delta: u64,
     utp_delta: u64,
+    up_delta: u64,
 ) {
     state.supply_tcp_down = state.supply_tcp_down.saturating_add(tcp_delta);
     state.supply_utp_down = state.supply_utp_down.saturating_add(utp_delta);
     if let Some(m) = metrics {
         m.add_transport_down_bytes(tcp_delta, utp_delta);
+        m.add_bytes(tcp_delta.saturating_add(utp_delta), up_delta);
     }
 }
 

@@ -128,9 +128,13 @@ pub struct PeerConfig {
     /// Stable identifier of this connection (engine-side cuid; echoed in
     /// availability events).
     pub cuid: u64,
-    /// Availability event channel (bounded; full = drop — HAVE is high
-    /// frequency and rarity is heuristic rather than correctness data, so
-    /// lossy is acceptable).
+    /// Availability event channel (bounded; full = the read loop's send
+    /// awaits — availability is dispatch-correctness data, not a rarity
+    /// heuristic: the engine requests nothing from a peer whose
+    /// advertisement was not delivered, and a Bitfield/HaveAll is
+    /// one-shot per connection with no later frame to re-trigger supply.
+    /// Backpressure couples the peer's own frame rate to the consumer's
+    /// drain rate, which is also the correct flow control for a storm).
     pub avail_tx: Option<mpsc::Sender<AvailEvent>>,
     /// Inbound PORT message forwarding (BEP5 id=9). `(cuid, dht_port)`
     /// goes to the engine -> `DhtCommand::AddPortNode` (`BtPortMessage.cc`
@@ -232,6 +236,20 @@ pub struct PeerConfig {
     /// `attach_peer`, same pipeline as the `peer_dht`/ext negotiation
     /// gates).
     pub peer_fast: bool,
+    /// BEP10 negotiation mirror (the peer's handshake reserved[5]&0x10):
+    /// the wire-side gate for every Extended frame we may send on this
+    /// connection — including the state-update ext-handshake resends
+    /// (SetListenPort / SetUploadOnly), which carry meaningful keys (the
+    /// advertised listener `p`, BEP21 `upload_only`) even when the local
+    /// extension services (`ExtConfig::enabled` = metadata serving /
+    /// ut_pex) are off. Sending an Extended frame to a peer that never
+    /// declared the extension is a protocol violation real clients
+    /// disconnect on (aria2 queues ext messages only behind
+    /// `peer_->isExtendedMessagingEnabled()`,
+    /// `DefaultBtInteractive.cc`). Default false; production assembly
+    /// overwrites it with the peer's handshake bit (transit
+    /// `attach_peer`, the same pipeline as `peer_fast`).
+    pub peer_ext: bool,
 }
 
 /// Client identity re-check callback (-6): input = the peer's
@@ -287,6 +305,7 @@ impl std::fmt::Debug for PeerConfig {
                 &self.block_arena.as_ref().map(|_| "BlockArena"),
             )
             .field("peer_fast", &self.peer_fast)
+            .field("peer_ext", &self.peer_ext)
             .finish()
     }
 }
@@ -327,6 +346,7 @@ impl PeerConfig {
             read_pool: None,
             block_arena: None,
             peer_fast: true,
+            peer_ext: false,
         }
     }
 }

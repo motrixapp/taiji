@@ -223,3 +223,29 @@ taiji --log-format json --rpc-listen-port 6800 \
 - ANSI 颜色仅在 stdout 直连终端（交互式 TTY）时输出；重定向到文件/管道
   自动干净（无 `\x1b` 转义序列）；设置 `NO_COLOR` 环境变量时整体关闭
   （no-color.org）。
+
+### 会话指标轨迹与离线报告
+
+`/metrics` 是拉模式：没人抓取的时段发生的事就此丢失。可选的轨迹开关把
+同一份会话指标快照落成离线工件——每个 1s 会话 tick 一行 JSON（全部快照
+字段，键 = 字段名）：
+
+```sh
+BH_METRICS_TRACE=/tmp/session.jsonl taiji --rpc-listen-port 6800
+# ... 跑一次下载，然后 Ctrl-C / 关闭 ...
+python3 scripts/metrics_report.py --input /tmp/session.jsonl
+# -> /tmp/session.jsonl.md（图表资产输出在旁边）
+```
+
+- `BH_METRICS_TRACE=<path>`（默认关闭，未设置时零额外 I/O）：轨迹随会话
+  启动打开、随关闭落盘。失败（路径不可写、磁盘满）仅告警并继续——绝不
+  影响会话本身。
+- `BH_METRICS_TRACE_BYTES`（默认 64MiB，钳制 [1MiB, 1GiB]）：轨迹文件的
+  硬性大小上限。下一行将超限时文件从空重启（截断而非轮转——单个封顶
+  文件才是硬性总量上界；轮转会把上限乘以保留代数）。每次进程运行都是
+  全新轨迹。
+- 报告按诊断族给出时间序列章节——吞吐（bytes/s）、按类别的 peer 供给、
+  DHT 节点/查询、存储管线水位。matplotlib 为可选依赖：缺失时报告降级为
+  采样的 Markdown 表格，工具在任何有 python3 的地方都能跑。
+  `python3 scripts/metrics_report.py --self-test` 用合成数据走通全链路
+  （CI 友好；无需 matplotlib）。

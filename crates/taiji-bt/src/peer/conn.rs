@@ -456,6 +456,7 @@ where
         block_arena,
         direct_block_sink,
         peer_fast,
+        peer_ext,
         ..
     } = config;
     let ExtConfig {
@@ -881,8 +882,22 @@ where
                                 }
                                 PeerCommand::SetListenPort(port) => {
                                     // BEP10 advertises the current mapped listener,
-                                    // preserving all negotiated extensions.
-                                    if my_listen_port != port {
+                                    // preserving all negotiated extensions. The
+                                    // resend is gated on the peer's BEP10
+                                    // negotiation mirror (`peer_ext`): aria2 only
+                                    // queues the advertisement when
+                                    // `peer_->isExtendedMessagingEnabled()`
+                                    // (`DefaultBtInteractive.cc`) — an Extended
+                                    // frame to a peer that never declared BEP10
+                                    // in its handshake reserved bits is a
+                                    // protocol violation real clients FIN on,
+                                    // killing the connection at registration
+                                    // time (before any request can flow). The
+                                    // gate is the peer's bit (not the local
+                                    // `ext_enabled` services gate) because the
+                                    // advertised listener is meaningful to any
+                                    // ext-capable peer.
+                                    if peer_ext && my_listen_port != port {
                                         my_listen_port = port;
                                         let handshake = ExtHandshake {
                                             m_ut_metadata: Some(OUTBOUND_UT_METADATA_ID),
@@ -911,8 +926,19 @@ where
                                     // flag and resend the ext handshake
                                     // (super-seeding suppression matches
                                     // the initial send — see the my_ext
-                                    // construction).
-                                    if my_upload_only != flag {
+                                    // construction). The resend is gated
+                                    // on the peer's BEP10 negotiation
+                                    // mirror (`peer_ext`): a BEP-21 key
+                                    // inside an Extended frame is a
+                                    // protocol violation to a peer that
+                                    // never declared BEP10 — and the
+                                    // gate is deliberately the peer's
+                                    // bit, not the local `ext_enabled`
+                                    // services gate, because seeding
+                                    // state must advertise upload_only
+                                    // even with no metadata/ut_pex
+                                    // services attached.
+                                    if peer_ext && my_upload_only != flag {
                                         my_upload_only = flag;
                                         let handshake = ExtHandshake {
                                             m_ut_metadata: Some(OUTBOUND_UT_METADATA_ID),

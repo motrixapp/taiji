@@ -134,9 +134,14 @@ async fn port_gate() -> tokio::sync::MutexGuard<'static, ()> {
 
 /// Waits for the engine listener to come up (run() binds asynchronously;
 /// the probe connection sends no data — the engine's handshake timeout
-/// closes it by itself, no side effects).
+/// closes it by itself, no side effects). Conditional poll: exits the
+/// moment the listener answers; the 15s deadline is pure construction-
+/// starvation margin (under full-repo parallel load, engine spawn ->
+/// layout/pipeline/DHT wiring before the bind can be starved well past
+/// the 5s this used to allow — the same widening the disk-policy
+/// siblings took 3s -> 15s).
 async fn wait_listening(port: u16) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let probe = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
         match probe {
@@ -151,7 +156,7 @@ async fn wait_listening(port: u16) {
             }
             Err(_) => {
                 if tokio::time::Instant::now() >= deadline {
-                    panic!("engine listener not up within 5s");
+                    panic!("engine listener not up within 15s");
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -763,13 +768,27 @@ async fn smart_ban_contradiction_bans_within_two_piece_cycles() {
         engine
     };
 
-    // Budget 30 s: cycle-1 failure (evidence recorded) -> 2 s redispatch
-    // window -> cycle-2 failure (digest contradiction) -> ban +
-    // disconnect. The reason must carry the smart-ban prefix (if the
-    // sliding window banned first, the reason would read "hash
-    // verification failures..." — this assertion also proves the
-    // contradiction self-proof fires before 3 failures = <= 2 piece
-    // cycles).
+    // Budget 90 s: cycle-1 failure (evidence recorded) -> cycle-2
+    // failure (digest contradiction) -> ban + disconnect. The reason
+    // must carry the smart-ban prefix (if the sliding window banned
+    // first, the reason would read "hash verification failures..." —
+    // this assertion also proves the contradiction self-proof fires
+    // before 3 failures = <= 2 piece cycles).
+    //
+    // Strategy E (bounded wait-for-condition; virtualization is
+    // architecturally wrong here): the scenario under test is the real
+    // wire path — spawned run loop, tracker HTTP round trip, TCP dial,
+    // the peer face, the guard hot-update — none of which the seam
+    // clock reaches (the tokio timer wheel is deliberately not
+    // virtualized, and the network legs are real sockets). Both
+    // observables are monotone (a landed ban persists in the guard
+    // snapshot; EOF latches), so a conditional poll catches them
+    // whenever they land — the budget only needs to exceed worst-case
+    // parallel-load scheduling. The 30 s this used to allow was the
+    // observed flake margin (starved spawn/announce/dial chain);
+    // 90 s triples it while the normal path still passes on first
+    // hit (the poll exits immediately — the budget costs nothing
+    // unless the test is already failing).
     wait_until(
         || {
             matches!(
@@ -778,7 +797,7 @@ async fn smart_ban_contradiction_bans_within_two_piece_cycles() {
                     if r.starts_with("smart-ban:")
             )
         },
-        Duration::from_secs(30),
+        Duration::from_secs(90),
         "varying corrupt seeder not smart-banned within budget",
     )
     .await;
@@ -787,7 +806,7 @@ async fn smart_ban_contradiction_bans_within_two_piece_cycles() {
     // engine (peer-side EOF).
     wait_until(
         || eof_seen.load(Ordering::SeqCst),
-        Duration::from_secs(10),
+        Duration::from_secs(30),
         "smart-banned seeder connection not disconnected",
     )
     .await;

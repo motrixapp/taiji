@@ -107,12 +107,23 @@ if-addrs = { workspace = true }
 # `taiji-domain/metalink` keeps both states on the same gate (the cfg gate
 # sits on the domain-side table).
 metalink = ["taiji-domain/metalink"]
+# Null-store e2e smoke gate: forwards taiji-store's same-named feature
+# (the no-IO disk baseline behind DiskWriter) so
+# tests/null_store_smoke.rs can run the network/download path against
+# it via `cargo test -p taiji-core --features null-store`. Non-default
+# and enabled by nothing else: the face stays out of release builds
+# and the default gate; the opt-in run is recorded as evidence.
+null-store = ["taiji-store/null-store"]
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 proptest = "1"
+# Capture-line JSON parsing in the metrics-trace walk-through test
+# (serde_json already in the dependency registry via the store/rpc
+# runtime faces; test-surface only, no new third-party code).
+serde_json = { workspace = true }
 # : criterion micro-benchmarks (dev-only surface; same note as the
 # taiji-bt entry).
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

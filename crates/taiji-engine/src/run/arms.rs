@@ -1467,6 +1467,7 @@ pub(super) fn handle_peer_left(
                     Transport::Tcp => 0,
                     Transport::Utp => dd,
                 },
+                du,
             );
             match meta.transport {
                 Transport::Tcp => {

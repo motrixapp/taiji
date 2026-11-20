@@ -75,7 +75,6 @@ use taiji_bt::tracker::actor::{
 };
 use taiji_bt::utp::PeerConnectionType;
 
-use taiji_io::udp_demux;
 use taiji_io::utp::listener::spawn_utp;
 use taiji_io::utp::{UtpConfig, UtpStream};
 
@@ -92,14 +91,18 @@ use crate::config::{
     DhtWireConfig, EngineConfig, FaceConfig, FaceKind, TrackerWireConfig, WriterFactory,
 };
 use crate::dht::{
-    AttachDhtSlot, DhtColdWiring, DhtFamilyWiring, DhtRuntimeSeam, DialDedup, spawn_dht_announces,
-    spawn_dht_family, spawn_dht_inbound_gate, spawn_udp_face,
+    AttachDhtSlot, DhtColdWiring, DhtFamilyWiring, DhtRuntimeSeam, DialDedup, UdpFace,
+    spawn_dht_announces, spawn_dht_family, spawn_dht_inbound_gate, spawn_dht_secondary_face,
+    spawn_udp_face,
 };
 use crate::dispatch::{
     HashFetchEvent, LedgerArrival, RECOVERY_DELIVER_CAPACITY, RecoveryBook, V2DataPlane,
     build_v2_data_plane,
 };
 use crate::faces::{FaceState, FaceView, PeerRegistration, PexCandidates, SwarmSnapshot, XorShift};
+use crate::listen::{
+    ListenInterface, bind_listen_faces, enumerate_interface_addrs, expand_listen_interfaces,
+};
 use crate::pipeline::{
     BLOCK_CHANNEL_CAPACITY, BlockMsg, DataFlushState, ExpectedRoots, StoreJob, store_pipeline,
 };
@@ -107,8 +110,9 @@ use crate::progress::{EngineEnd, Progress, restore_progress_bits};
 use crate::redial::RedialReport;
 use crate::run::state::{DialCtx, EngineLoop};
 use crate::run::{
-    LEDGER_CHANNEL_CAPACITY, UTP_ACCEPT_MERGE_CAPACITY, UTP_DIAL_QUEUE_CAPACITY,
-    bind_listen_with_fallback, spawn_tcp_accept_merge,
+    LEDGER_CHANNEL_CAPACITY, TCP_ACCEPT_MERGE_CAPACITY, UTP_ACCEPT_MERGE_CAPACITY,
+    UTP_DIAL_QUEUE_CAPACITY, bind_listen_with_fallback, spawn_face_accept_task,
+    spawn_tcp_accept_merge,
 };
 use crate::strategy::{RarestFirstStrategy, StreamGeo};
 use crate::tracker::{TrackerMirror, TrackerPersistShared, epoch_secs, spawn_tracker_flusher};
@@ -381,6 +385,11 @@ pub(super) async fn assemble_engine(
         // the DialCtx (every outbound peer TCP dial binds before
         // connect). None = the OS default route, zero change.
         egress,
+        // Multi-interface listen face (`taiji.listen-interfaces`):
+        // consumed by the network stage below — non-empty entries run
+        // the expand+bind multi-face path; empty = the standing
+        // single-wildcard listen shape, zero change.
+        listen_interfaces,
         // Determinism seams (SPEC G6): the clock is cloned into the
         // EngineLoop and every face state (all driver "now" reads);
         // the RNG's pinned seed (when set) derives the in-loop
@@ -429,22 +438,54 @@ pub(super) async fn assemble_engine(
 
     // ---- Network surface: TCP listen (both swarms share) + UDP demux
     // (both families) ----
+    // Two shapes:
+    //
+    // - **Default** (`taiji.listen-interfaces` unset): the standing
+    //   single wildcard listen — v4 `0.0.0.0` main stack (port-window
+    //   fallback) + v6 `[::]` best effort, then one UDP demux per family
+    //   on the unified port. Zero change when the option is unset.
+    //
+    // - **Multi-listen** (entries present): enumerate + expand into
+    //   per-address faces (crate::listen) — one TCP listener + one UDP
+    //   demux per endpoint; a shared accept-merge channel over all
+    //   faces. Enumeration failure or an empty expansion falls back to
+    //   the default shape (the platform capability fallback); bind
+    //   failures degrade per face/transport (never fatal, never a
+    //   silent wildcard).
+    //
     // TCP binds first -> actual_port is the unified announce/UDP port (when
     // listen_port=0 the OS assigns it and UDP binds the same port — the
     // announce `port` semantics = the BT connection port). Listen failure =
     // degrade to outbound-only (existing semantics, not a fatal exit).
-    // Port-by-port attempts: when listen_port != 0 a failed bind is not an
-    // immediate give-up; the retries ascend through the listen_port..=+118
-    // window (119 ports = the width of aria2's default `--listen-port
-    // 6881-6999` range; upstream: `BtSetup.cc` walks the range port by port
-    // and `PeerListenCommand.cc` moves on to the next port after a failure —
-    // aria2 tries randomly and shares one global listener, while this side
-    // uses a per-task listener with deterministic ascending attempts; the
-    // convergence rule matches: the first bindable port wins). 0 = a single
-    // OS ephemeral port (the existing test surface semantics unchanged).
-    let listener = bind_listen_with_fallback(listen_port, token).await;
-    let actual_port = listener.as_ref().map(|(_, p)| *p).unwrap_or(listen_port);
-    let udp_face = spawn_udp_face(actual_port, egress, token).await;
+    // Port-by-port attempts (default path only): when listen_port != 0 a
+    // failed bind is not an immediate give-up; the retries ascend through
+    // the listen_port..=+118 window (119 ports = the width of aria2's
+    // default `--listen-port 6881-6999` range; upstream: `BtSetup.cc`
+    // walks the range port by port and `PeerListenCommand.cc` moves on to
+    // the next port after a failure — aria2 tries randomly and shares one
+    // global listener, while this side uses a per-task listener with
+    // deterministic ascending attempts; the convergence rule matches: the
+    // first bindable port wins). 0 = a single OS ephemeral port (the
+    // existing test surface semantics unchanged). The multi-listen path
+    // binds exact ports (the per-face port walk divergence is stated in
+    // crate::listen).
+    let multi = if listen_interfaces.is_empty() {
+        None
+    } else {
+        assemble_multi_listen(&listen_interfaces, egress, listen_port, token).await
+    };
+    let (tcp_inbound, actual_port, udp_face): NetworkSurface = match multi {
+        // Degradation: enumeration failure or an empty expansion keeps
+        // the standing single-wildcard listen shape (warn inside).
+        None => {
+            let listener = bind_listen_with_fallback(listen_port, token).await;
+            let actual_port = listener.as_ref().map(|(_, p)| *p).unwrap_or(listen_port);
+            let faces = spawn_udp_face(actual_port, egress, token).await;
+            let tcp_inbound = listener.map(|(dual, _)| spawn_tcp_accept_merge(dual, token.clone()));
+            (tcp_inbound, actual_port, faces)
+        }
+        Some((face_inbound, port, faces)) => (face_inbound, port, faces),
+    };
 
     // ---- NAT surface (port mapping) ----
     // Once the listen port is known, trigger Map (TCP+UDP; the NatActor
@@ -742,11 +783,11 @@ pub(super) async fn assemble_engine(
     let (recovery_deliver, recovery_deliver_rx) =
         mpsc::channel::<RecoveredPieceLayer>(RECOVERY_DELIVER_CAPACITY);
 
-    // The listener was already bound in the network stage (moved up so
-    // actual_port can bind the UDP demux to the same port); here it is
-    // unpacked and the v4/v6 accept merge tasks start (the same shape as the
-    // µTP merge channel — a single main-loop arm consumes it).
-    let tcp_inbound = listener.map(|(dual, _)| spawn_tcp_accept_merge(dual, token.clone()));
+    // The TCP accept merge channel was already built in the network
+    // stage (the default path's v4/v6 merge there; the multi-listen
+    // path's shared face channel) — nothing to unpack here anymore (the
+    // same shape as the µTP merge channel: a single main-loop arm
+    // consumes it).
 
     // ---- Tracker UDP carrier migration: the demux shared socket replaces
     // udp_carrier ----
@@ -758,14 +799,17 @@ pub(super) async fn assemble_engine(
     // when several faces share one socket; a full channel = await
     // backpressure, and the actor's 256-capacity inbound absorbs bursts).
     for mut rx in udp_carrier_out_rxs {
+        // Per-family egress face = the family's PRIMARY face (the first
+        // bound; the per-destination face pick across multiple faces of
+        // one family is the later can_route dispatch phase).
         let v4 = udp_face
             .iter()
-            .find(|(f, _, _)| *f == DhtFamily::V4)
-            .map(|(_, _, h)| h.clone());
+            .find(|f| f.family == DhtFamily::V4 && f.primary)
+            .map(|f| f.handle.clone());
         let v6 = udp_face
             .iter()
-            .find(|(f, _, _)| *f == DhtFamily::V6)
-            .map(|(_, _, h)| h.clone());
+            .find(|f| f.family == DhtFamily::V6 && f.primary)
+            .map(|f| f.handle.clone());
         if v4.is_none() && v6.is_none() {
             break; // no UDP face: no task (the receiver closes with its channel
             // peers at teardown).
@@ -866,7 +910,17 @@ pub(super) async fn assemble_engine(
     let last_dht_announce = clock.now();
     let dht_dial_dedup = DialDedup::new();
     if !dht_wiring.is_empty() {
-        spawn_dht_announces(&dht_wiring, &faces, actual_port, actual_port);
+        // Per-family announce ports ([`family_announce_port`]): the v4
+        // face consumes the NAT external-port seam (actual_port, the
+        // single mapped announce port — unchanged semantics); the v6
+        // face reports its own primary face's port (v6 has no NAT
+        // semantics; the default path equals actual_port, zero change).
+        let v6_port = dht_wiring
+            .iter()
+            .find(|w| w.family == DhtFamily::V6)
+            .map(|w| w.dht_port)
+            .unwrap_or(actual_port);
+        spawn_dht_announces(&dht_wiring, &faces, actual_port, v6_port);
     }
     // NAT external-port sync base (compared on the main-loop 2s tick — a
     // change re-registers the DHT announces with the new port; the tracker
@@ -1835,16 +1889,129 @@ async fn build_faces(
     }
 }
 
+/// The assembled network surface (the two listen paths' shared output
+/// shape): the single TCP accept-merge channel (None = outbound-only
+/// degradation), the unified announce port, and the UDP face list.
+type NetworkSurface = (
+    Option<mpsc::Receiver<(tokio::net::TcpStream, SocketAddr)>>,
+    u16,
+    Vec<UdpFace>,
+);
+
+/// Multi-listen orchestration (the `taiji.listen-interfaces` arm of the
+/// network stage): enumerate -> expand -> bind -> accept-merge. Returns
+/// `None` = the degradation fallback (enumeration failure or an empty
+/// expansion — the caller keeps the standing single-wildcard shape,
+/// the Android netlink-unavailable precedent); `Some` on any bound face
+/// (an empty face set is returned as `Some` — the engine runs
+/// outbound-only, the same degradation as a total listen failure; a
+/// wildcard fallback would surprise a user who pinned addresses).
+///
+/// The announce port pick (the single announce-port seam — the tracker
+/// actor constant and the NAT mapping consume one value): the first
+/// **v4** face's TCP port (v4 = the NAT-mapped family; a v6-primary
+/// config would otherwise feed a v6-only port to the gateway mapping),
+/// falling back to the first face of either family, then UDP ports,
+/// then the `--listen-port` option value.
+async fn assemble_multi_listen(
+    specs: &[ListenInterface],
+    egress: Option<IpAddr>,
+    listen_port: u16,
+    token: &CancellationToken,
+) -> Option<NetworkSurface> {
+    let ifaces = match enumerate_interface_addrs() {
+        Ok(i) => i,
+        Err(e) => {
+            warn!(target: "taiji::core::engine", %e,
+                "interface enumeration failed; taiji.listen-interfaces degraded to \
+                 the single wildcard listen (platform capability fallback)");
+            return None;
+        }
+    };
+    let (endpoints, warns) = expand_listen_interfaces(specs, &ifaces, egress);
+    for w in warns {
+        warn!(target: "taiji::core::engine", "{w}");
+    }
+    if endpoints.is_empty() {
+        warn!(target: "taiji::core::engine",
+            "taiji.listen-interfaces expanded to no listen endpoint; degraded to \
+             the single wildcard listen (platform capability fallback)");
+        return None;
+    }
+    info!(target: "taiji::core::engine",
+        endpoints = endpoints.len(),
+        "taiji.listen-interfaces: multi-listen faces (libtorrent listen_interfaces shape)");
+    // Assembly-time arm of the diff rebuild: the existing set is empty
+    // at engine start, so the partition degenerates to open-everything
+    // (partition_listen_faces is the seam a future runtime-rebuild
+    // trigger plugs into; startup-only today, the listen-port rule).
+    let mut faces = bind_listen_faces(&endpoints, token).await;
+    // Announce port (before the listeners move into the accept tasks):
+    // first v4 face TCP port -> first face TCP port -> first v4/any UDP
+    // port -> the listen_port option value.
+    let announce_port = faces
+        .iter()
+        .find(|f| f.endpoint.addr.is_ipv4())
+        .and_then(|f| f.tcp_port())
+        .or_else(|| faces.iter().find_map(|f| f.tcp_port()))
+        .or_else(|| {
+            faces
+                .iter()
+                .find(|f| f.endpoint.addr.is_ipv4())
+                .and_then(|f| f.udp_port())
+        })
+        .or_else(|| faces.iter().find_map(|f| f.udp_port()))
+        .unwrap_or(listen_port);
+    // TCP accept merge: one task per face TCP socket into the shared
+    // bounded channel (the default path's v4/v6 merge twin; None = no
+    // face has TCP — outbound-only, the arm parks forever). tokio's
+    // TcpListener is not Clone — each listener moves into its accept
+    // task, which holds the face's port occupied until teardown (the
+    // same socket-hold semantics as the default path's merge task).
+    let mut tcp_inbound = None;
+    let mut bound_tcp = Vec::new();
+    for face in &mut faces {
+        if let Some(l) = face.tcp.take() {
+            bound_tcp.push((l, face.endpoint.clone()));
+        }
+    }
+    if !bound_tcp.is_empty() {
+        let (tx, rx) = mpsc::channel(TCP_ACCEPT_MERGE_CAPACITY);
+        for (listener, endpoint) in bound_tcp {
+            spawn_face_accept_task(listener, endpoint, token.clone(), tx.clone());
+        }
+        drop(tx);
+        tcp_inbound = Some(rx);
+    }
+    // UDP faces: the demux pairs of the bound faces, primaries marked
+    // first-of-family (construction order — the expanded endpoint
+    // order).
+    let udp: Vec<(
+        DhtFamily,
+        taiji_io::udp_demux::DemuxChannels,
+        UdpDemuxHandle,
+    )> = faces
+        .into_iter()
+        .filter_map(|f| {
+            f.udp
+                .map(|(channels, handle)| (f.endpoint.family(), channels, handle))
+        })
+        .collect();
+    let udp_faces = UdpFace::mark_primaries(udp);
+    Some((tcp_inbound, announce_port, udp_faces))
+}
+
 /// DHT/µTP wiring (extracted; a verbatim move of the original run
-/// assembly's `for (family, channels, demux) in udp_face` loop): the
-/// tracker-channel dispatcher, the µTP listener + accept merge and
-/// delegated dial, and DHT engine spawn + bootstrap (per family).
+/// assembly's per-family face loop): the tracker-channel dispatcher,
+/// the µTP listener + accept merge and delegated dial, and DHT engine
+/// spawn + bootstrap — per UDP face (primaries carry the family's dial
+/// service, gate, and engine; secondaries merge DHT inbound).
 #[expect(
     clippy::too_many_arguments,
     reason = "verbatim extraction of the run assembly loop; parameters mirror the captured locals"
 )]
 async fn wire_dht_and_utp(
-    udp_face: Vec<(DhtFamily, udp_demux::DemuxChannels, UdpDemuxHandle)>,
+    udp_face: Vec<UdpFace>,
     actor_in_txs: &[mpsc::Sender<(SocketAddr, Vec<u8>)>],
     dht_enabled: bool,
     dht_cfg: &DhtWireConfig,
@@ -1860,10 +2027,22 @@ async fn wire_dht_and_utp(
     // built — the demux dht receiver stays resident in the gate, and runtime
     // enable/disable no longer consumes the receiver).
     let mut dht_cold: Vec<DhtColdWiring> = Vec::new();
-    for (family, mut channels, demux) in udp_face {
+    // Per-family inbound gates (the primary face creates the gate; the
+    // secondary faces of the same family merge into it — construction
+    // order guarantees the primary comes first).
+    let mut gates: HashMap<DhtFamily, std::sync::Arc<crate::dht::DhtInboundGate>> = HashMap::new();
+    for face in udp_face {
+        let UdpFace {
+            family,
+            primary,
+            mut channels,
+            handle: demux,
+        } = face;
         // Tracker-channel dispatcher (independent of the DHT switch — the
         // UDP tracker announce surface rides the demux in the default shape
-        // too).
+        // too; one dispatcher per face, every face's replies fan out to all
+        // actors — transaction-id self-filtering, the single-socket reply
+        // shape).
         let targets = actor_in_txs.to_vec();
         tokio::spawn(async move {
             while let Some(pkt) = channels.tracker.recv().await {
@@ -1877,18 +2056,16 @@ async fn wire_dht_and_utp(
             }
         });
         // µTP listener (the protocol stack's consumer side; the UtpConfig
-        // defaults are a frozen value surface).
+        // defaults are a frozen value surface). One per face — every face
+        // serves inbound µTP; the dial service below rides the primary
+        // only (the per-destination face pick is the later can_route
+        // dispatch phase).
         let (utp_handle, _utp_pump) = spawn_utp(
             channels.utp,
             demux.clone(),
             UtpConfig::default(),
             token.clone(),
         );
-        let (req_tx, req_rx) = mpsc::channel::<UtpDialReq>(UTP_DIAL_QUEUE_CAPACITY);
-        match family {
-            DhtFamily::V4 => utp_dial.v4 = Some(req_tx.clone()),
-            DhtFamily::V6 => utp_dial.v6 = Some(req_tx.clone()),
-        }
         // Consumer decoupling: accept delivery and µTP delegated dialing are
         // split into two independent tasks (the original single-task select
         // shape had a stall mode — while the accept arm sat in
@@ -1906,43 +2083,62 @@ async fn wire_dht_and_utp(
         // exits) -> the accept task exits + the UtpDial sender drops with
         // DialContext -> req_rx None -> the dial task exits; the listener
         // exiting (token cancelled) -> accept_from None converges both.
-        let connect_half = utp_handle.connect_half();
-        tokio::spawn(utp_accept_pump(utp_handle, utp_inbound_tx.clone()));
-        tokio::spawn(utp_dial_pump(req_rx, req_tx, connect_half));
-        // The demux bound port = the DHT port (TCP/UDP share the port; the
-        // v6 face uses the same port as v4 — two family instances of one
-        // listen-port).
-        let dht_port = demux.bound_addr().port();
-        // Inbound gate (the receiver stays resident; forward targets connect
-        // or disconnect per the watch slot). The cold wiring is ALWAYS
-        // built: the gate (the holder of the watch sender) must outlive this
-        // loop — the enabled path's engine-inbound channel sender lives in
-        // the watch slot, and an early gate death = pump exit = the engine's
-        // inbound surface closes (the actor saves and exits); it also
-        // preserves the reuse surface for runtime enable/disable.
-        let gate = spawn_dht_inbound_gate(channels.dht, token.clone());
-        dht_cold.push(DhtColdWiring {
-            family,
-            gate: std::sync::Arc::clone(&gate),
-            demux: demux.clone(),
-            dht_port,
-        });
-        if dht_enabled {
-            // Warm up during assembly (the existing behavior path, zero
-            // change — spawn_dht_family is a move of the original loop
-            // body's engine assembly section).
-            dht_wiring.push(
-                spawn_dht_family(
-                    family,
-                    &gate,
-                    demux,
-                    dht_port,
-                    dht_cfg,
-                    persist_shared,
-                    dht_ev_tx,
-                )
-                .await,
-            );
+        if primary {
+            let connect_half = utp_handle.connect_half();
+            tokio::spawn(utp_accept_pump(utp_handle, utp_inbound_tx.clone()));
+            let (req_tx, req_rx) = mpsc::channel::<UtpDialReq>(UTP_DIAL_QUEUE_CAPACITY);
+            match family {
+                DhtFamily::V4 => utp_dial.v4 = Some(req_tx.clone()),
+                DhtFamily::V6 => utp_dial.v6 = Some(req_tx.clone()),
+            }
+            tokio::spawn(utp_dial_pump(req_rx, req_tx, connect_half));
+            // The demux bound port = the DHT port (TCP/UDP share the port;
+            // the face's own port in the multi-listen shape — the primary
+            // face of the family defines the family's announce port).
+            let dht_port = demux.bound_addr().port();
+            // Inbound gate (the receiver stays resident; forward targets
+            // connect or disconnect per the watch slot). The cold wiring is
+            // ALWAYS built: the gate (the holder of the watch sender) must
+            // outlive this loop — the enabled path's engine-inbound channel
+            // sender lives in the watch slot, and an early gate death =
+            // pump exit = the engine's inbound surface closes (the actor
+            // saves and exits); it also preserves the reuse surface for
+            // runtime enable/disable.
+            let gate = spawn_dht_inbound_gate(channels.dht, token.clone());
+            gates.insert(family, std::sync::Arc::clone(&gate));
+            dht_cold.push(DhtColdWiring {
+                family,
+                gate: std::sync::Arc::clone(&gate),
+                demux: demux.clone(),
+                dht_port,
+            });
+            if dht_enabled {
+                // Warm up during assembly (the existing behavior path, zero
+                // change — spawn_dht_family is a move of the original loop
+                // body's engine assembly section).
+                dht_wiring.push(
+                    spawn_dht_family(
+                        family,
+                        &gate,
+                        demux,
+                        dht_port,
+                        dht_cfg,
+                        persist_shared,
+                        dht_ev_tx,
+                    )
+                    .await,
+                );
+            }
+        } else {
+            tokio::spawn(utp_accept_pump(utp_handle, utp_inbound_tx.clone()));
+            // Secondary face of the family: merge the demux dht channel
+            // into the family gate (created by the primary — construction
+            // order guarantees presence). The connect half is dropped (no
+            // dial service here); the demux keepalive rides the uTP
+            // listener's handle clone.
+            if let Some(gate) = gates.get(&family) {
+                spawn_dht_secondary_face(channels.dht, gate, token.clone());
+            }
         }
     }
     if !dht_wiring.is_empty() {

@@ -513,6 +513,7 @@ fn magnet_config(
         // Benchmarks carry no ban face (None = no gate).
         ip_guard: None,
         egress: None,
+        listen_interfaces: Vec::new(),
         webseeding_enabled: true,
     }
 }
@@ -1210,6 +1211,7 @@ async fn pex_engine_iter(i: usize) -> Result<(usize, usize, f64, usize), String>
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
         egress: None,
+        listen_interfaces: Vec::new(),
         peer_id: *b"-TJ0001-PEXENGBENCH1",
         announce: tracker_url,
         listen_port: 0,

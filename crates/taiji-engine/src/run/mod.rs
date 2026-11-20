@@ -330,6 +330,46 @@ pub(super) fn spawn_tcp_accept_merge(
     });
     rx
 }
+
+/// One listen face's TCP accept task (the multi-listen path): feeds
+/// the shared face merge channel (capacity
+/// [`TCP_ACCEPT_MERGE_CAPACITY`], one producer per face — the same
+/// single-arm main-loop consumption as the default v4/v6 merge).
+/// Lifecycle/error face identical to the v4 arm of
+/// [`spawn_tcp_accept_merge`]: an accept error backs off and retries
+/// (never a hot spin); the token or the merge channel closing ends the
+/// task (the cloned listener held here keeps the face's port occupied
+/// until teardown, mirroring the best-effort v6 arm's socket-hold
+/// semantics).
+pub(super) fn spawn_face_accept_task(
+    listener: tokio::net::TcpListener,
+    endpoint: crate::listen::ListenEndpoint,
+    token: CancellationToken,
+    tx: mpsc::Sender<(tokio::net::TcpStream, SocketAddr)>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = token.cancelled() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok(pair) => {
+                        if tx.send(pair).await.is_err() {
+                            // Merge channel closed = the engine main loop
+                            // has exited (teardown).
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(target: "taiji::core::engine", %e,
+                            addr = %endpoint.addr, port = endpoint.port,
+                            "listen face tcp accept error; backing off");
+                        tokio::time::sleep(TCP_ACCEPT_ERROR_BACKOFF).await;
+                    }
+                },
+            }
+        }
+    });
+}
 pub(super) async fn run(
     cfg: EngineConfig,
     tracker: TrackerWireConfig,

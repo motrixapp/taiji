@@ -144,6 +144,7 @@ fn engine_cfg(
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
         egress: None,
+        listen_interfaces: Vec::new(),
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         // Dead port: no tracker traffic (the engine is stopped via token
         // cancel).

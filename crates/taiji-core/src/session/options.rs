@@ -520,6 +520,21 @@ pub struct GlobalOptions {
     /// upgraded payload engine honors the bind), and the HTTP-tracker
     /// announce face (taiji-bt, frozen).
     pub interface: Option<std::net::IpAddr>,
+    /// `taiji.listen-interfaces` (wired; the `taiji.*` extension
+    /// namespace — no aria2 counterpart, the libtorrent
+    /// `settings_pack::listen_interfaces` shape): a comma list of
+    /// `device-or-IP:port` parsed once at the CLI parse point
+    /// (invalid entries warn individually and are skipped, never
+    /// fatal). The declarative multi-interface listen face of the
+    /// session: BT engines receive the entries at activation
+    /// (`EngineConfig.listen_interfaces` -> per-address listen faces —
+    /// one TCP listener + one UDP demux each, riders attached per
+    /// face, engine-crate `listen` module). The `--interface` egress
+    /// family narrows the set (both set = same-family endpoints only).
+    /// **Startup-only option**: changeGlobalOption does not accept it
+    /// (no RPC key, the same rule as `interface`/`listen-port`).
+    /// Empty = the standing single-wildcard listen shape, zero change.
+    pub listen_interfaces: Vec<crate::engine::listen::ListenInterface>,
 }
 
 impl Default for GlobalOptions {
@@ -621,6 +636,9 @@ impl Default for GlobalOptions {
             // `--interface` default unset (None = egress unbound, the
             // status-quo default route).
             interface: None,
+            // `taiji.listen-interfaces` default empty (empty = the
+            // standing single-wildcard listen shape, zero change).
+            listen_interfaces: Vec::new(),
         }
     }
 }

@@ -255,6 +255,7 @@ async fn download_completes_against_null_store() {
         preset_progress: None,
         tracker_options: taiji_bt::tracker::TrackerOptions::default(),
         egress: None,
+        listen_interfaces: Vec::new(),
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         announce: format!("http://{tracker_addr}/announce"),
         listen_port: 0,

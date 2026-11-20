@@ -686,6 +686,20 @@ pub(super) struct HttpTaskOpts {
     /// session defaults after a restart (not part of the concurrency-intent
     /// persistence).
     pub batch_budget: u32,
+    /// Egress bind address (`--interface`, the aria2-compatible
+    /// startup option): projected onto
+    /// [`taiji_http::client::ClientConfig::local_address`] (every HTTP
+    /// TCP connection binds it before connect). **No per-task option
+    /// face** — the RPC addUri/changeOption surface does not accept
+    /// `interface`; the value rides the session global
+    /// (`GlobalOptions.interface`, injected at session assembly by the
+    /// CLI/conf, startup-only like listen-port) and the actor stamps it
+    /// onto every task's runtime opts at creation, so all forms (RPC
+    /// tasks, `taiji http`, URL positional, metalink subtasks,
+    /// input-file batch) share one bind. `None` = unbound (zero
+    /// change). Runtime face: rebuilt from the session global after a
+    /// restart, never persisted.
+    pub local_address: Option<std::net::IpAddr>,
 }
 
 impl Default for HttpTaskOpts {
@@ -723,11 +737,27 @@ impl Default for HttpTaskOpts {
             http2_max_connections: 1,
             http2_keep_alive_interval: None,
             batch_budget: taiji_http::batch::DEFAULT_BATCH_BUDGET,
+            local_address: None,
         }
     }
 }
 
 impl HttpTaskOpts {
+    /// Session-global egress stamp (`--interface`): the actor applies
+    /// the startup global at every task-creation site (addUri / startup
+    /// restore / error-rerun unpause / media direct-link conversion) —
+    /// one bind per process, no per-task option face (the field doc
+    /// names the faces). Keeping this a single stamp point (instead of
+    /// per-site field writes) makes a future creation site inherit the
+    /// bind by construction.
+    pub(in crate::session) fn with_session_interface(
+        mut self,
+        interface: Option<std::net::IpAddr>,
+    ) -> Self {
+        self.local_address = interface;
+        self
+    }
+
     /// -> [`ClientConfig`] (transport projection; a missing UA falls to the
     /// client-layer default). The CA path is passed through as-is (ordering
     /// resolves in the client layer's `build_transport`:
@@ -753,6 +783,7 @@ impl HttpTaskOpts {
             http2_connection_window: self.http2_connection_window,
             http2_max_connections: self.http2_max_connections,
             http2_keep_alive_interval: self.http2_keep_alive_interval,
+            local_address: self.local_address,
             ..ClientConfig::default()
         }
     }
@@ -5043,8 +5074,12 @@ async fn run_prefetch(
             w.open_existing(&path, true).ok()?;
             let mut buf = vec![0u8; len];
             let mut total = 0usize;
+            // Read-once face: checksum verification reads the whole file
+            // exactly once to feed the digest (libtorrent volatile_read
+            // semantics) — the page cache should not keep a task-sized
+            // copy of data nobody will re-read.
             while total < buf.len() {
-                match w.read_at(hashed + total as u64, &mut buf[total..]) {
+                match w.read_at_volatile(hashed + total as u64, &mut buf[total..]) {
                     Ok(n) if n > 0 => total += n,
                     _ => return None, // IO failure / short read (file behind bookkeeping)
                 }
@@ -5649,6 +5684,43 @@ fn redact_uri(uri: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The egress-bind session stamp (`--interface` ->
+    /// GlobalOptions.interface): with_session_interface sets the runtime
+    /// opts slot and to_client_config projects it onto
+    /// ClientConfig.local_address (the transport's bind-before-connect
+    /// face); the default stays None (zero change). The pool bucket-key
+    /// consequence is exercised by the config equality: two opts
+    /// differing only in the bind are NOT equal (no shared transport).
+    #[test]
+    fn session_interface_stamp_projects_to_client_config() {
+        let ip: std::net::IpAddr = "192.0.2.40".parse().unwrap_or_else(|e| panic!("{e}"));
+        let base = HttpTaskOpts::default();
+        assert_eq!(base.local_address, None, "default = unbound (zero change)");
+        assert_eq!(
+            base.to_client_config().local_address,
+            None,
+            "the default projection stays unbound"
+        );
+        let stamped = base.clone().with_session_interface(Some(ip));
+        assert_eq!(stamped.local_address, Some(ip));
+        assert_eq!(
+            stamped.to_client_config().local_address,
+            Some(ip),
+            "the stamp projects onto the transport bind face"
+        );
+        assert_ne!(
+            base.to_client_config(),
+            stamped.to_client_config(),
+            "a different bind = a different pool bucket key (no cross-config sharing)"
+        );
+        // Clear-back semantics (None re-stamps to unbound).
+        assert_eq!(
+            stamped.with_session_interface(None).local_address,
+            None,
+            "re-stamping with None clears the bind"
+        );
+    }
+
     /// sync_mirror_progress keeps the config face mirror-authoritative:
     /// the pipeline row (an activation-time snapshot) must ADOPT the
     /// mirror's config_json, never overwrite it — a journal written

@@ -148,9 +148,14 @@ async fn reserve_tcp_port() -> u16 {
 async fn engine_cfg(port: u16, crypto: CryptoPolicy, seeder: Option<SocketAddr>) -> EngineConfig {
     let tracker = mock_tracker(seeder).await;
     EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
+        listen_interfaces: Vec::new(),
         peer_id: PEER_ID_ENGINE,
         announce: format!("http://{tracker}/announce"),
         listen_port: port,

@@ -493,6 +493,8 @@ fn vector_33_ext_handshake_encode_canonical_and_roundtrip() {
         m_ut_pex: Some(1),
         // Default None = the m dict omits the ut_holepunch key.
         m_ut_holepunch: None,
+        // Default None = the m dict omits the ut_close key.
+        m_ut_close: None,
         p: Some(6881),
         v: Some("taiji/0.1.0".into()),
         metadata_size: Some(1024),
@@ -664,11 +666,22 @@ fn vectors_38_39_registry_default_and_name_table() {
         None,
         "not in the name table, not registered"
     );
+    assert_eq!(
+        reg.get("ut_close"),
+        None,
+        "taiji-local extension: not in the aria2 name table, not registered by default"
+    );
     let mut reg2 = ExtRegistry::empty();
     reg2.set("ut_pex", 1);
     assert_eq!(reg2.get("ut_pex"), Some(1));
     reg2.remove("ut_pex");
     assert_eq!(reg2.get("ut_pex"), None);
+    // The ut_close slot: dynamic registration (the same BEP-10 m-dict
+    // semantics as ut_holepunch).
+    reg2.set("ut_close", 3);
+    assert_eq!(reg2.get("ut_close"), Some(3));
+    reg2.remove("ut_close");
+    assert_eq!(reg2.get("ut_close"), None);
 }
 
 // ---------- hardening: ExtHandshake out-of-domain integers ----------
@@ -695,6 +708,46 @@ fn ext_handshake_out_of_domain_integers_treated_absent() {
     assert_eq!(hs2.p, Some(65535));
     assert_eq!(hs2.metadata_size, Some(u32::MAX));
     assert_eq!(hs2.reqq, Some(u32::MAX));
+}
+
+/// `ut_close` m-dict decode paths (the peer-visible close-reason
+/// extension slot): BEP-10 value 0 = disabled (filtered to None, the
+/// same rule as the other extensions); out-of-domain integers treated
+/// absent (the hardening contract above); legal values pass; encode
+/// keeps the m dict ascending (ut_close sorts first) and roundtrips.
+#[test]
+fn ext_handshake_ut_close_slot_paths() {
+    // 0 = disabled (BEP-10) -> None.
+    let zero = b"d1:md8:ut_closei0eee";
+    let hs = ok(ExtHandshake::decode(zero), "ut_close=0");
+    assert_eq!(hs.m_ut_close, None, "ut_close=0 must filter to None");
+    // Out-of-domain -> None (i300e used to truncate to 44).
+    let bad = b"d1:md8:ut_closei300eee";
+    let hs = ok(ExtHandshake::decode(bad), "ut_close out of domain");
+    assert_eq!(hs.m_ut_close, None, "i300e must be treated absent");
+    // Legal value passes.
+    let legal = b"d1:md8:ut_closei3eee";
+    let hs = ok(ExtHandshake::decode(legal), "ut_close legal");
+    assert_eq!(hs.m_ut_close, Some(3));
+    // Encode with all four m-dict keys: ascending bytewise order
+    // (ut_close < ut_holepunch < ut_metadata < ut_pex) and a full
+    // roundtrip.
+    let full = ExtHandshake {
+        m_ut_close: Some(3),
+        m_ut_holepunch: Some(0x20),
+        m_ut_metadata: Some(2),
+        m_ut_pex: Some(1),
+        ..ExtHandshake::default()
+    };
+    let bytes = ok(full.encode(), "encode full m dict");
+    let s = ok(String::from_utf8(bytes.to_vec()), "ascii");
+    let c = some(s.find("8:ut_close"), "ut_close key");
+    let h = some(s.find("12:ut_holepunch"), "ut_holepunch key");
+    let m = some(s.find("11:ut_metadata"), "ut_metadata key");
+    let p = some(s.find("6:ut_pex"), "ut_pex key");
+    assert!(c < h && h < m && m < p, "m dict keys must be ascending");
+    let back = ok(ExtHandshake::decode(&bytes), "roundtrip");
+    assert_eq!(back, full);
 }
 
 // ---------- property tests (proptest: arbitrary bytes never panic + roundtrip) ----------

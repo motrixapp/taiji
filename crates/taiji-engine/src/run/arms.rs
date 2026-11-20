@@ -16,7 +16,6 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::Instant;
 
 use sha1::{Digest as _, Sha1};
 use tokio::sync::mpsc;
@@ -171,13 +170,14 @@ pub(super) async fn handle_engine_command(
         }
         // Query surface: tellStatus live snapshot / getPeers / getServers.
         Some(EngineCommand::QueryStatus { reply }) => {
+            let query_now = state.clock.now();
             let snap = status_snapshot(
                 &state.faces,
                 piece_len,
                 layout.total(),
                 startup_uploaded + session_up.load(Ordering::Relaxed),
-                state.speed_up.calculate(Instant::now()),
-                state.speed_down.calculate(Instant::now()),
+                state.speed_up.calculate(query_now),
+                state.speed_down.calculate(query_now),
                 // getFiles missing-layer projection reading (non-empty table only
                 // for tasks with missing layers).
                 recovery_admit::recovery_file_states(state),
@@ -364,7 +364,11 @@ pub(super) async fn handle_engine_command(
 /// is a net loss).
 fn read_back_block_digests(reader: TorrentReader, goff: u64, nbytes: u64) -> Option<Vec<[u8; 20]>> {
     let mut buf = vec![0u8; usize::try_from(nbytes).ok()?];
-    let n = reader.read_at(goff, &mut buf).ok()?;
+    // Read-once face: the piece bytes exist here only to be hashed into
+    // the good-data digest baseline (libtorrent volatile_read
+    // semantics) — page-cache eviction keeps the evidence pass from
+    // evicting cacheable data.
+    let n = reader.read_at_volatile(goff, &mut buf).ok()?;
     buf.truncate(n);
     const BLOCK: usize = merkle::BLOCK_SIZE as usize;
     Some(buf.chunks(BLOCK).map(|c| Sha1::digest(c).into()).collect())
@@ -1014,7 +1018,7 @@ fn face_has_outstanding_requests(face: &FaceState) -> bool {
 /// existing convergence path).
 pub(super) fn handle_dispatch_arrival(arrival: LedgerArrival, state: &mut EngineLoop) {
     match state.faces.get_mut(arrival.face) {
-        Some(face) => on_block_arrived(face, arrival.index, arrival.begin, Instant::now()),
+        Some(face) => on_block_arrived(face, arrival.index, arrival.begin, face.clock.now()),
         None => debug!(target: "taiji::core::engine", face = arrival.face,
             index = arrival.index, begin = arrival.begin, cuid = arrival.cuid,
             "block arrival for unknown face: dropped (engine tearing down)"),
@@ -1051,7 +1055,7 @@ pub(super) fn flush_dispatch_debt(state: &mut EngineLoop) {
     };
     let age_ok = state
         .dispatch_debt_since
-        .is_some_and(|t| t.elapsed() >= DISPATCH_DEBT_MAX_AGE);
+        .is_some_and(|t| state.clock.now() - t >= DISPATCH_DEBT_MAX_AGE);
     // Supply-quiet shortcut: no indebted face has any unsettled in-flight
     // request -> coalescing gains nothing, settle immediately (the loopback
     // wave-tail shape). Settle batch: while supply is flowing, coalesce by
@@ -1206,11 +1210,14 @@ pub(super) fn handle_peer_avail(
             // session_impl.cpp): on an INTERESTED rising edge while choked
             // with a free slot, unchoke immediately (saves one round RTT).
             // The slot test, mode gate, and placement live in the engine
-            // choke module's `preemptive_unchoke`. No dispatch-debt feed
+            // choke module's `preemptive_unchoke` (the connection-class
+            // switch `BH_PEER_CLASS` is read here per event — local-class
+            // rows sit outside the free-slot count while it is on).
+            // No dispatch-debt feed
             // here — the peer's interest in us does not change our request
             // surface (the tail note_dispatch_debt is idempotent and
             // harmless; the arm stays uniform).
-            preemptive_unchoke(face, peer);
+            preemptive_unchoke(face, peer, taiji_io::knobs::peer_class_enabled());
         }
     }
     // Immediate advertisement bookkeeping + dispatch debt (tick-driven):
@@ -1292,9 +1299,10 @@ pub(super) fn handle_peer_registered(
     let reg_addr = SocketAddr::new(reg.meta.ip, reg.meta.port);
     let reg_inbound = reg.meta.inbound;
     let reg_crypto = reg.meta.crypto;
+    let reg_now = face.clock.now();
     face.peer_state.insert(
         cuid,
-        crate::faces::PeerState::registered(cuid, reg_addr.ip(), reg.meta, Instant::now()),
+        crate::faces::PeerState::registered(cuid, reg_addr.ip(), reg.meta, reg_now),
     );
     // PEX fresh-candidate registration (outbound connections only;
     // inbound is excluded by the bookkeeping function).
@@ -1304,7 +1312,7 @@ pub(super) fn handle_peer_registered(
             cuid,
             reg_addr,
             reg_inbound,
-            Instant::now(),
+            reg_now,
         );
     }
     // Connection established -> remove the redial entry (regardless of
@@ -1406,7 +1414,7 @@ pub(super) fn handle_peer_left(
     // Outbound peer left -> dropped-candidate registration (the
     // getDroppedPeers projection; the fresh record is retracted with it).
     if pex_enabled {
-        pex_note_left(&mut face.pex_candidates, cuid, Instant::now());
+        pex_note_left(&mut face.pex_candidates, cuid, face.clock.now());
     }
     // On leave, immediately fold the connection's un-bridged counter deltas
     // into the session totals (the baseline = the last tick sync point;
@@ -1459,6 +1467,7 @@ pub(super) fn handle_peer_left(
                     Transport::Tcp => 0,
                     Transport::Utp => dd,
                 },
+                du,
             );
             match meta.transport {
                 Transport::Tcp => {
@@ -1487,7 +1496,7 @@ pub(super) fn handle_peer_left(
                     .blocks(meta.ip, epoch_secs())
                     .is_none()
             {
-                let now = Instant::now();
+                let now = state.clock.now();
                 let addr = SocketAddr::new(meta.ip, meta.port);
                 let had_data = up_now > 0 || down_now > 0;
                 // Slow-eviction mark consumption: a hit is removed
@@ -1527,14 +1536,15 @@ pub(super) fn handle_peer_left(
     // side; the seeding period keeps its 10s cadence, untouched). The
     // budget-derived slots use the same parameters as the ticker round (the
     // same assembly as `handle_choke_round` — both read points agree at the
-    // same instant).
+    // same instant; the connection-class switch likewise).
     let budget_slots = budget_derived_slots(
         taiji_io::knobs::unchoke_budget_slots_enabled(),
         state.limiter.as_deref(),
     );
+    let class_enabled = taiji_io::knobs::peer_class_enabled();
     if let Some(face) = state.faces.get_mut(fi) {
         if !face.completed {
-            leecher_choke_round(face, &mut state.choke_rng, budget_slots);
+            leecher_choke_round(face, &mut state.choke_rng, budget_slots, class_enabled);
         }
     }
     ControlFlow::Continue(())
@@ -1781,7 +1791,7 @@ async fn handle_set_dht_enabled(
         // Immediate announce registration (the revival path) + cadence base
         // reset.
         spawn_dht_announces(wiring, &state.faces, actual_port, actual_port);
-        state.last_dht_announce = Instant::now();
+        state.last_dht_announce = state.clock.now();
         info!(target: "taiji::core::engine",
             families = wiring.len(), port,
             "dht wired at runtime (hot enable; announces registered)");

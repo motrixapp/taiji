@@ -1186,16 +1186,53 @@ struct Cli {
     )]
     auto_save_interval: Option<u64>,
     /// Bound interface/IP (aria2-compatible name `--interface`, domain
-    /// C; aria2 `OptionHandlerFactory.cc`). **Acceptance
-    /// disclosure** (connection-layer check findings, stated as-is):
-    /// reqwest 0.13 `ClientBuilder::local_address` exists, but
-    /// taiji-http `ClientConfig`/build_transport has no such field (the
-    /// transport assembly face is absent); the taiji-io UDP/TCP bind
-    /// face likewise has no interface-binding seam — no consumption
-    /// point for either protocol family. Given explicitly = one
-    /// warning, not effective.
+    /// C; aria2 `OptionHandlerFactory.cc` `PREF_INTERFACE`, a single
+    /// value = an IP literal or an interface/device name). **Effective**
+    /// (egress bind, parsed once in run — [`interface_egress_from_cli`]):
+    /// HTTP(S) transport connections bind the address before connect
+    /// (`ClientConfig.local_address` -> reqwest `local_address`, all
+    /// HTTP forms); BT peer TCP dials bind it before connect
+    /// (`EngineConfig.egress` -> `dial_tcp`); the UDP demux face
+    /// (uTP + DHT + UDP tracker, one shared socket) binds it instead of
+    /// the unspecified address, and the non-matching family's face is
+    /// not spawned (all UDP egress via the chosen address; the family
+    /// narrowing is inherent to a single-value bind, aria2
+    /// `SocketCore::bindAddress` the same shape). A device name
+    /// resolves via the OS interface table (if-addrs, an existing
+    /// workspace dependency), preferring the device's IPv4 address
+    /// (multi-address expansion = the multi-listen phase). An
+    /// unresolvable value = one warning and the run continues unbound
+    /// (warn-don't-kill; aria2 hard-fails here — a declared, gentler
+    /// divergence). Narrow declared residual (still on the default
+    /// route): the FTP transport, the magnet metadata/discovery phase,
+    /// and the HTTP-tracker announce face. Startup-only (like
+    /// listen-port); unset = zero change.
     #[arg(long = "interface", value_name = "NAME")]
     interface: Option<String>,
+    /// Multi-interface listen face (extension option
+    /// `taiji.listen-interfaces`, the `taiji.*` namespace — no aria2
+    /// counterpart; the libtorrent `settings_pack::listen_interfaces`
+    /// shape): a comma list of `device-or-IP:port` entries
+    /// (`[v6]:port` bracket form for IPv6 literals; no suffix flags).
+    /// **Effective** (ingress, parsed once in run —
+    /// [`listen_interfaces_from_cli`]): each entry expands through the
+    /// OS interface table (a device name -> one listen face per
+    /// interface address; a wildcard `0.0.0.0`/`::` -> one face per
+    /// interface address of that family, the BEP 32/45 multi-homed
+    /// shape) into one TCP listener + one UDP demux per endpoint
+    /// (uTP/DHT/UDP-tracker riders attach per face). Invalid entries
+    /// warn individually and are skipped — never a startup refusal.
+    /// Interaction with `--interface`: the egress bind family narrows
+    /// the face set (both set = same-family endpoints only).
+    /// Enumeration failure or an empty expansion degrades to the
+    /// single wildcard listen (warn; the platform capability
+    /// fallback). Startup-only (like `--listen-port`); unset = the
+    /// standing single-listen behavior, zero change. Declared
+    /// residuals: NAT maps the single announce port (the first v4
+    /// face's port — per-face mappings need an io::nat multi-port
+    /// extension); LSD stays the session-global multicast face.
+    #[arg(long = "taiji-listen-interfaces", value_name = "device-or-IP:port,...")]
+    taiji_listen_interfaces: Option<String>,
     /// IPv6 switch (aria2-compatible name `--disable-ipv6`, domain C;
     /// aria2 `OptionHandlerFactory.cc` Boolean, default false).
     /// **Acceptance disclosure**: the taiji-http DNS resolution adapter
@@ -1920,6 +1957,11 @@ fn bt_max_peers_override_of(cli_value: u64, explicit: bool) -> Option<usize> {
 }
 
 fn main() {
+    // Structured panic report (version + build profile + counter
+    // snapshot + backtrace): installed before any runtime/clap work so
+    // every later panic carries its triage package.
+    install_panic_hook();
+
     // Media exec-shim hook (the media spec §8.6): a child spawned by
     // taiji-media's orchestrator re-enters this executable with the
     // `__taiji-media-exec` marker argv; the shim applies the child
@@ -2010,6 +2052,13 @@ fn main() {
         cli.enable_color,
         log_target,
     );
+
+    // BH_* knob startup scan (once, after the subscriber is up so the
+    // warnings land in the log): deprecated knobs warn naming their
+    // successor (release N of the retirement flow), set names without a
+    // registry row warn as unknown (release N+1 / typos). Active knobs
+    // stay silent (the registry table remains the value authority).
+    taiji_io::knobs::warn_knobs_at_startup();
 
     // Mode restriction for conf-provided enable-rpc (fail-closed):
     // download mode + RPC on + switch source not the command line (=
@@ -2117,7 +2166,126 @@ fn main() {
     }
 }
 
+// ---- Structured panic report (the triage package) ----
+
+/// Process-level metrics slot for the panic hook: armed once when a
+/// session (or the bare engine's observation carrier) exists; a panic
+/// before that still prints the report, with the counters arm
+/// explicitly marked unavailable.
+static PANIC_METRICS: std::sync::OnceLock<Arc<taiji_core::session::metrics::SessionMetrics>> =
+    std::sync::OnceLock::new();
+
+/// Build profile label (`debug_assertions` carries the
+/// invariant-sweep/overflow-check posture — the first triage fork).
+const BUILD_PROFILE: &str = if cfg!(debug_assertions) {
+    "debug"
+} else {
+    "release"
+};
+
+/// The panic report body (fixed, greppable format — the design goal is
+/// "a user paste is enough to act on": version, build profile, panic +
+/// location + thread, the key-counter snapshot, backtrace). Pure
+/// formatting over pre-extracted values so the unit tests pin the
+/// shape without driving a real panic.
+fn format_panic_report(
+    version: &str,
+    payload: &str,
+    location: &str,
+    thread: &str,
+    counters: Option<&str>,
+    backtrace: &str,
+) -> String {
+    let mut out = String::with_capacity(1024);
+    out.push_str("===== taiji panic report =====\n");
+    out.push_str("version: ");
+    out.push_str(version);
+    out.push('\n');
+    out.push_str("build: ");
+    out.push_str(BUILD_PROFILE);
+    out.push('\n');
+    out.push_str("panic: ");
+    out.push_str(payload);
+    out.push('\n');
+    out.push_str("location: ");
+    out.push_str(location);
+    out.push('\n');
+    out.push_str("thread: ");
+    out.push_str(thread);
+    out.push('\n');
+    match counters {
+        Some(c) => {
+            out.push_str("counters: ");
+            out.push_str(c);
+            out.push('\n');
+        }
+        None => out.push_str("counters: unavailable (no session metrics armed yet)\n"),
+    }
+    out.push_str("backtrace:\n");
+    out.push_str(backtrace);
+    out.push_str("\n===== end taiji panic report =====\n");
+    out
+}
+
+/// Arm the panic-report metrics slot (idempotent, first arming wins:
+/// the idle/download+rpc session actor and the bare engine form's
+/// observation carrier share the one process slot).
+fn arm_panic_metrics(metrics: Arc<taiji_core::session::metrics::SessionMetrics>) {
+    let _ = PANIC_METRICS.set(metrics);
+}
+
+/// Install the structured panic hook (the single drop-in point, before
+/// any runtime work so config/engine panics are covered too). Only the
+/// default PRINTING is replaced — panic semantics (unwind and the
+/// process exit paths) are untouched; the process still dies after the
+/// report. The hook formats exactly once at panic time and writes once
+/// to stderr: no logging-stack dependency (it must work before tracing
+/// initializes), no per-field allocations beyond the single report
+/// buffer.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        // Payload extraction (the classic downcast pair; a non-string
+        // payload falls back to the placeholder — never omit the panic
+        // line).
+        let p = info.payload();
+        let payload = if let Some(s) = p.downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = p.downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "<non-string panic payload>"
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let thread = std::thread::current();
+        // force_capture: the report must carry a backtrace even with
+        // RUST_BACKTRACE unset (stable std; no new dependency).
+        let counters = PANIC_METRICS.get().map(|m| m.panic_counter_line());
+        let report = format_panic_report(
+            &taiji_core::version_string(),
+            payload,
+            &location,
+            thread.name().unwrap_or("<unnamed>"),
+            counters.as_deref(),
+            &std::backtrace::Backtrace::force_capture().to_string(),
+        );
+        eprint!("{report}");
+    }));
+}
+
 async fn run(cli: Cli) -> i32 {
+    // --interface egress bind (parsed once before any dispatch — the
+    // single value source every form consumes: the session globals of
+    // idle/download+rpc/magnet-one-shot/input-file, the bare engine
+    // config, and the http subcommand pipeline).
+    let interface = interface_egress_from_cli(&cli);
+    // --taiji-listen-interfaces (parsed once before any dispatch — the
+    // raw entry table every BT form consumes: the session global of
+    // idle/download+rpc/magnet/input-file and the bare engine config;
+    // HTTP-only forms have no listen face).
+    let listen_interfaces = listen_interfaces_from_cli(&cli);
     // Subcommand dispatch (import / create-torrent / http); the
     // existing download/idle modes are unaffected.
     if let Some(Command::Import(args)) = cli.command {
@@ -2127,7 +2295,7 @@ async fn run(cli: Cli) -> i32 {
         return create_torrent::run(args).await;
     }
     if let Some(Command::Http(args)) = cli.command {
-        return http::run(*args).await;
+        return http::run(*args, interface).await;
     }
     if let Some(Command::Media(args)) = cli.command {
         return media::run(*args).await;
@@ -2155,12 +2323,14 @@ async fn run(cli: Cli) -> i32 {
              task-option projection is pending (declared difference)");
     }
     // Domain C acceptance disclosure (explicitly not effective, no
-    // silence — the same style as domain B): the six flags' consumption
+    // silence — the same style as domain B): the five flags' consumption
     // faces are absent in this build; given explicitly, each warns
     // once. The check findings are recorded faithfully in each Cli
-    // field doc (interface connection layer / disable-ipv6 resolution
-    // face / auto-save-interval persistence face / netrc face / cookie
-    // export face / FTP TYPE face).
+    // field doc (disable-ipv6 resolution face / auto-save-interval
+    // persistence face / netrc face / cookie export face / FTP TYPE
+    // face). (--interface left this group: the egress bind is now
+    // effective; its narrow residual disclosure lives at the
+    // [`interface_egress_from_cli`] parse point.)
     warn_deferred_domain_c(&cli);
     // Acceptance disclosure (explicitly not effective, no
     // silence — the same style as domain C): the seven flags' names are
@@ -2333,7 +2503,16 @@ async fn run(cli: Cli) -> i32 {
     // pipeline; the RPC face is disclosed with a warning inside the
     // form — batch tasks run and exit, no RPC listener assembly).
     if let Some(path) = cli.input_file.clone() {
-        return run_input_file(path, &cli, crypto, conn_type, seed_trackers).await;
+        return run_input_file(
+            path,
+            &cli,
+            crypto,
+            conn_type,
+            seed_trackers,
+            interface,
+            listen_interfaces,
+        )
+        .await;
     }
     // Three-state assembly (mirrors the upstream
     // `DownloadEngineFactory.cc` enable-rpc branch + CLI URI
@@ -2354,7 +2533,8 @@ async fn run(cli: Cli) -> i32 {
                 warn_ca_certificate_no_global_face(&cli);
                 warn_bare_run_only_flags(&cli, "magnet+rpc");
                 let cfg = rpc_config_from_cli(&cli);
-                let mut opts = build_idle_options(&cli, crypto, conn_type);
+                let mut opts =
+                    build_idle_options(&cli, crypto, conn_type, interface, listen_interfaces);
                 // Domain 5: the --stop shutdown deadline rides the
                 // session form (parsed in run; the RPC shutdown path).
                 opts.stop_after = stop_after;
@@ -2390,18 +2570,29 @@ async fn run(cli: Cli) -> i32 {
                     cli.summary_interval,
                     cli.ca_certificate.clone(),
                     cli.load_cookies.as_ref().map(|p| p.display().to_string()),
+                    interface,
                 )
                 .await
             }
             PositionalInput::MagnetUri(uri) => {
                 warn_bare_run_only_flags(&cli, "magnet one-shot");
-                run_one_shot_magnet(uri, &cli, crypto, conn_type, seed_trackers).await
+                run_one_shot_magnet(
+                    uri,
+                    &cli,
+                    crypto,
+                    conn_type,
+                    seed_trackers,
+                    interface,
+                    listen_interfaces,
+                )
+                .await
             }
             PositionalInput::TorrentFile(path) if cli.enable_rpc => {
                 warn_ca_certificate_no_global_face(&cli);
                 warn_bare_run_only_flags(&cli, "torrent+rpc");
                 let cfg = rpc_config_from_cli(&cli);
-                let mut opts = build_idle_options(&cli, crypto, conn_type);
+                let mut opts =
+                    build_idle_options(&cli, crypto, conn_type, interface, listen_interfaces);
                 // Domain 5: task-face flags flow through IdleOptions with
                 // the form (select-file = the AddTorrent injection, set
                 // inside build_idle_options; --stop = the shutdown
@@ -2495,6 +2686,15 @@ async fn run(cli: Cli) -> i32 {
                         // domain exits there).
                         select_file,
                         seed_time,
+                        // --interface (the egress bind; parsed once in
+                        // run): the bare engine's peer TCP dials and the
+                        // UDP demux face bind it.
+                        interface,
+                        // --taiji-listen-interfaces (parsed once in run;
+                        // empty = the standing single-listen shape): the
+                        // bare engine listens on one face per expanded
+                        // endpoint.
+                        listen_interfaces,
                         // Wiring: the bare-form
                         // consumption face (Some = the EngineConfig.seed
                         // seed_ratio override; None = the standing 1.0
@@ -2511,7 +2711,8 @@ async fn run(cli: Cli) -> i32 {
             warn_ca_certificate_no_global_face(&cli);
             warn_bare_run_only_flags(&cli, "idle daemon");
             let cfg = rpc_config_from_cli(&cli);
-            let mut opts = build_idle_options(&cli, crypto, conn_type);
+            let mut opts =
+                build_idle_options(&cli, crypto, conn_type, interface, listen_interfaces);
             // Domain 5: the --stop shutdown deadline (parsed in run;
             // select-file/hash-check-only have no task face here and are
             // not consumed — the declared face in their field docs;
@@ -2530,6 +2731,106 @@ fn peer_id_prefix_or_default(peer_id_prefix: &Option<String>) -> String {
     peer_id_prefix
         .clone()
         .unwrap_or_else(|| taiji_bt::tracker::PEER_ID_PREFIX.to_string())
+}
+
+/// `--interface` value -> the egress bind address (the single parse
+/// point, called once per process in `run`; aria2 semantics —
+/// `OptionHandlerFactory.cc` `PREF_INTERFACE` parsed by
+/// `SocketCore::getInterfaceAddress`, SocketCore.cc): an IP literal
+/// passes through; anything else is an interface/device name resolved
+/// through the OS interface table (if-addrs getifaddrs — an existing
+/// workspace dependency, zero new third-party code; a local syscall,
+/// no network IO). An unresolvable value = one warning naming the
+/// option and the run-unbound fallback, then `None` (the
+/// warn-don't-kill option culture; aria2 hard-fails on an unknown
+/// interface — a declared, gentler divergence). `None` (unset) = the
+/// default route, zero behavior change.
+fn interface_egress_from_cli(cli: &Cli) -> Option<std::net::IpAddr> {
+    use std::net::IpAddr;
+    let value = cli.interface.as_deref()?;
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        info!(target: "taiji::cli", bind = %ip,
+            "--interface armed (egress binds: HTTP(S) transports, BT peer TCP dials, \
+             the uTP/DHT/UDP-tracker demux socket)");
+        return Some(ip);
+    }
+    // Device-name resolution (getifaddrs; enumeration failure counts as
+    // unresolved — the warning names the fallback either way).
+    let resolved = if_addrs::get_if_addrs()
+        .map_err(|e| {
+            warn!(target: "taiji::cli", %e,
+                "interface enumeration failed; --interface device-name values unavailable");
+            e
+        })
+        .ok()
+        .and_then(|ifaces| {
+            resolve_interface_name(value, ifaces.iter().map(|i| (i.name.as_str(), i.ip())))
+        });
+    match resolved {
+        Some(ip) => {
+            info!(target: "taiji::cli", interface = value, bind = %ip,
+                "--interface resolved to the interface address (egress binds)");
+            Some(ip)
+        }
+        None => {
+            warn!(target: "taiji::cli", interface = value,
+                "--interface value is neither an IP literal nor a resolvable \
+                 interface name; continuing unbound (the OS default route)");
+            None
+        }
+    }
+}
+
+/// Pure name-resolution core of [`interface_egress_from_cli`]
+/// (table-driven tests; the OS table is injected): entries whose name
+/// matches exactly (getifaddrs `ifa_name` comparison, the aria2
+/// `strcmp` rule) contribute their addresses; the pick prefers the
+/// first IPv4 in table order, falling back to the first IPv6 (the
+/// dominant egress family first; aria2 keeps every address and
+/// round-robins per connection — the multi-address expansion is the
+/// multi-listen phase, a single deterministic pick here).
+fn resolve_interface_name<'a>(
+    value: &str,
+    ifaces: impl IntoIterator<Item = (&'a str, std::net::IpAddr)>,
+) -> Option<std::net::IpAddr> {
+    let mut first_v6 = None;
+    for (name, ip) in ifaces {
+        if name != value {
+            continue;
+        }
+        match ip {
+            std::net::IpAddr::V4(_) => return Some(ip),
+            std::net::IpAddr::V6(_) => first_v6.get_or_insert(ip),
+        };
+    }
+    first_v6
+}
+
+/// `--taiji-listen-interfaces` value -> the parsed multi-listen entry
+/// table (the single parse point, called once per process in run; the
+/// engine-side discipline of libtorrent `parse_listen_interfaces`,
+/// string_util.cpp:180-250 — invalid entries are warned **individually**
+/// and skipped, never fatal; the grammar has no suffix flags, so
+/// trailing characters after the port make the entry invalid). The
+/// entries stay unresolved (device names expand at engine assembly —
+/// bind-time resolution, the upstream reopen_listen_sockets shape);
+/// unset/empty-after-parse = the standing single-listen behavior.
+fn listen_interfaces_from_cli(cli: &Cli) -> Vec<taiji_core::engine::listen::ListenInterface> {
+    let Some(value) = cli.taiji_listen_interfaces.as_deref() else {
+        return Vec::new();
+    };
+    let (specs, errs) = taiji_core::engine::listen::parse_listen_interfaces(value);
+    for bad in errs {
+        warn!(target: "taiji::cli", entry = %bad,
+            "taiji.listen-interfaces entry invalid (skipped; expected device-or-IP:port, \
+             [v6]:port for IPv6 — no suffix flags)");
+    }
+    if !specs.is_empty() {
+        info!(target: "taiji::cli", entries = specs.len(),
+            "taiji.listen-interfaces armed (multi-interface listen faces; device names \
+             expand at engine assembly)");
+    }
+    specs
 }
 
 /// Domain B: the `--ca-certificate` session-form disclosure (shared by
@@ -2570,13 +2871,10 @@ fn warn_deferred_domain_c(cli: &Cli) {
              control-file write semantics are permanently subsumed (declared \
              difference; --save-session-interval drives the periodic flush face)");
     }
-    if cli.interface.is_some() {
-        warn!(target: "taiji::cli",
-            "--interface accepted but NOT effective in this build: no consumption \
-             point exists (reqwest local_address is available but the taiji-http \
-             ClientConfig/build_transport face is absent; the taiji-io UDP/TCP \
-             bind face has no interface binding) (declared difference)");
-    }
+    // (--interface has its own narrow parse-point disclosure in
+    // [`interface_egress_from_cli`] — the option is effective; only an
+    // unresolvable value warns there, naming the option and the
+    // run-unbound fallback.)
     if cli.disable_ipv6.is_some() {
         warn!(target: "taiji::cli",
             "--disable-ipv6 accepted but NOT effective in this build: the DNS \
@@ -3013,12 +3311,24 @@ fn build_idle_options(
     cli: &Cli,
     crypto: taiji_bt::mse::CryptoPolicy,
     conn_type: taiji_bt::utp::PeerConnectionType,
+    interface: Option<std::net::IpAddr>,
+    listen_interfaces: Vec<taiji_core::engine::listen::ListenInterface>,
 ) -> IdleOptions {
     IdleOptions {
         dir: cli.dir.clone(),
         db_path: cli.sqlite3_db_path.clone(),
         bt_detach_seed_only: cli.bt_detach_seed_only,
         listen_port: cli.listen_port,
+        // --interface (pre-parsed once in run: the IP literal or the
+        // device-name resolution; None = unbound). Projected onto
+        // GlobalOptions.interface — the session global consumed by the
+        // HTTP task stamp and the BT engine activation injection.
+        interface,
+        // --taiji-listen-interfaces (pre-parsed once in run; empty = the
+        // standing single-listen shape). Projected onto
+        // GlobalOptions.listen_interfaces — the session global consumed
+        // by the BT engine activation injection.
+        listen_interfaces,
         crypto,
         conn_type,
         bt_lsd: cli.bt_lsd,
@@ -3135,6 +3445,17 @@ struct IdleOptions {
     db_path: PathBuf,
     bt_detach_seed_only: bool,
     listen_port: u16,
+    /// `--interface` (the egress bind, parsed once in run; None =
+    /// unbound). Projected onto `GlobalOptions.interface` — consumed by
+    /// the HTTP task creation stamp (`HttpTaskOpts.local_address`) and
+    /// the BT engine activation injection (`EngineConfig.egress`).
+    interface: Option<std::net::IpAddr>,
+    /// `--taiji-listen-interfaces` (parsed once in run; empty = the
+    /// standing single-listen shape). Projected onto
+    /// `GlobalOptions.listen_interfaces` — consumed by the BT engine
+    /// activation injection (`EngineConfig.listen_interfaces`; the
+    /// magnet upgrade passthrough shares it).
+    listen_interfaces: Vec<taiji_core::engine::listen::ListenInterface>,
     crypto: taiji_bt::mse::CryptoPolicy,
     conn_type: taiji_bt::utp::PeerConnectionType,
     bt_lsd: bool,
@@ -3293,6 +3614,16 @@ impl IdleOptions {
                 // into the session (consumed at engine spawn and the
                 // magnet metadata phase; getGlobalOption echo).
                 listen_port: self.listen_port,
+                // --interface (the egress bind; startup-only like
+                // listen-port — changeGlobalOption has no key for it).
+                // Consumed by the HTTP task creation stamp and the BT
+                // engine activation injection.
+                interface: self.interface,
+                // --taiji-listen-interfaces (startup-only like
+                // listen-port — no changeGlobalOption key either).
+                // Consumed by the BT engine activation injection (and
+                // the magnet upgrade passthrough).
+                listen_interfaces: self.listen_interfaces.clone(),
                 bt_require_crypto: self.crypto.require_crypto,
                 bt_min_crypto_level: self.crypto.min_level,
                 bt_peer_connection_type: self.conn_type,
@@ -3498,6 +3829,16 @@ struct DownloadOptions {
     /// `--hash-check-only` (true = recheck the on-disk content and
     /// abort, no engine spawn).
     hash_check_only: bool,
+    /// `--interface` (the egress bind, parsed once in run; None =
+    /// unbound). Injected into `EngineConfig.egress` in run_download —
+    /// the bare engine's TCP peer dials and the UDP demux face
+    /// (uTP/DHT/UDP-tracker) bind it.
+    interface: Option<std::net::IpAddr>,
+    /// `--taiji-listen-interfaces` (parsed once in run; empty = the
+    /// standing single-listen shape). Injected into
+    /// `EngineConfig.listen_interfaces` in run_download — the bare
+    /// engine listens on one face per expanded endpoint.
+    listen_interfaces: Vec<taiji_core::engine::listen::ListenInterface>,
 }
 
 /// Bare-mode rate-limit topology assembly: all four 0 -> None (zero
@@ -3626,6 +3967,8 @@ async fn run_download(
         hooks,
         dht_entry_point6,
         task_gid,
+        interface,
+        listen_interfaces,
     } = opts;
     let bytes = match std::fs::read(&torrent_path) {
         Ok(b) => b,
@@ -3759,6 +4102,14 @@ async fn run_download(
                 c.dht.entry_points_v4 = vec![ep.clone()];
             }
             c.dht.engine.message_timeout = Duration::from_secs(dht_message_timeout);
+            // --interface (the egress bind): the engine's peer TCP dials
+            // and the UDP demux face (uTP + DHT + UDP tracker) bind this
+            // address; None = the OS default route (zero change).
+            c.egress = interface;
+            // --taiji-listen-interfaces (the multi-listen face): the
+            // engine listens on one face per expanded endpoint; empty =
+            // the standing single-wildcard listen shape (zero change).
+            c.listen_interfaces = listen_interfaces;
             // --seed-time: the engine seed policy mounts TimeSeedCriteria
             // (the SeedCheck latch timer starts at the download-completion
             // moment, the `BtSetup.cc` same rule; ZERO = not mounted —
@@ -3790,10 +4141,12 @@ async fn run_download(
             // download mode has no /metrics surface). Inject
             // process-level session metrics; at shutdown
             // `block_stage_log_summary` logs the block-stage
-            // histogram summary.
-            c.stats = Some(std::sync::Arc::new(
-                taiji_core::session::metrics::SessionMetrics::new(),
-            ));
+            // histogram summary. The same instance arms the
+            // panic-report slot (a mid-download panic carries the
+            // counter snapshot).
+            let stats = std::sync::Arc::new(taiji_core::session::metrics::SessionMetrics::new());
+            arm_panic_metrics(stats.clone());
+            c.stats = Some(stats);
             // Rate-limit topology ( batch C: the `--max-overall-*`
             // global bucket + the `--max-*` per-task per_torrent bucket;
             // the aria2 UnitNumberOptionHandler "0 = unlimited" same rule
@@ -4202,6 +4555,9 @@ async fn run_idle(cfg: taiji_rpc::RpcConfig, opts: IdleOptions) -> i32 {
     let (session, actor_join) =
         taiji_core::session::SessionActor::spawn_with_persist(session_options, persist.clone());
     let session = Arc::new(session);
+    // Panic-report carrier: the session's metric face arms the
+    // process slot (a later panic carries the counter snapshot).
+    arm_panic_metrics(session.metrics().clone());
     let shutdown = CancellationToken::new();
     let secret_set = cfg.secret.is_some();
     let server = match taiji_rpc::serve(cfg, session.clone(), shutdown.clone()).await {
@@ -4381,6 +4737,8 @@ async fn run_one_shot_magnet(
     crypto: taiji_bt::mse::CryptoPolicy,
     conn_type: taiji_bt::utp::PeerConnectionType,
     seed_trackers: Vec<String>,
+    interface: Option<std::net::IpAddr>,
+    listen_interfaces: Vec<taiji_core::engine::listen::ListenInterface>,
 ) -> i32 {
     // Single-session guard + session db (same as the http subcommand:
     // lock before db).
@@ -4409,6 +4767,14 @@ async fn run_one_shot_magnet(
         bt_min_crypto_level: crypto.min_level,
         bt_peer_connection_type: conn_type,
         bt_tracker: seed_trackers,
+        // --interface (the egress bind; parsed once in run): the session
+        // global consumed by the engine activation injection and the
+        // magnet upgrade passthrough (MagnetTaskConfig.egress).
+        interface,
+        // --taiji-listen-interfaces (parsed once in run): the session
+        // global consumed by the engine activation injection and the
+        // magnet upgrade passthrough (MagnetTaskConfig.listen_interfaces).
+        listen_interfaces,
         // Domain C: the exit text export + the cookie session-level
         // default source (the magnet one-shot goes through the session
         // pipeline — the same gate as the shutdown save_session; the
@@ -4783,6 +5149,8 @@ async fn run_input_file(
     crypto: taiji_bt::mse::CryptoPolicy,
     conn_type: taiji_bt::utp::PeerConnectionType,
     seed_trackers: Vec<String>,
+    interface: Option<std::net::IpAddr>,
+    listen_interfaces: Vec<taiji_core::engine::listen::ListenInterface>,
 ) -> i32 {
     if cli.enable_rpc {
         warn!(target: "taiji::cli",
@@ -4867,6 +5235,15 @@ async fn run_input_file(
         bt_min_crypto_level: crypto.min_level,
         bt_peer_connection_type: conn_type,
         bt_tracker: seed_trackers,
+        // --interface (the egress bind; parsed once in run): the session
+        // global consumed by the HTTP task stamp and the engine
+        // activation injection (the batch's magnet lines go through the
+        // upgrade passthrough).
+        interface,
+        // --taiji-listen-interfaces (parsed once in run): the session
+        // global consumed by the BT engine activation injection (the
+        // batch's magnet lines go through the upgrade passthrough).
+        listen_interfaces,
         // Domain C: the exit text export + the cookie session-level
         // default source (the batch face goes through the session
         // pipeline — the same gate as the shutdown save_session; the
@@ -4897,6 +5274,8 @@ async fn run_input_file(
         persist.clone(),
     );
     let session = std::sync::Arc::new(session);
+    // Panic-report carrier (the input-file batch form's arming).
+    arm_panic_metrics(session.metrics().clone());
 
     // Create tasks line by line (list order; in-line tab options are
     // written later and override the CLI shared/kind deltas).
@@ -5163,6 +5542,8 @@ async fn run_download_with_rpc(
     let (session, actor_join) =
         taiji_core::session::SessionActor::spawn_with_persist(session_options, persist.clone());
     let session = Arc::new(session);
+    // Panic-report carrier (the download+rpc form's arming).
+    arm_panic_metrics(session.metrics().clone());
     let shutdown = CancellationToken::new();
     let secret_set = cfg.secret.is_some();
     let server = match taiji_rpc::serve(cfg, session.clone(), shutdown.clone()).await {
@@ -5549,6 +5930,68 @@ fn init_tracing(
 mod tests {
     use super::*;
 
+    /// The panic report format (the triage package): every greppable
+    /// marker at its fixed line — version (the getVersion face),
+    /// build, panic payload, location, thread, the counters
+    /// passthrough, the backtrace block, and the closing fence.
+    #[test]
+    fn panic_report_format_is_fixed_and_greppable() {
+        let report = format_panic_report(
+            "taiji/9.9.9",
+            "index out of bounds: the len is 3 but the index is 7",
+            "src/foo.rs:42:13",
+            "worker-1",
+            Some("uptime_s=12 bytes_down=1024 blocks_verified=3 conns_tcp=2"),
+            "   0: foo\n   1: bar",
+        );
+        for marker in [
+            "===== taiji panic report =====",
+            "version: taiji/9.9.9",
+            "build: ",
+            "panic: index out of bounds: the len is 3 but the index is 7",
+            "location: src/foo.rs:42:13",
+            "thread: worker-1",
+            "counters: uptime_s=12 bytes_down=1024 blocks_verified=3 conns_tcp=2",
+            "backtrace:",
+            "   0: foo",
+            "===== end taiji panic report =====",
+        ] {
+            assert!(
+                report.contains(marker),
+                "panic report misses {marker:?}:\n{report}"
+            );
+        }
+    }
+
+    /// A panic before any session exists must say so explicitly rather
+    /// than fabricating a zero counters line (honest-unavailable arm).
+    #[test]
+    fn panic_report_without_metrics_says_unavailable() {
+        let report = format_panic_report("taiji/0.2.0", "boom", "x.rs:1:1", "main", None, "");
+        assert!(
+            report.contains("counters: unavailable (no session metrics armed yet)"),
+            "{report}"
+        );
+        assert!(
+            !report.contains("counters: uptime_s"),
+            "no fabricated counter values: {report}"
+        );
+    }
+
+    /// The version line uses the same frozen getVersion face (the
+    /// `taiji/<semver>` prefix RPC getVersion returns — one version
+    /// string everywhere).
+    #[test]
+    fn panic_report_version_uses_getversion_face() {
+        let version = taiji_core::version_string();
+        assert!(version.starts_with("taiji/"), "frozen prefix: {version}");
+        let report = format_panic_report(&version, "x", "l", "t", None, "");
+        assert!(
+            report.contains(&format!("version: {version}\n")),
+            "{report}"
+        );
+    }
+
     /// Decision table: positional prefix dispatch —
     /// magnet/http(s)/ftp(s) (scheme case-insensitive) go to the
     /// session pipeline; everything else (.torrent paths, relative
@@ -5780,6 +6223,8 @@ mod tests {
                 &cli,
                 taiji_bt::mse::CryptoPolicy::optional(),
                 taiji_bt::utp::PeerConnectionType::default(),
+                None,
+                Vec::new(),
             );
             opts.to_session_options(&taiji_rpc::RpcConfig {
                 port: 6800,
@@ -5923,6 +6368,8 @@ mod tests {
             &cli,
             taiji_bt::mse::CryptoPolicy::optional(),
             taiji_bt::utp::PeerConnectionType::default(),
+            None,
+            Vec::new(),
         );
         let g = opts
             .to_session_options(&taiji_rpc::RpcConfig {
@@ -7695,6 +8142,173 @@ mod tests {
         );
     }
 
+    /// `--interface` value parsing (the [`interface_egress_from_cli`]
+    /// single point): an unset flag / an unresolvable value = None (run
+    /// unbound, one warning at the parse point); an IP literal passes
+    /// through (v4 and v6); a device name resolves through the real OS
+    /// interface table (the first interface of the live table
+    /// round-trips to one of its own addresses — no invented fixture).
+    #[test]
+    fn interface_egress_parse_decision_table() {
+        use std::net::IpAddr;
+        // Unset = unbound.
+        let cli = cli_of(&["taiji"]);
+        assert_eq!(interface_egress_from_cli(&cli), None);
+        // IP literals (v4 + v6, the space and `=` value forms).
+        for (form, want) in [
+            ("--interface=192.0.2.10", "192.0.2.10"),
+            ("--interface", "2001:db8::1"),
+        ] {
+            let argv = if form.ends_with("interface") {
+                vec!["taiji", form, want]
+            } else {
+                vec!["taiji", form]
+            };
+            let cli = cli_of(&argv);
+            assert_eq!(
+                interface_egress_from_cli(&cli),
+                Some(want.parse::<IpAddr>().unwrap_or_else(|e| panic!("{e}"))),
+                "an IP literal passes through: {want}"
+            );
+        }
+        // Unresolvable value = None (warn-and-continue, never a refusal).
+        let cli = cli_of(&["taiji", "--interface=no-such-device-zzz"]);
+        assert_eq!(
+            interface_egress_from_cli(&cli),
+            None,
+            "an unknown name warns and runs unbound"
+        );
+        // Device name: the live OS table round-trips (the pure core is
+        // table-driven below; here the real getifaddrs integration).
+        if let Ok(ifaces) = if_addrs::get_if_addrs() {
+            let probe = ifaces
+                .first()
+                .unwrap_or_else(|| panic!("empty interface table"));
+            let cli = cli_of(&["taiji", "--interface", probe.name.as_str()]);
+            let resolved = interface_egress_from_cli(&cli);
+            assert!(
+                resolved.is_some(),
+                "a live interface name ({}) must resolve",
+                probe.name
+            );
+        }
+        // (An empty OS table would leave the name-resolution arm
+        // unexercised here — the pure decision table below still pins
+        // the semantics.)
+    }
+
+    /// [`resolve_interface_name`] decision table (the pure core; the OS
+    /// table injected): exact name match, IPv4 preferred over IPv6 in
+    /// table order, first-IPv6 fallback for a v6-only device, no match
+    /// = None, and other devices' entries ignored.
+    #[test]
+    fn interface_name_resolution_decision_table() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let v4 = |a: u8| IpAddr::V4(Ipv4Addr::new(192, 0, 2, a));
+        let v6 = |a: u16| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, a));
+        let table = [
+            ("lo0", IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            ("en0", v4(1)),
+            ("en0", v6(1)),
+            ("utun9", v6(2)),
+            ("utun9", v6(3)),
+        ];
+        // Dual-stack device: the first IPv4 in table order wins.
+        assert_eq!(resolve_interface_name("en0", table), Some(v4(1)));
+        // v6-only device: the first IPv6 in table order.
+        assert_eq!(resolve_interface_name("utun9", table), Some(v6(2)));
+        // Exact match only (no prefix/substring matching).
+        assert_eq!(resolve_interface_name("en", table), None);
+        assert_eq!(resolve_interface_name("utun", table), None);
+        assert_eq!(resolve_interface_name("missing", table), None);
+        // v4 listed AFTER v6 still wins (family preference, not
+        // first-entry preference).
+        let table2 = [("x", v6(9)), ("x", v4(2))];
+        assert_eq!(resolve_interface_name("x", table2), Some(v4(2)));
+    }
+
+    /// The `--interface` session projection (the egress bind's session
+    /// entry): build_idle_options carries the parsed address onto
+    /// `GlobalOptions.interface` (consumed by the HTTP task stamp and
+    /// the BT engine activation injection); unset = None (zero change).
+    #[test]
+    fn interface_projects_to_session_global() {
+        let project = |interface: Option<std::net::IpAddr>| {
+            let cli = cli_of(&["taiji"]);
+            build_idle_options(
+                &cli,
+                taiji_bt::mse::CryptoPolicy::optional(),
+                taiji_bt::utp::PeerConnectionType::default(),
+                interface,
+                Vec::new(),
+            )
+            .to_session_options(&rpc_config_from_cli(&cli))
+            .global
+            .interface
+        };
+        let ip: std::net::IpAddr = "192.0.2.30".parse().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(project(None), None, "unset = unbound (zero change)");
+        assert_eq!(project(Some(ip)), Some(ip), "the parsed address injects");
+    }
+
+    /// The multi-listen option's session projection (the assembly
+    /// single point shared by idle/download+rpc): Cli ->
+    /// build_idle_options -> GlobalOptions.listen_interfaces (the raw
+    /// entries; device names stay unresolved until engine assembly —
+    /// bind-time resolution, the upstream reopen_listen_sockets shape).
+    /// Unset = the empty table = the standing single-listen shape.
+    #[test]
+    fn listen_interfaces_project_to_session_global() {
+        let project = |raw: Option<&str>| {
+            let mut args = vec!["taiji"];
+            if let Some(v) = raw {
+                args.push("--taiji-listen-interfaces");
+                args.push(v);
+            }
+            let cli = cli_of(&args);
+            listen_interfaces_from_cli(&cli)
+        };
+        assert!(
+            project(None).is_empty(),
+            "unset = the empty table (zero change)"
+        );
+        let got = project(Some("en0:6881, [2001:db8::1]:6882, 127.0.0.1:0"));
+        let shown: Vec<(&str, u16)> = got.iter().map(|s| (s.device.as_str(), s.port)).collect();
+        assert_eq!(
+            shown,
+            vec![("en0", 6881), ("2001:db8::1", 6882), ("127.0.0.1", 0)],
+            "the raw entry table parses cleanly (device names unresolved)"
+        );
+        // Invalid entries skip individually; the valid neighbors keep
+        // (the engine-side grammar table is the deeper lock — this pins
+        // the CLI single-point behavior).
+        let got = project(Some("en0:6881, bogus, en1:99999"));
+        assert_eq!(got.len(), 1, "only the legal entry survives");
+        assert_eq!(got[0].device, "en0");
+        // The session projection face (the projection consumers are the
+        // BT engine activation injection + the magnet passthrough).
+        let cli = cli_of(&[
+            "taiji",
+            "--taiji-listen-interfaces",
+            "127.0.0.1:6881,[::1]:6881",
+        ]);
+        let opts = build_idle_options(
+            &cli,
+            taiji_bt::mse::CryptoPolicy::optional(),
+            taiji_bt::utp::PeerConnectionType::default(),
+            None,
+            listen_interfaces_from_cli(&cli),
+        );
+        assert_eq!(
+            opts.to_session_options(&rpc_config_from_cli(&cli))
+                .global
+                .listen_interfaces
+                .len(),
+            2,
+            "both loopback entries project onto the session global"
+        );
+    }
+
     /// The domain C session projection (the assembly single point shared
     /// by idle/download+rpc): Cli -> build_idle_options ->
     /// to_session_options maps the three keys straight onto
@@ -7710,6 +8324,8 @@ mod tests {
                 &cli,
                 taiji_bt::mse::CryptoPolicy::optional(),
                 taiji_bt::utp::PeerConnectionType::default(),
+                None,
+                Vec::new(),
             );
             opts.to_session_options(&taiji_rpc::RpcConfig {
                 port: 6800,
@@ -8204,7 +8820,7 @@ mod tests {
                 min_level: taiji_bt::mse::CryptoLevel::Plain,
             };
             let conn_type = taiji_bt::utp::PeerConnectionType::default();
-            crate::build_idle_options(&cli, crypto, conn_type)
+            crate::build_idle_options(&cli, crypto, conn_type, None, Vec::new())
                 .to_session_options(&crate::rpc_config_from_cli(&cli))
                 .global
                 .seed_time_min
@@ -8289,7 +8905,7 @@ mod tests {
                 min_level: taiji_bt::mse::CryptoLevel::Plain,
             };
             let conn_type = taiji_bt::utp::PeerConnectionType::default();
-            crate::build_idle_options(&cli, crypto, conn_type)
+            crate::build_idle_options(&cli, crypto, conn_type, None, Vec::new())
                 .to_session_options(&crate::rpc_config_from_cli(&cli))
                 .global
                 .seed_ratio

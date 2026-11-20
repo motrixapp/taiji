@@ -261,6 +261,54 @@ pub struct EngineConfig {
     /// existing `TrackerOptions::default()` shape — CLI flags stay
     /// default on those two carriers, a stated difference).
     pub tracker_options: TrackerOptions,
+    /// Egress bind address (`--interface`, the aria2-compatible startup
+    /// option; `None` = the OS default route, zero change). Consumed at
+    /// two engine faces: (a) every outbound peer TCP dial binds this
+    /// local address before connect ([`crate::transit::dial_tcp`] — the
+    /// bind-by-address shape of libtorrent `bind_outgoing_socket`,
+    /// `session_impl.cpp`, SO_BINDTODEVICE being the optional upstream
+    /// extra this build does not need); (b) the UDP demux face (uTP +
+    /// DHT + UDP tracker share one socket per family) binds it instead
+    /// of the unspecified address — **all UDP egress (uTP data, DHT,
+    /// tracker announce) rides the chosen address**; the non-matching
+    /// family's face is not spawned (a wildcard face there would leak
+    /// egress outside the chosen interface — the family mismatch of a
+    /// v4/v6 bind is inherent to the single-value semantics, aria2
+    /// `SocketCore::bindAddress` same shape). The TCP listen socket
+    /// (ingress) stays wildcard — multi-listen is the next phase.
+    pub egress: Option<std::net::IpAddr>,
+    /// Declarative multi-interface listen face (`taiji.listen-interfaces`,
+    /// the `taiji.*` extension namespace; a comma list of
+    /// `device-or-IP:port` entries, `[v6]:port` bracket form). Consumed
+    /// at engine assembly ([`crate::listen`]): entries enumerate through
+    /// the OS interface table and expand into per-address listen faces
+    /// — one TCP listener + one UDP demux each (uTP/DHT/UDP-tracker
+    /// riders attach per face; see the module docs for the rider map) —
+    /// with a diff-keyed rebuild seam keyed by `(address, port)`. The
+    /// egress bind family narrows the set (the phase-1 interaction; the
+    /// full matrix in `docs/design/listen-interfaces.md`). Enumeration
+    /// failure or an empty expansion degrades to the standing
+    /// single-wildcard listen shape (warn; the platform capability
+    /// fallback). Startup-only (the same rule as `listen_port`); empty
+    /// = the standing single-listen behavior, zero change.
+    pub listen_interfaces: Vec<crate::listen::ListenInterface>,
+    /// Monotonic-clock injection (SPEC G6): default
+    /// [`super::Clock::default`] = the real monotonic clock, zero
+    /// behavior change. Stored once on the loop state and each face
+    /// state at assembly; every driver-path "now" read (dispatch
+    /// rounds, choke rounds, run ticks, timeout and backoff
+    /// scheduling) reads it. Tests / the simulation harness inject a
+    /// [`super::ManualClock`] handle here and drive the engine's time
+    /// from outside. Scope: the engine driver only — taiji-io
+    /// transports keep their own clocks (see the [`super::seam`]
+    /// module docs).
+    pub clock: super::Clock,
+    /// Randomness injection (SPEC G6): default [`super::Rng::default`]
+    /// = OS entropy, zero behavior change. The engine itself derives
+    /// its in-loop deterministic generators' seeds from it only when a
+    /// seed is pinned (default keeps the frozen constants); core-side
+    /// peer-id/GID/session-id generation reads the same handle.
+    pub rng: super::Rng,
 }
 
 // Hand-written `Debug` (a derive is impossible: the writer/metadata hooks
@@ -293,6 +341,10 @@ impl std::fmt::Debug for EngineConfig {
             .field("stats", &self.stats)
             .field("preset_progress", &self.preset_progress)
             .field("tracker_options", &self.tracker_options)
+            .field("egress", &self.egress)
+            .field("listen_interfaces", &self.listen_interfaces)
+            .field("clock", &self.clock)
+            .field("rng", &self.rng)
             .finish()
     }
 }
@@ -557,6 +609,23 @@ pub fn engine_config(
         // behavior difference); CLI/session chains overwrite per options
         // before spawn.
         tracker_options: TrackerOptions::default(),
+        // Egress bind: not mounted by default (None = the OS default
+        // route, zero change); the CLI/session chains inject the
+        // `--interface` value before spawn (the two consumption faces
+        // are the peer TCP dial and the UDP demux, see the field doc).
+        egress: None,
+        // Multi-interface listen face: not mounted by default (empty =
+        // the standing single-wildcard listen shape, zero change); the
+        // CLI/session chains inject the parsed
+        // `taiji.listen-interfaces` entries before spawn (consumed by
+        // the engine listen module at assembly).
+        listen_interfaces: Vec::new(),
+        // Determinism seams (SPEC G6): both default to the real
+        // clock / OS entropy — zero behavior difference; tests and the
+        // simulation harness overwrite before spawn (seam module
+        // docs).
+        clock: super::Clock::default(),
+        rng: super::Rng::default(),
     })
 }
 

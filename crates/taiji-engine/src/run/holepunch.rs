@@ -352,7 +352,7 @@ fn punch_dial(
         &mut state.dht_dial_dedup,
         ep,
         actual_port,
-        Instant::now(),
+        state.clock.now(),
     ) {
         return;
     }
@@ -390,7 +390,9 @@ pub(super) fn handle_hp_dial_report(report: HpDialReport, state: &mut EngineLoop
     // DialOutcomeWindow` for the window/denominator discipline). Read at
     // the drain round (250ms cadence); write-only here — the main loop is
     // the sole writer.
-    state.dial_outcomes.note(report.connected, Instant::now());
+    state
+        .dial_outcomes
+        .note(report.connected, state.clock.now());
     // Dead-address window feed: a failed dial extends the
     // address's dedup window (30min) so re-supplies of the same dead
     // endpoint are skipped instead of re-dialed; a success clears the
@@ -412,7 +414,7 @@ pub(super) fn handle_hp_dial_report(report: HpDialReport, state: &mut EngineLoop
         return;
     }
     state.dht_dial_dedup.note_failed(&report.addr);
-    let now = Instant::now();
+    let now = state.clock.now();
     if report.silent {
         state.silent_book.note_silent(report.addr, now);
         // Failed-candidate re-queue: a discovery-source silent failure
@@ -583,6 +585,7 @@ mod tests {
             avail_tx_face: Vec::new(),
             ledger_tx,
             client_deny: None,
+            egress: None,
         }
     }
 
@@ -621,6 +624,9 @@ mod tests {
         let (_data_flush_gate, data_flush_gate) =
             tokio::sync::watch::channel(DataFlushState::Pending);
         FaceState {
+            // Real-clock default: the fixture's seam clock (tests that
+            // drive time overwrite this field with a manual handle).
+            clock: crate::seam::Clock::default(),
             kind: FaceKind::V1,
             info_hash: [0u8; 20],
             reserved: Reserved::aria2_default(),

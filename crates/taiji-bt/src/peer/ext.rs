@@ -72,6 +72,24 @@ pub const PEX_MESSAGE_WINDOW: Duration = Duration::from_secs(60);
 /// ut_pex in-window cap (same rationale).
 pub const PEX_MESSAGE_LIMIT: u32 = 4;
 
+/// Our advertised ut_close id (the peer-visible close-reason extension,
+/// [`crate::close_reason`]): 3 = the next free slot of the aria2-style
+/// local numbering (ut_pex=1, ut_metadata=2 — BEP-10 ids are local, the
+/// value carries no interop meaning; the uTorrent holepunch convention
+/// 0x20 is taken by [`OUTBOUND_UT_HOLEPUNCH_ID`]). Inbound routing
+/// matches the other extensions: primary = our advertised id, secondary
+/// = the peer's; outbound keys off the peer's advertised id.
+pub const OUTBOUND_UT_CLOSE_ID: u8 = 3;
+
+/// Inbound ut_close fixed-window rate limit (abuse guard; the same
+/// shape and rationale as the ut_pex/ut_holepunch limits): a legitimate
+/// peer sends at most ONE close frame per connection (right before
+/// disconnecting), so 4/60s is far above legitimate need and over-limit
+/// frames are ignored, not disconnects.
+pub const CLOSE_MESSAGE_WINDOW: Duration = Duration::from_secs(60);
+/// ut_close in-window cap (same rationale).
+pub const CLOSE_MESSAGE_LIMIT: u32 = 4;
+
 /// Expected identity for the magnet's dual hash (the ut_metadata
 /// assembly check anchor).
 ///
@@ -347,6 +365,17 @@ pub(super) struct ExtendedCtx<'a, S: AsyncRead + AsyncWrite + Unpin> {
     /// Inbound BEP-21 upload_only mirror (None = not recorded — see
     /// [`super::PeerConfig::peer_upload_only`]).
     pub(super) peer_upload_only: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// ut_close advertise/consume gate (false = frames with the id are
+    /// ignored as unknown extensions; the pex/holepunch gate shape).
+    pub(super) close_notify: bool,
+    /// The peer's advertised ut_close id (from its m dict; our outbound
+    /// close frame keys off it).
+    pub(super) peer_ut_close_id: &'a mut Option<u8>,
+    /// Inbound ut_close fixed-window origin (see
+    /// [`CLOSE_MESSAGE_WINDOW`]).
+    pub(super) close_window: &'a mut Instant,
+    /// Inbound ut_close in-window count.
+    pub(super) close_count: &'a mut u32,
 }
 
 /// BEP-10 extended frame handling:
@@ -429,6 +458,13 @@ where
         }
         if let Some(id) = hs.m_ut_holepunch {
             *ctx.peer_ut_holepunch_id = Some(id);
+        }
+        // Register the peer's ut_close advertised id (our outbound close
+        // frame at disconnect keys off it — both-sides negotiation: we
+        // send only when we advertised too, which is tracked by the
+        // caller's close_notify flag).
+        if let Some(id) = hs.m_ut_close {
+            *ctx.peer_ut_close_id = Some(id);
         }
         // BEP-21 upload_only inbound consumption: store the peer's
         // seeding announcement into the profile mirror — overwritten on
@@ -542,6 +578,14 @@ where
         && (ext_id == OUTBOUND_UT_HOLEPUNCH_ID || Some(ext_id) == *ctx.peer_ut_holepunch_id)
     {
         handle_ut_holepunch(payload, &mut ctx).await;
+        return;
+    }
+    // ut_close inbound: informational only (the peer tells us why it is
+    // about to disconnect); the same gate shape (off = not consumed, the
+    // frame is ignored as unknown).
+    if ctx.close_notify && (ext_id == OUTBOUND_UT_CLOSE_ID || Some(ext_id) == *ctx.peer_ut_close_id)
+    {
+        handle_ut_close(payload, &mut ctx).await;
         return;
     }
     debug!(target: "taiji::bt::peer", ext_id, len = payload.len(),
@@ -674,6 +718,51 @@ where
     };
     if hp.tx.send(ev).await.is_err() {
         debug!(target: "taiji::bt::peer", "holepunch event channel closed (dropped)");
+    }
+}
+
+/// ut_close frame handling (the consumption half): fixed-window rate
+/// limit → decode → log. The frame is purely informational (the peer
+/// explains its imminent disconnect — the local leave classification
+/// still keys on the observed terminal state, so an inbound close frame
+/// never reclassifies anything); malformed frames are ignored (a broken
+/// peer implementation, the same lenient interop face as the other
+/// extensions), never a disconnect — the connection is about to end
+/// anyway.
+async fn handle_ut_close<S>(payload: &[u8], ctx: &mut ExtendedCtx<'_, S>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // Fixed-window rate limit (the ut_pex shape): a legitimate peer
+    // sends at most one close frame per connection; over limit = ignore.
+    let now = Instant::now();
+    if now.duration_since(*ctx.close_window) >= CLOSE_MESSAGE_WINDOW {
+        *ctx.close_window = now;
+        *ctx.close_count = 0;
+    }
+    *ctx.close_count += 1;
+    if *ctx.close_count > CLOSE_MESSAGE_LIMIT {
+        debug!(target: "taiji::bt::peer", count = *ctx.close_count,
+            "ut_close over per-connection rate limit (ignored)");
+        return;
+    }
+    match crate::close_reason::decode_close_frame(payload) {
+        Ok(raw) => match crate::close_reason::CloseReason::from_wire(raw) {
+            Some(reason) => {
+                debug!(target: "taiji::bt::peer",
+                    value = raw, reason = reason.as_str(),
+                    "peer close reason received");
+            }
+            // Unknown value: a future release's group slot (the value
+            // table never renumbers) — logged raw, offline-interpretable.
+            None => {
+                debug!(target: "taiji::bt::peer", value = raw,
+                    "peer close reason received (unknown value)");
+            }
+        },
+        Err(e) => {
+            debug!(target: "taiji::bt::peer", %e, "malformed ut_close (ignored)");
+        }
     }
 }
 

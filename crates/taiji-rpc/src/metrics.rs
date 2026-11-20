@@ -312,6 +312,29 @@ pub(crate) fn render(
     out.push_str("taiji_peer_connections_choked ");
     out.push_str(&snap.conn_choked.to_string());
     out.push('\n');
+    // Connection-class gauge (one class per connection: the address
+    // dimension wins over transport — a local uTP peer counts as local;
+    // the label range is the fixed three-class set, no host/gid). An
+    // observation face: counts regardless of the BH_PEER_CLASS policy
+    // switch.
+    out.push_str(
+        "# HELP taiji_peers_by_class Live peer connections by built-in class (local = LAN/loopback address, wins over the transport dimension; utp = non-local uTP transport; tcp = everything else).\n\
+         # TYPE taiji_peers_by_class gauge\n",
+    );
+    for (class, n) in [
+        ("local", snap.peers_by_class_local),
+        ("tcp", snap.peers_by_class_tcp),
+        ("utp", snap.peers_by_class_utp),
+    ] {
+        write_sample(
+            &mut out,
+            Sample {
+                name: "taiji_peers_by_class",
+                labels: &[("class", class.to_string())],
+                value: n.to_string(),
+            },
+        );
+    }
     // Instrumentation: the per-peer in-flight depth histogram (sampled
     // per connection at the 1s engine tick; cardinality discipline — no
     // per-peer label, gids/addresses never become labels) + an
@@ -363,6 +386,13 @@ pub(crate) fn render(
     );
     out.push_str("taiji_peer_bans_total ");
     out.push_str(&snap.peer_bans_total.to_string());
+    out.push('\n');
+    out.push_str(
+        "# HELP taiji_peer_blocked_ingress_total Inbound peer connections rejected by the egress interface policy (armed with --interface; local address not on the egress allowlist).\n\
+         # TYPE taiji_peer_blocked_ingress_total counter\n",
+    );
+    out.push_str("taiji_peer_blocked_ingress_total ");
+    out.push_str(&snap.peer_blocked_ingress_total.to_string());
     out.push('\n');
     out.push_str(
         "# HELP taiji_redial_attempts_total Redial-pool dial attempts (, libtorrent min_reconnect_time semantics).\n\
@@ -1281,6 +1311,25 @@ pub(crate) fn render(
     out.push_str("taiji_disk_sink_inflight ");
     out.push_str(&snap.disk_sink_inflight.to_string());
     out.push('\n');
+    // Volatile (read-once) reads at the store disk boundary — hash
+    // verification/recheck/checksum-prefetch reads whose page-cache
+    // eviction is advised (libtorrent volatile_read semantics); the
+    // failure counter reports fadvise/F_NOCACHE hint errors (counted,
+    // never fatal — a failed hint degrades to plain cached IO).
+    out.push_str(
+        "# HELP taiji_disk_volatile_reads_total Read-once (volatile) positioned reads at the store disk boundary: hash verification, recheck and checksum-prefetch reads that advise page-cache eviction for the range just read (counted on every platform, hint or not).\n\
+         # TYPE taiji_disk_volatile_reads_total counter\n",
+    );
+    out.push_str("taiji_disk_volatile_reads_total ");
+    out.push_str(&snap.disk_volatile_reads_total.to_string());
+    out.push('\n');
+    out.push_str(
+        "# HELP taiji_disk_cache_advise_failures_total Page-cache hint failures at the volatile-read/no-cache faces (posix_fadvise DONTNEED on Linux, fcntl F_NOCACHE on macOS); non-fatal by design — counted, never failing the read.\n\
+         # TYPE taiji_disk_cache_advise_failures_total counter\n",
+    );
+    out.push_str("taiji_disk_cache_advise_failures_total ");
+    out.push_str(&snap.disk_cache_advise_failures_total.to_string());
+    out.push('\n');
     out.push_str(
         "# HELP taiji_disk_finalize_seconds Finalize/durability operation duration by op (file_fsync = per-task-file fsync — merged accounting includes periodic snapshot beats, not finalize-only; fsync_dir = directory flush after rename; rename = atomic rename; SMB long-tail domain).\n\
          # TYPE taiji_disk_finalize_seconds histogram\n",
@@ -1452,6 +1501,27 @@ pub(crate) fn render(
                 .to_string(),
         },
     );
+    // Failed calls by semantic grade (the misuse/internal distinction,
+    // labels only): misuse = rejected by this layer's input validation
+    // (a client bug); internal = the method failed inside
+    // session/engine execution (triage ours).
+    out.push_str(
+        "# HELP taiji_rpc_errors_total Failed JSON-RPC calls by semantic grade (misuse = rejected by RPC input validation, a client bug; internal = method execution failed inside session/engine).\n\
+         # TYPE taiji_rpc_errors_total counter\n",
+    );
+    for (grade, n) in [
+        ("misuse", snap.rpc_error_misuse_total),
+        ("internal", snap.rpc_error_internal_total),
+    ] {
+        write_sample(
+            &mut out,
+            Sample {
+                name: "taiji_rpc_errors_total",
+                labels: &[("grade", grade.to_string())],
+                value: n.to_string(),
+            },
+        );
+    }
     out.push_str(
         "# HELP taiji_rpc_request_duration_seconds JSON-RPC call latency (dispatch entry; gate for RPC p99).\n\
          # TYPE taiji_rpc_request_duration_seconds histogram\n",
@@ -1715,7 +1785,11 @@ mod tests {
         snap.conn_tcp_in = 3;
         snap.conn_tcp_out = 9;
         snap.conn_choked = 6;
+        snap.peers_by_class_local = 4;
+        snap.peers_by_class_tcp = 8;
+        snap.peers_by_class_utp = 2;
         snap.peer_bans_total = 2;
+        snap.peer_blocked_ingress_total = 1;
         snap.dht_nodes_v4 = 120;
         snap.dht_nodes_v6 = 8;
         snap.dht_queries_ping_total = 21;
@@ -1750,6 +1824,8 @@ mod tests {
         snap.rpc_conn_rejected_total_scope_total = 3;
         snap.rpc_conn_rejected_total_scope_per_ip = 1;
         snap.rpc_auth_fail_total = 2;
+        snap.rpc_error_misuse_total = 5;
+        snap.rpc_error_internal_total = 2;
         // The five peer-leave reasons (explicit rows in the render family).
         snap.peer_leaves_local_total = 3;
         snap.peer_leaves_peer_closed_total = 11;
@@ -1783,7 +1859,11 @@ mod tests {
             "taiji_peer_connections{transport=\"utp\",direction=\"in\"} 0",
             "taiji_peer_connections{transport=\"utp\",direction=\"out\"} 0",
             "taiji_peer_connections_choked 6",
+            "taiji_peers_by_class{class=\"local\"} 4",
+            "taiji_peers_by_class{class=\"tcp\"} 8",
+            "taiji_peers_by_class{class=\"utp\"} 2",
             "taiji_peer_bans_total 2",
+            "taiji_peer_blocked_ingress_total 1",
             "taiji_dht_nodes{family=\"v4\"} 120",
             "taiji_dht_nodes{family=\"v6\"} 8",
             "taiji_dht_queries_total{kind=\"ping\"} 21",
@@ -1805,6 +1885,8 @@ mod tests {
             "taiji_http_stolen_total 2",
             "taiji_rpc_requests_total{method=\"getVersion\"} 3",
             "taiji_rpc_requests_total{method=\"unknown\"} 1",
+            "taiji_rpc_errors_total{grade=\"misuse\"} 5",
+            "taiji_rpc_errors_total{grade=\"internal\"} 2",
             "taiji_rpc_request_duration_seconds_bucket{le=\"0.001\"} 2",
             "taiji_rpc_request_duration_seconds_bucket{le=\"+Inf\"} 4",
             "taiji_rpc_request_duration_seconds_sum 6",
@@ -2261,15 +2343,17 @@ mod tests {
     }
 
     /// Disk/finalize family projection: the sink write count/bytes/
-    /// in-flight gauge + the three-op finalize histogram (full op enum,
-    /// trio) + the prealloc histogram. Name/type/label/value asserted
-    /// line by line.
+    /// in-flight gauge + the volatile-read pair + the three-op finalize
+    /// histogram (full op enum, trio) + the prealloc histogram.
+    /// Name/type/label/value asserted line by line.
     #[test]
     fn disk_family_projects_into_metrics() {
         let mut snap = MetricsSnapshot {
             disk_sink_writes_total: 3,
             disk_sink_writes_bytes_total: 12288,
             disk_sink_inflight: 1,
+            disk_volatile_reads_total: 7,
+            disk_cache_advise_failures_total: 2,
             ..MetricsSnapshot::default()
         };
         // Per-bucket injection: rename le=5 <- 1, le=30 <- 2 (cumulative
@@ -2297,6 +2381,10 @@ mod tests {
             "taiji_disk_sink_writes_bytes_total 12288",
             "# TYPE taiji_disk_sink_inflight gauge",
             "taiji_disk_sink_inflight 1",
+            "# TYPE taiji_disk_volatile_reads_total counter",
+            "taiji_disk_volatile_reads_total 7",
+            "# TYPE taiji_disk_cache_advise_failures_total counter",
+            "taiji_disk_cache_advise_failures_total 2",
             "# TYPE taiji_disk_finalize_seconds histogram",
             "taiji_disk_finalize_seconds_bucket{op=\"file_fsync\",le=\"0.01\"} 2",
             "taiji_disk_finalize_seconds_bucket{op=\"file_fsync\",le=\"+Inf\"} 2",
@@ -2334,6 +2422,8 @@ mod tests {
         for line in [
             "taiji_disk_sink_writes_total 0",
             "taiji_disk_sink_inflight 0",
+            "taiji_disk_volatile_reads_total 0",
+            "taiji_disk_cache_advise_failures_total 0",
             "taiji_disk_finalize_seconds_count{op=\"file_fsync\"} 0",
             "taiji_disk_finalize_seconds_count{op=\"fsync_dir\"} 0",
             "taiji_disk_finalize_seconds_count{op=\"rename\"} 0",
@@ -2471,10 +2561,12 @@ mod tests {
             "taiji_block_stage_seconds",
         ];
         // Disk/finalize families (part of the additive-only guard).
-        const B_DISK_FAMILIES: [&str; 5] = [
+        const B_DISK_FAMILIES: [&str; 7] = [
             "taiji_disk_sink_writes_total",
             "taiji_disk_sink_writes_bytes_total",
             "taiji_disk_sink_inflight",
+            "taiji_disk_volatile_reads_total",
+            "taiji_disk_cache_advise_failures_total",
             "taiji_disk_finalize_seconds",
             "taiji_disk_prealloc_seconds",
         ];
@@ -2535,9 +2627,19 @@ mod tests {
             "# HELP taiji_peer_connections_choked Live connections we currently choke.",
             "# TYPE taiji_peer_connections_choked gauge",
             "taiji_peer_connections_choked 0",
+            // Connection-class gauge (baseline updated explicitly with the
+            // family).
+            "# HELP taiji_peers_by_class Live peer connections by built-in class (local = LAN/loopback address, wins over the transport dimension; utp = non-local uTP transport; tcp = everything else).",
+            "# TYPE taiji_peers_by_class gauge",
+            "taiji_peers_by_class{class=\"local\"} 0",
+            "taiji_peers_by_class{class=\"tcp\"} 0",
+            "taiji_peers_by_class{class=\"utp\"} 0",
             "# HELP taiji_peer_bans_total Peer bans enacted (auto rules, SPEC §13).",
             "# TYPE taiji_peer_bans_total counter",
             "taiji_peer_bans_total 0",
+            "# HELP taiji_peer_blocked_ingress_total Inbound peer connections rejected by the egress interface policy (armed with --interface; local address not on the egress allowlist).",
+            "# TYPE taiji_peer_blocked_ingress_total counter",
+            "taiji_peer_blocked_ingress_total 0",
             "# HELP taiji_redial_attempts_total Redial-pool dial attempts (, libtorrent min_reconnect_time semantics).",
             "# TYPE taiji_redial_attempts_total counter",
             "taiji_redial_attempts_total 0",
@@ -2734,6 +2836,12 @@ mod tests {
             "taiji_rpc_requests_total{method=\"taiji.stopRecording\"} 0",
             "taiji_rpc_requests_total{method=\"taiji.clearMediaArchive\"} 0",
             "taiji_rpc_requests_total{method=\"unknown\"} 0",
+            // The misuse/internal error-grade family (labels only; the
+            // baseline review this golden list exists to force).
+            "# HELP taiji_rpc_errors_total Failed JSON-RPC calls by semantic grade (misuse = rejected by RPC input validation, a client bug; internal = method execution failed inside session/engine).",
+            "# TYPE taiji_rpc_errors_total counter",
+            "taiji_rpc_errors_total{grade=\"misuse\"} 0",
+            "taiji_rpc_errors_total{grade=\"internal\"} 0",
             "# HELP taiji_rpc_request_duration_seconds JSON-RPC call latency (dispatch entry; gate for RPC p99).",
             "# TYPE taiji_rpc_request_duration_seconds histogram",
             "taiji_rpc_request_duration_seconds_bucket{le=\"0.001\"} 0",

@@ -512,6 +512,8 @@ fn magnet_config(
         stats: None,
         // Benchmarks carry no ban face (None = no gate).
         ip_guard: None,
+        egress: None,
+        listen_interfaces: Vec::new(),
         webseeding_enabled: true,
     }
 }
@@ -1202,9 +1204,14 @@ async fn pex_engine_iter(i: usize) -> Result<(usize, usize, f64, usize), String>
     let tmp = tmp_dir("pex-engine");
     let metrics = Arc::new(SessionMetrics::new());
     let cfg = EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
+        listen_interfaces: Vec::new(),
         peer_id: *b"-TJ0001-PEXENGBENCH1",
         announce: tracker_url,
         listen_port: 0,

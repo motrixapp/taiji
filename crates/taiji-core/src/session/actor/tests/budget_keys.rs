@@ -34,6 +34,27 @@ async fn patch_global(handle: &SessionHandle, key: &str, value: &str) {
     );
 }
 
+/// Terminal-completion predicate (the recheck ordering observable):
+/// `completedLength >= totalLength` on the live view. Monotone — the
+/// in-recheck projection rides checked pieces upward and the routing
+/// flip to a seeding resident keeps the total; once true it never
+/// reverts (no seed criteria here), so a sample is order-proof
+/// evidence the task's check finished.
+async fn content_complete(handle: &SessionHandle, gid: Gid) -> bool {
+    matches!(
+        call(
+            handle,
+            SessionCommand::TellStatus {
+                gid: gid.to_string(),
+                keys: vec![],
+            },
+        )
+        .await,
+        Ok(CommandReply::TorrentStatus(v))
+            if v.total_length > 0 && v.completed_length >= v.total_length
+    )
+}
+
 /// ① the three-key acceptance matrix (table-driven, pure): a valid
 /// value projects onto the GlobalOptions field, the budget accessor
 /// reads the same number, and the getGlobalOption echo returns the
@@ -163,11 +184,14 @@ fn budget_keys_acceptance_matrix_clamp_and_echo() {
 async fn budget_key_hot_change_check_narrow_never_preempts() {
     // Payloads staggered so the first completion leaves a wide (~1s)
     // observation window with the second still in flight: #1 = 32 MiB
-    // (fast), #2 = 128 MiB (wide), #3 = tiny (the parked canary).
+    // (fast), #2 = 128 MiB (wide), #3 = 32 MiB (the parked canary —
+    // wide, not tiny: once promoted, its in-flight span is the
+    // promotion witness window below, and under parallel-suite load a
+    // tiny canary's span could fall between two polls).
     let contents = [
         check_content_big(1),
         check_content_wide(2),
-        seed_content_n(3),
+        check_content_big(3),
     ];
     // The elastic-budget holder shape (see check.rs
     // force_recheck_budget_2's note): two holders keep the download
@@ -293,26 +317,73 @@ async fn budget_key_hot_change_check_narrow_never_preempts() {
     );
     // The fast #1 completes; the parked #3 must NOT promote while #2
     // (the narrowed-budget slot holder) is still in flight.
-    let mut non_promotion_witnessed = false;
-    for _ in 0..6000 {
+    //
+    // Strategy E (event-driven robustification). The recheck work is
+    // real spawn_blocking hashing — there is no clock to virtualize
+    // (the determinism seam deliberately stops at the engine driver
+    // paths), so the old form's single-instant conjunction
+    // ("num_checking == 1 + #3 parked", a [t(#1 done), t(#2 done)]
+    // wall window) is replaced by an identity-based continuous watch:
+    // - violation (fail-fast, watched the whole loop): #3 in flight
+    //   (a TellActive member — parked members live in tellWaiting)
+    //   while #2's check has not completed
+    //   (completedLength < totalLength, monotone). An illegal
+    //   promotion is catchable over the entire [#3 promote .. #2
+    //   done] span — the old pass window minus milliseconds of
+    //   routing (the canary is 32 MiB, so the span is ~10^2 ms of
+    //   hashing even under load), where the old form had zero
+    //   in-window violation detection (a violation only surfaced as
+    //   the same timeout that a starved poll produces on legal runs —
+    //   miss and violation were indistinguishable).
+    // - pass = EITHER the promotion witness (#3 in flight with #2
+    //   settled at count 1 — the promotion observed strictly after
+    //   the holder finished) OR full convergence (3 seeding
+    //   residents, nothing parked — the drain state below, reached
+    //   with zero violation samples only if the poll stepped over
+    //   the entire remaining run: a strictly longer starve than the
+    //   old window miss, so false failures strictly shrink while
+    //   violation detection strictly grows).
+    // - no-eviction hole: #1/#2 stay TellActive members at every
+    //   sample (the old count-only witness could not tell "#1
+    //   completed" from "#1 evicted back to check_pending").
+    let mut promotion_witnessed = false;
+    let mut converged_without_violation = false;
+    for _ in 0..9000 {
         let gs = global_stat(&handle).await;
-        let g3_parked = waiting_views(&handle)
-            .await
-            .iter()
-            .any(|v| v.gid == g3 && v.status == StatusKind::Checking);
-        if gs.num_checking == 1 && g3_parked {
-            non_promotion_witnessed = true;
-            break;
-        }
         assert!(
             gs.num_checking <= 2,
             "the in-flight count stays <= the pre-narrow two (sampled {})",
             gs.num_checking
         );
+        let active = active_gids_of(&handle).await;
+        assert!(
+            active.contains(&g1) && active.contains(&g2),
+            "narrowing must not evict an in-flight recheck (#1/#2 stay registry members)"
+        );
+        let g3_in_flight = active.contains(&g3);
+        let g2_settled = content_complete(&handle, g2).await;
+        if g3_in_flight {
+            assert!(
+                g2_settled,
+                "#3 promoted while #2 (the narrowed-budget slot holder) was still in flight"
+            );
+            if gs.num_checking == 1 {
+                promotion_witnessed = true;
+                break;
+            }
+        }
+        if gs.num_checking == 0
+            && gs.num_seeding == 3
+            && waiting_views(&handle).await.is_empty()
+            && tell_stopped_gids(&handle).await.is_empty()
+        {
+            converged_without_violation = true;
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(
-        non_promotion_witnessed,
+        promotion_witnessed || converged_without_violation,
         "the narrowed window of \"#2 in flight + #3 parked\" was never observed (the 2nd no \
          longer promotes)"
     );

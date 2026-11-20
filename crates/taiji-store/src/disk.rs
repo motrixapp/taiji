@@ -183,6 +183,46 @@ pub trait DiskWriter: Send + Sync {
     /// read at EOF is `Ok(0)`, not an error.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError>;
 
+    /// Read-once ("volatile") positioned read: byte-identical to
+    /// [`Self::read_at`] (same return, same error surface), plus a
+    /// best-effort page-cache eviction hint for the range just read —
+    /// the caller promises the bytes will not be re-read (they exist
+    /// only to compute a hash). This is libtorrent's `volatile_read`
+    /// flag: the pread backend advises `posix_fadvise(
+    /// POSIX_FADV_DONTNEED)` on the completed range (public source
+    /// anchor: libtorrent `src/pread_storage.cpp:505,697`, wrapper
+    /// `advise_dont_need` `src/file.cpp:315-325`); on macOS the
+    /// equivalent is the `F_NOCACHE` fcntl applied to the handle (see
+    /// [`Self::set_bypass_page_cache`]).
+    ///
+    /// Platform faces (all non-fatal — a failed hint degrades to plain
+    /// cached IO and is only counted, the aria2 `openFileWithFlags`
+    /// precedent of ignoring its `__APPLE__` F_NOCACHE failure):
+    /// - Linux: `fadvise(POSIX_FADV_DONTNEED)` after the read
+    ///   ([`rustix::fs::fadvise`], safe API);
+    /// - macOS: `fcntl(F_NOCACHE)` once per handle before its first
+    ///   volatile read ([`rustix::fs::fcntl_nocache`]). The hint
+    ///   persists on the fd for the handle's remaining lifetime —
+    ///   volatile reads are issued from one-shot verification readers
+    ///   (recheck / read-then-hash paths) whose handles do not later
+    ///   serve cacheable reads;
+    /// - other platforms: the default implementation = plain
+    ///   [`Self::read_at`] (counted, no hint — Windows has no safe
+    ///   no-cache face without open-time flags, see
+    ///   [`Self::set_bypass_page_cache`]).
+    ///
+    /// Do NOT use for foreground download writes or streaming playback
+    /// reads — evicting those ranges from the page cache trades real
+    /// re-read hits for nothing.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::read_at`]'s; the cache hint never fails the read.
+    fn read_at_volatile(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
+        note_volatile_read();
+        self.read_at(offset, buf)
+    }
+
     /// fsync to disk (mirrors `flushOSBuffers`).
     ///
     /// # Errors
@@ -202,10 +242,21 @@ pub trait DiskWriter: Send + Sync {
     /// `__APPLE__` `F_NOCACHE` branch — aria2 ignores its failure;
     /// functionality is unaffected).
     ///
+    /// macOS applies `fcntl(F_NOCACHE)` via
+    /// [`rustix::fs::fcntl_nocache`] (safe API — the safe-wrapper gap
+    /// that kept this arm `Unsupported` is closed there); failures are
+    /// counted and debug-logged, never returned. Other unix and
+    /// Windows: no-op `Ok` (a real Windows bypass needs open-time
+    /// `FILE_FLAG_WRITE_THROUGH`/`NO_BUFFERING`, which std's safe
+    /// open face cannot set per-call — the
+    /// [`crate::error::StoreError::Unsupported`] variant keeps
+    /// declaring that honest gap).
+    ///
     /// # Errors
     ///
-    /// [`StoreError::Unsupported`] on macOS (no safe fcntl wrapper; the
-    /// caller logs and continues — aria2 parity). `Ok` no-op elsewhere.
+    /// Never on the hint itself (counted + logged per the aria2
+    /// precedent); [`StoreError::FileNotOpen`] without an open file on
+    /// the macOS arm.
     fn set_bypass_page_cache(&self) -> Result<(), StoreError>;
 }
 
@@ -239,6 +290,24 @@ pub(crate) fn write_vectored_sequential<W: DiskWriter + ?Sized>(
 /// normal shape.
 const WRITEV_IOVEC_CHUNK: usize = 512;
 
+/// Volatile-read observation feed (the io registry's disk family; the
+/// store already depends on taiji-io for the winpath edge, so the
+/// process-default registry is fed directly — these are monotonic
+/// counters, tests assert deltas, never absolute values).
+fn note_volatile_read() {
+    taiji_io::metrics::registry_default()
+        .disk()
+        .note_volatile_read();
+}
+
+/// Page-cache hint failure observation feed (fadvise/F_NOCACHE errors:
+/// counted, never propagated — see [`DiskWriter::read_at_volatile`]).
+fn note_cache_advise_failure() {
+    taiji_io::metrics::registry_default()
+        .disk()
+        .note_cache_advise_failure();
+}
+
 #[cfg(unix)]
 pub use unix_impl::FileDiskWriter;
 
@@ -247,6 +316,9 @@ mod unix_impl {
     use super::*;
     use std::fs::{File, OpenOptions};
     use std::os::unix::fs::{FileExt, OpenOptionsExt};
+    // F_NOCACHE once-guard state (see `ensure_nocache_once`).
+    #[cfg(target_os = "macos")]
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// `O_NOFOLLOW` platform constants (each platform's fcntl.h value;
     /// std does not export it and a new dependency just for this is
@@ -283,6 +355,11 @@ mod unix_impl {
         file: Option<File>,
         path: PathBuf,
         read_only: bool,
+        /// F_NOCACHE applied-once guard (macOS only: the fcntl is
+        /// idempotent but per-read retries would spam the syscall —
+        /// first volatile read / explicit bypass call applies it once).
+        #[cfg(target_os = "macos")]
+        nocache_hinted: AtomicBool,
     }
 
     impl FileDiskWriter {
@@ -314,6 +391,8 @@ mod unix_impl {
                 file: None,
                 path: PathBuf::new(),
                 read_only: false,
+                #[cfg(target_os = "macos")]
+                nocache_hinted: AtomicBool::new(false),
             }
         }
     }
@@ -396,10 +475,11 @@ mod unix_impl {
         /// - Trunc: sparse ftruncate;
         /// - Falloc: the fast path (macOS fcntl F_PREALLOCATE / Linux
         ///   fallocate(2)) is stubbed to a trunc fallback — the libc
-        ///   calls are unsafe, forbidden workspace-wide, and a safe
-        ///   wrapper crate would be a new dependency (same reason as
-        ///   F_NOCACHE). The fallback is logged by the caller; success is
-        ///   never faked;
+        ///   calls are unsafe, forbidden workspace-wide, and the safe
+        ///   rustix wrappers that closed the F_NOCACHE/fadvise gap do
+        ///   not cover F_PREALLOCATE/fallocate (no such API surface);
+        ///   a safe wrapper crate would be a new dependency. The
+        ///   fallback is logged by the caller; success is never faked;
         /// - Prealloc: segment-wise zero fill (direct translation of
         ///   aria2 `SingleFileAllocationIterator.cc`, 256KiB buffer) —
         ///   real allocation on every platform (not sparse), protects
@@ -418,8 +498,8 @@ mod unix_impl {
                         target: "taiji::store::disk",
                         path = %self.path.display(),
                         "falloc fast path unavailable on this platform/build \
-                         (fcntl/fallocate need unsafe libc; safe wrapper + ADR \
-                         pending, PLAN M1): falling back to trunc (sparse)"
+                         (F_PREALLOCATE/fallocate need unsafe libc; no safe \
+                         wrapper available): falling back to trunc (sparse)"
                     );
                     self.truncate(len)
                         .map(|()| AllocationEffect::Truncated { fallback: true })
@@ -479,6 +559,49 @@ mod unix_impl {
                 .map_err(|e| classify_io(&self.path, e))
         }
 
+        /// Read-once face override (the trait default is a plain read):
+        /// applies the platform page-cache eviction hint around the
+        /// pread. Linux: `fadvise(POSIX_FADV_DONTNEED)` on the completed
+        /// range — the direct translation of libtorrent's volatile_read
+        /// backend (public source anchor: `src/pread_storage.cpp:505,697`
+        /// via the `advise_dont_need` wrapper `src/file.cpp:315-325`).
+        /// macOS: `F_NOCACHE` once per handle before the first volatile
+        /// read (see `ensure_nocache_once`). Failures of either hint are
+        /// counted + debug-logged, never propagated — the aria2 stance of
+        /// ignoring the `__APPLE__` F_NOCACHE failure (the read itself
+        /// succeeded; a failed hint only means the range stays cached).
+        fn read_at_volatile(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
+            note_volatile_read();
+            // macOS: the fcntl must be on the fd before the read for the
+            // bypass to apply; attempt-once guard (volatile reads come
+            // from one-shot verification readers, so the hint persisting
+            // for the handle's remaining lifetime is the intended shape).
+            #[cfg(target_os = "macos")]
+            self.ensure_nocache_once();
+            let file = self.opened()?;
+            let n = file
+                .read_at(buf, offset)
+                .map_err(|e| classify_io(&self.path, e))?;
+            #[cfg(target_os = "linux")]
+            if n > 0 {
+                // The range just read [offset, offset+n): advise the
+                // kernel these pages are dead to us. rustix's fadvise is
+                // the safe-API face (no libc call to hand-roll).
+                if let Err(e) = rustix::fs::fadvise(
+                    file,
+                    offset,
+                    std::num::NonZeroU64::new(n as u64),
+                    rustix::fs::Advice::DontNeed,
+                ) {
+                    note_cache_advise_failure();
+                    tracing::debug!(target: "taiji::store::disk",
+                        path = %self.path.display(), offset, len = n, error = %e,
+                        "fadvise(DONTNEED) failed after volatile read (ignored, counted)");
+                }
+            }
+            Ok(n)
+        }
+
         fn flush_os_buffers(&self) -> Result<(), StoreError> {
             let file = self.opened()?;
             file.sync_all().map_err(|e| classify_io(&self.path, e))
@@ -491,26 +614,64 @@ mod unix_impl {
                 .map_err(|e| classify_io(&self.path, e))
         }
 
+        /// macOS arm of the no-cache face — retires the old standing
+        /// "needs a platform fcntl wrapper" gap:
+        /// [`rustix::fs::fcntl_nocache`] IS that safe wrapper (the `fs`
+        /// feature on the workspace rustix dependency, zero extra
+        /// crates). Failure is counted + debug-logged, never returned
+        /// (aria2's `openFileWithFlags` ignores its `__APPLE__`
+        /// F_NOCACHE result; libtorrent's darwin branch pairs
+        /// `F_NOCACHE` with `F_NODIRECT` — no safe F_NODIRECT wrapper
+        /// exists, so unaligned edge pages may still be cached:
+        /// best-effort hint, not a guarantee).
         fn set_bypass_page_cache(&self) -> Result<(), StoreError> {
             // Non-Apple unix: aria2 also does nothing here (same behavior
-            // -> Ok). macOS F_NOCACHE needs a platform fcntl: neither
-            // rustix nor nix exposes safe bindings and libc fcntl is
-            // unsafe (workspace forbid) — a safe wrapper is a platform
-            // API requiring an ADR. This side explicitly does not support
-            // it and does not fake success.
-            if cfg!(target_os = "macos") {
-                Err(StoreError::Unsupported(
-                    "F_NOCACHE (macOS; PLAN M1, needs safe fcntl wrapper + ADR)".into(),
-                ))
-            } else {
-                Ok(())
+            // -> Ok). A post-open no-cache toggle does not exist on these
+            // platforms; the read-side hint is per-read fadvise (the
+            // Linux `read_at_volatile` arm).
+            #[cfg(target_os = "macos")]
+            {
+                let file = self.opened()?;
+                if let Err(e) = rustix::fs::fcntl_nocache(file, true) {
+                    note_cache_advise_failure();
+                    tracing::debug!(target: "taiji::store::disk",
+                        path = %self.path.display(), error = %e,
+                        "F_NOCACHE fcntl failed (ignored, counted)");
+                }
+                // The explicit call satisfies the once-guard too (the
+                // hint is already applied to this handle).
+                self.nocache_hinted.store(true, Ordering::Release);
             }
+            Ok(())
         }
     }
 
     impl FileDiskWriter {
         fn opened(&self) -> Result<&File, StoreError> {
             self.file.as_ref().ok_or(StoreError::FileNotOpen)
+        }
+
+        /// macOS read-once companion of [`DiskWriter::set_bypass_page_cache`]:
+        /// apply `F_NOCACHE` before the handle's first volatile read
+        /// (the hint cannot retroactively un-cache a completed read).
+        /// Attempt-once semantics on both success and failure — the
+        /// fcntl is idempotent, and per-read retries of a failing fcntl
+        /// would only add syscall noise to the read hot path. Failure is
+        /// counted, never fatal.
+        #[cfg(target_os = "macos")]
+        fn ensure_nocache_once(&self) {
+            if self.nocache_hinted.load(Ordering::Acquire) {
+                return;
+            }
+            if let Ok(file) = self.opened() {
+                if let Err(e) = rustix::fs::fcntl_nocache(file, true) {
+                    note_cache_advise_failure();
+                    tracing::debug!(target: "taiji::store::disk",
+                        path = %self.path.display(), error = %e,
+                        "F_NOCACHE fcntl failed before volatile read (ignored, counted)");
+                }
+            }
+            self.nocache_hinted.store(true, Ordering::Release);
         }
 
         /// Full zero-fill prealloc (direct translation of aria2
@@ -885,11 +1046,14 @@ mod windows_impl {
 
         fn set_bypass_page_cache(&self) -> Result<(), StoreError> {
             // Windows: aria2's F_NOCACHE branch is `__APPLE__` only (same
-            // behavior -> Ok no-op, same as non-Apple unix). A real
-            // bypass = open-time FILE_FLAG_WRITE_THROUGH / NO_BUFFERING
-            // (libtorrent file.cpp) — an open-time performance seam, out
-            // of scope for this module; success is never faked after the
-            // fact.
+            // behavior -> Ok no-op, same as non-Apple unix; the macOS arm
+            // is implemented in the unix module via rustix's
+            // fcntl_nocache). A real bypass = open-time
+            // FILE_FLAG_WRITE_THROUGH / NO_BUFFERING (libtorrent
+            // file.cpp) — an open-time performance seam, out of scope
+            // for this module; success is never faked after the fact.
+            // The read-once hint face (`read_at_volatile`) likewise
+            // inherits the trait default (counted plain read, no hint).
             Ok(())
         }
     }
@@ -1341,21 +1505,69 @@ mod tests {
         }
     }
 
+    /// No-cache face policy: macOS now applies the real F_NOCACHE fcntl
+    /// (rustix safe wrapper — the old `Unsupported` stub is retired);
+    /// every other platform is aria2-parity Ok no-op. The fcntl result
+    /// on a regular temp file is success; failures would be counted and
+    /// still return Ok (the aria2 ignores-failure stance).
     #[test]
     fn bypass_page_cache_explicit_policy() {
         let tmp = TempDir::new("nocache");
         let path = tmp.path("nc.bin");
         let mut w = FileDiskWriter::new();
         ok(w.create(&path), "create");
-        match w.set_bypass_page_cache() {
-            // macOS: explicit Unsupported (needs a safe fcntl wrapper; see the impl comment).
-            #[cfg(target_os = "macos")]
-            Err(StoreError::Unsupported(msg)) => assert!(msg.contains("F_NOCACHE")),
-            // Other unix: same behavior as aria2 (do nothing -> Ok).
-            #[cfg(not(target_os = "macos"))]
-            Ok(()) => {}
-            other => panic!("unexpected bypass_page_cache result: {other:?}"),
-        }
+        ok(
+            w.set_bypass_page_cache(),
+            "bypass face must not fail the caller",
+        );
+    }
+
+    /// Volatile-read face: byte-identical to `read_at` (the cache hint
+    /// must never change read results), and the observation counter
+    /// advances (deltas, never absolutes — the registry is process-wide
+    /// and parallel tests may add their own increments; monotonic
+    /// counters make `after - before >= n` race-safe).
+    #[test]
+    fn volatile_read_is_byte_identical_and_counted() {
+        let tmp = TempDir::new("volatile");
+        let path = tmp.path("v.bin");
+        let mut w = FileDiskWriter::new();
+        ok(w.create(&path), "create");
+        let data: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+        ok(w.write_at(3 * 1024, &data), "seed data");
+
+        // Plain read face (flag off = the default): unchanged behavior.
+        let mut plain = vec![0u8; data.len()];
+        let n = ok(w.read_at(3 * 1024, &mut plain), "plain read");
+        assert_eq!(n, data.len());
+        assert_eq!(plain, data, "the default read_at face is untouched");
+
+        // Volatile face: identical bytes + counter delta.
+        let disk = taiji_io::metrics::registry_default();
+        let before = disk.disk().snapshot().volatile_reads_total;
+        let mut got = vec![0u8; data.len()];
+        let n = ok(w.read_at_volatile(3 * 1024, &mut got), "volatile read");
+        assert_eq!(n, data.len());
+        assert_eq!(got, data, "volatile read must be byte-identical to read_at");
+        // EOF short-read face stays legal (0-byte read at EOF, no hint).
+        let mut tail = [0u8; 4];
+        let n = ok(
+            w.read_at_volatile(1 << 20, &mut tail),
+            "volatile read at EOF",
+        );
+        assert_eq!(n, 0);
+        let after = disk.disk().snapshot().volatile_reads_total;
+        assert!(
+            after - before >= 2,
+            "each volatile read call counts (delta {before} -> {after})"
+        );
+
+        // The advise must not corrupt subsequent reads (cache eviction
+        // is a hint; re-reading the range still returns the data).
+        let mut again = vec![0u8; data.len()];
+        let n = ok(w.read_at(3 * 1024, &mut again), "re-read after advise");
+        assert_eq!(n, data.len());
+        assert_eq!(again, data);
     }
 
     #[test]

@@ -137,9 +137,14 @@ fn engine_cfg(
     factory: Option<Arc<dyn WriterFactory>>,
 ) -> EngineConfig {
     EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
+        egress: None,
+        listen_interfaces: Vec::new(),
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         // Dead port: no tracker traffic (the engine is stopped via token
         // cancel).
@@ -195,8 +200,13 @@ fn allocated_blocks(path: &Path) -> u64 {
 /// pipeline construction (layout/open/DHT wiring) can be starved past
 /// the window, observing 0 fsyncs before the flush loop has run even
 /// once. Now a conditional poll (25ms steps; passes immediately once
-/// met, so the normal path is not slowed), with a 5s deadline = a window
-/// of 100 theoretical beats (ample starvation margin for construction).
+/// met, so the normal path is not slowed), with a 15s deadline = 300
+/// theoretical beats. The 15s figure is the same construction-
+/// starvation margin the prealloc/sparse siblings below widened to
+/// (3s -> 15s): the flush beat itself is a tokio timer-wheel interval
+/// (not a seam-clock read — virtualizing it is out of the seam's scope
+/// by design), so the only honest lever against a starved build is
+/// deadline margin on the conditional poll.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flush_beat_fsyncs_periodically() {
     let tmp = temp_root("beat");
@@ -215,7 +225,7 @@ async fn flush_beat_fsyncs_periodically() {
     let root = tokio_util::sync::CancellationToken::new();
     let engine = DownloadEngine::spawn(cfg, &root);
     let started = std::time::Instant::now();
-    let deadline = started + Duration::from_secs(5);
+    let deadline = started + Duration::from_secs(15);
     let mut hits;
     loop {
         hits = fsyncs.load(Ordering::SeqCst);
@@ -225,8 +235,8 @@ async fn flush_beat_fsyncs_periodically() {
         assert!(
             std::time::Instant::now() < deadline,
             "the flush cadence must fsync periodically ({hits} hits within the \
-             5s observation window — the cadence never started or the storage \
-             pipeline build was starved; flush_interval=50ms implies ~100 beats)"
+             15s observation window — the cadence never started or the storage \
+             pipeline build was starved; flush_interval=50ms implies ~300 beats)"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -243,6 +253,25 @@ async fn flush_beat_fsyncs_periodically() {
 /// zero-periodic run window and the exactly-one final barrier are
 /// asserted separately (the final barrier is a durability property, not
 /// a periodic beat).
+///
+/// Hardening (the parallel-load false failures): both halves were
+/// wall-instant samples. (1) The zero window now STARTS at the storage
+/// pipeline's allocation face (blob.bin exists — the same observable
+/// the prealloc/sparse siblings wait on) and watches the counter at
+/// 25ms steps with a fail-fast assert: the monotone counter makes the
+/// continuous watch equivalent to the old end-of-window sample (any
+/// beat in the window still fails it, now with the instant pinned),
+/// while the start gate makes the negative strictly STRONGER — under a
+/// starved engine spawn the old fixed 400ms could elapse before the
+/// pipeline was even built, judging a vacuous window. (2) The
+/// exactly-one barrier assert now waits for the engine's JoinHandle to
+/// finish first (conditional poll, generous 30s bound): the barrier
+/// lands before the join returns, so the count is final at the sample
+/// and still detects 2+ whenever observed — the old form read the
+/// count after a fixed 10s join timeout and false-failed at 0 whenever
+/// teardown was starved past it. The 400ms window length itself is
+/// unchanged (the negative's severity is the window's, not the
+/// sampler's).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn default_tier_has_no_flush_beat() {
     let tmp = temp_root("nobeat");
@@ -256,15 +285,46 @@ async fn default_tier_has_no_flush_beat() {
     );
     let root = tokio_util::sync::CancellationToken::new();
     let engine = DownloadEngine::spawn(cfg, &root);
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    assert_eq!(
-        fsyncs.load(Ordering::SeqCst),
-        0,
-        "the default tier must not introduce periodic fsync (zero behavior \
-         change in the running window)"
-    );
+    // Start gate: the pipeline is built (its allocation face exists)
+    // before the zero window is judged.
+    let blob = tmp.join("blob.bin");
+    let gate_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !blob.exists() {
+        assert!(
+            std::time::Instant::now() < gate_deadline,
+            "the storage pipeline build must complete (blob.bin not seen within \
+             the 15s window — the build was starved)"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // The zero window (the original 400ms run window, watched
+    // continuously against the monotone counter).
+    let window_end = std::time::Instant::now() + Duration::from_millis(400);
+    loop {
+        let hits = fsyncs.load(Ordering::SeqCst);
+        assert!(
+            hits == 0,
+            "the default tier must not introduce periodic fsync (zero behavior \
+             change in the running window; {hits} fsyncs observed inside it)"
+        );
+        if std::time::Instant::now() >= window_end {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     root.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), engine).await;
+    // Join-gated barrier assert: the final flush barrier lands before
+    // the engine task finishes, so wait for the join (not a fixed
+    // timeout) before judging the count.
+    let join_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !engine.is_finished() {
+        assert!(
+            std::time::Instant::now() < join_deadline,
+            "engine teardown did not finish within the 30s window (starved)"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let _ = engine.await;
     assert_eq!(
         fsyncs.load(Ordering::SeqCst),
         1,

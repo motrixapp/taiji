@@ -533,6 +533,71 @@ impl<K: Copy + Ord + Eq + std::hash::Hash + Debug> WrDiskCache<K> {
         evicted
     }
 
+    /// State-consistency check (the self-audit discipline: this
+    /// structure holds the per-channel half of the unverified-byte
+    /// ledger conservation plus the structural order the min-loss
+    /// eviction depends on; everything below is re-derived wholesale
+    /// from the entries themselves). cfg(test): the existing cache
+    /// tests and the proptest sweep it after their operations — nothing
+    /// of it exists in non-test compilation; `debug_assert!` keeps the
+    /// checks assertion-shaped.
+    ///
+    /// - per entry: the `size` field is a redundant encoding of the
+    ///   cell vector (`Σ cell lengths`) and the cells stay
+    ///   goff-ascending/non-overlapping (the binary-search insert and
+    ///   the `covers` sequential scan both depend on the order — a
+    ///   drifted `size` silently corrupts the residency account, an
+    ///   unordered pair corrupts coverage and dedup);
+    /// - cache level: `total == Σ entry sizes` (residency
+    ///   conservation; the flush/evict paths clear cells and report
+    ///   matching deltas — the property the proptest drives randomly);
+    /// - ledger conservation: `claimed == total` unconditionally — the
+    ///   claim ACCOUNTING is maintained on every path (only the
+    ///   process-ledger claim/release calls are gated by `use_ledger`;
+    ///   a detached parallel-test cache still tracks, it just never
+    ///   touches the global budget). With the ledger attached this is
+    ///   the per-channel half of "the global cap bounds what every
+    ///   face holds": a drift means the cap no longer bounds what this
+    ///   face actually holds;
+    /// - the eviction index and its reverse map mirror each other
+    ///   exactly (every victim scan and touch repair walks both — a
+    ///   stale mirror evicts the wrong key or loses the O(1) repair).
+    #[cfg(test)]
+    pub(crate) fn check_invariant(&self) {
+        for (key, e) in &self.entries {
+            let cell_sum: usize = e.cells.iter().map(DataCell::len).sum();
+            debug_assert_eq!(
+                e.size, cell_sum,
+                "entry {:?}: size field != Σ cell lengths",
+                key
+            );
+            debug_assert!(
+                e.cells
+                    .windows(2)
+                    .all(|w| w[0].goff() + w[0].len() as u64 <= w[1].goff()),
+                "entry {:?}: cells not goff-ascending/non-overlapping",
+                key
+            );
+        }
+        let sum: usize = self.entries.values().map(CacheEntry::size).sum();
+        debug_assert_eq!(self.total, sum, "total != Σ entry sizes (residency)");
+        debug_assert_eq!(
+            self.claimed, self.total,
+            "ledger conservation: claimed != total"
+        );
+        debug_assert_eq!(
+            self.index.len(),
+            self.pos.len(),
+            "eviction index / reverse map cardinality drift"
+        );
+        for (k, ik) in &self.pos {
+            debug_assert!(
+                self.index.get(ik) == Some(k),
+                "reverse-map entry for {k:?} does not mirror the index"
+            );
+        }
+    }
+
     /// Capacity control (min-loss victim order; see the
     /// [`Self::update_min_loss`] docs). Eviction order = (size ascending,
     /// last_update ascending); the `protect` key and 0-size entries are
@@ -814,6 +879,9 @@ mod tests {
             .cache_data(DataCell::with_data(0, vec![0u8; 100], 100));
         let _ = c.update_min_loss(&1, 100);
         assert_eq!(c.total(), 100);
+        // Post-operation invariant sweep (the state-audit vehicle):
+        // residency + ledger conservation + index mirror re-derived.
+        c.check_invariant();
         // Flush: update(-size) + clear cells (together total drops 100).
         let size = c.entry(&1).map_or(0, CacheEntry::size) as isize;
         let _ = c.update_min_loss(&1, -size);
@@ -822,6 +890,7 @@ mod tests {
         let entry = c.remove(&1);
         assert!(entry.is_some());
         assert!(c.remove(&1).is_none());
+        c.check_invariant();
     }
 
     // proptest: under arbitrary add/update_min_loss/remove sequences —
@@ -899,6 +968,16 @@ mod tests {
             }
         }
     }
+    /// Serializes the two process-global-ledger tests: the ledger is a
+    /// process static (`taiji_io::unverified_budget`), so two
+    /// ledger-wired tests running in parallel inside this binary read
+    /// each other's claims — the eviction test's exact-baseline
+    /// restoration assert below would sample the sibling's 100 B
+    /// mid-flight (a parallel-run false failure, not a ledger bug;
+    /// reproducible ~every other run of this module). The guard
+    /// changes no assertion; non-ledger tests stay parallel.
+    static GLOBAL_LEDGER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Process-wide unverified-byte ledger (cross-surface yielding
     /// semantics): (a) in-cap growth evicts nothing (existing behavior);
     /// (b) global over-cap → this face self-evicts LRU (non-protected
@@ -907,6 +986,9 @@ mod tests {
     /// release everything, used() returns to baseline.
     #[test]
     fn global_ledger_self_eviction_and_release() {
+        let _ledger = GLOBAL_LEDGER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let key = |p: u32| (p, 0u16);
         // Real-flow shape: cells append first (entry.size grows), then
         // update reports.
@@ -939,6 +1021,7 @@ mod tests {
             200,
             "both keys on the ledger: 200B"
         );
+        a.check_invariant();
 
         // (b) Fill the ledger globally → new growth refused → self-evict
         // the oldest non-protected key (key1 is older than key2 in touch
@@ -959,6 +1042,7 @@ mod tests {
             key(1),
             "victim = the oldest non-protected key"
         );
+        a.check_invariant();
 
         // (c) Empty self, then over-cap growth → force-claim (nothing
         // dropped).
@@ -970,6 +1054,7 @@ mod tests {
             "nothing to yield = force-claim evicts nothing"
         );
         assert_eq!(b.total(), 50, "data retained");
+        b.check_invariant();
 
         // (d) Release back to baseline: negative delta + Drop + the fill
         // returned.
@@ -999,5 +1084,89 @@ mod tests {
 
     fn global_ledger_release_fill(bytes: usize) {
         taiji_io::unverified_budget::release(bytes);
+    }
+
+    // ---- mutation validation (anti-vacuity: every check_invariant
+    // arm must be able to go red) ----
+
+    /// A `total` drift vs the entries' residency must go red.
+    #[test]
+    #[should_panic(expected = "total != Σ entry sizes")]
+    fn mutation_cache_total_drift_fires() {
+        let mut c: WrDiskCache<u32> = WrDiskCache::new(1024);
+        assert!(c.add(1));
+        c.entry_mut(&1)
+            .unwrap_or_else(|| panic!("added"))
+            .cache_data(DataCell::with_data(0, vec![0u8; 100], 100));
+        let _ = c.update_min_loss(&1, 100);
+        c.total += 1; // the accounting lost a byte
+        c.check_invariant();
+    }
+
+    /// An entry `size` drift vs its own cells must go red.
+    #[test]
+    #[should_panic(expected = "size field != Σ cell lengths")]
+    fn mutation_cache_entry_size_drift_fires() {
+        let mut c: WrDiskCache<u32> = WrDiskCache::new(1024);
+        assert!(c.add(1));
+        c.entry_mut(&1)
+            .unwrap_or_else(|| panic!("added"))
+            .cache_data(DataCell::with_data(0, vec![0u8; 100], 100));
+        let _ = c.update_min_loss(&1, 100);
+        c.entries
+            .get_mut(&1)
+            .unwrap_or_else(|| panic!("added"))
+            .size += 1;
+        // The entry-level drift fires before the cache-level sum (both
+        // would disagree by the same byte).
+        c.check_invariant();
+    }
+
+    /// Claim drift on a ledger-detached cache (the parallel-test
+    /// default construction — the accounting still mirrors residency)
+    /// must go red.
+    #[test]
+    #[should_panic(expected = "ledger conservation")]
+    fn mutation_cache_detached_claim_fires() {
+        let mut c: WrDiskCache<u32> = WrDiskCache::new(1024);
+        assert!(c.add(1));
+        c.entry_mut(&1)
+            .unwrap_or_else(|| panic!("added"))
+            .cache_data(DataCell::with_data(0, vec![0u8; 100], 100));
+        let _ = c.update_min_loss(&1, 100);
+        c.claimed -= 1;
+        c.check_invariant();
+    }
+
+    /// Ledger-wired claim drift must go red — caught via catch_unwind
+    /// so the corruption is restored before Drop (the Drop path
+    /// releases whatever `claimed` holds into the process-global
+    /// ledger; the restore keeps the global state other tests read
+    /// clean).
+    #[test]
+    fn mutation_cache_ledger_claim_drift_fires() {
+        // Same global-ledger serialization as the eviction test above
+        // (this test's 100 B claim is the sibling sample it fails on).
+        // Scope note: the guard outlives `c`, so `c`'s Drop releases
+        // the ledger bytes before the lock does.
+        let _ledger = GLOBAL_LEDGER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut c: WrDiskCache<u32> = WrDiskCache::new_with_ledger_for_tests(1024);
+        assert!(c.add(1));
+        c.entry_mut(&1)
+            .unwrap_or_else(|| panic!("added"))
+            .cache_data(DataCell::with_data(0, vec![0u8; 100], 100));
+        let _ = c.update_min_loss(&1, 100);
+        c.claimed -= 1; // one resident byte left unclaimed
+        let fired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            c.check_invariant();
+        }));
+        // Restore the true claim before Drop releases it.
+        c.claimed = c.total;
+        assert!(
+            fired.is_err(),
+            "the ledger-conservation check must fire on claim drift"
+        );
     }
 }

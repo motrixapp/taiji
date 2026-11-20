@@ -12,7 +12,7 @@
 use std::ops::ControlFlow;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -39,7 +39,7 @@ use crate::faces::{FaceState, face_transport_supply, pex_snapshot};
 use crate::lean_telemetry_enabled;
 use crate::pipeline::BLOCK_CHANNEL_CAPACITY;
 use crate::progress::{EngineEnd, flush_progress_row, progress_row};
-use crate::query::{count_peer_gauges, drain_peer_counters};
+use crate::query::{count_peer_gauges, count_peers_by_class, drain_peer_counters};
 use crate::tracker::epoch_secs;
 /// Autosave period for the torrent_progress counter row; matches the
 /// aria2 `--auto-save-interval` default of 60s (`OptionHandlerFactory.cc`).
@@ -93,7 +93,13 @@ pub(super) fn handle_slow_tick(
         &mut state.speed_up,
         &mut state.speed_down,
     );
-    note_supply_down(state, metrics, drained.down_tcp, drained.down_utp);
+    note_supply_down(
+        state,
+        metrics,
+        drained.down_tcp,
+        drained.down_utp,
+        drained.up,
+    );
     // Re-issue DHT announce commands. The registry drops an entry after
     // 30min without a re-issue (PURGE); the cadence is
     // dht_cfg.announce_interval, default 15min, matching aria2
@@ -139,10 +145,11 @@ pub(super) fn handle_slow_tick(
     let udp_port = ports.udp.unwrap_or(actual_port);
     if !passive_dht
         && (state.last_nat_announced_port != udp_port
-            || (!dht_wiring.is_empty() && state.last_dht_announce.elapsed() >= dht_cadence))
+            || (!dht_wiring.is_empty()
+                && state.clock.now() - state.last_dht_announce >= dht_cadence))
     {
         spawn_dht_announces(dht_wiring, &state.faces, udp_port, actual_port);
-        state.last_dht_announce = Instant::now();
+        state.last_dht_announce = state.clock.now();
         state.last_nat_announced_port = udp_port;
     }
     for actor in actor_cmds.iter().flatten() {
@@ -203,7 +210,7 @@ pub(super) fn handle_slow_tick(
             if !face.pex_candidates.dirty {
                 continue;
             }
-            let (fresh, dropped) = pex_snapshot(&mut face.pex_candidates, Instant::now());
+            let (fresh, dropped) = pex_snapshot(&mut face.pex_candidates, face.clock.now());
             // Any peer command channel full (Full) keeps the face dirty
             // for a re-push next round; Closed means the peer is about to
             // be removed by the leave arm — no re-push needed.
@@ -281,7 +288,13 @@ pub(super) async fn handle_seed_tick(
         &mut state.speed_up,
         &mut state.speed_down,
     );
-    note_supply_down(state, metrics, drained.down_tcp, drained.down_utp);
+    note_supply_down(
+        state,
+        metrics,
+        drained.down_tcp,
+        drained.down_utp,
+        drained.up,
+    );
     // Observation surface: a 30s-cadence INFO with the connection mix by
     // transport plus per-transport supply bytes (cumulative and
     // 30s-window rate). Byte readings come from the engine-level
@@ -295,7 +308,7 @@ pub(super) async fn handle_seed_tick(
             None => (None, 0, 0, 0),
         };
         let win = prev_at
-            .map(|at| at.elapsed().as_secs().max(1))
+            .map(|at| (state.clock.now() - at).as_secs().max(1))
             .unwrap_or(30);
         let tcp_rate = state.supply_tcp_down.saturating_sub(prev_tcp) / win;
         let utp_rate = state.supply_utp_down.saturating_sub(prev_utp) / win;
@@ -371,7 +384,7 @@ pub(super) async fn handle_seed_tick(
             dial_ifl, dial_rate,
             "conn mix by transport (supply bytes) + peer pool curve");
         state.mix_log_prev = Some((
-            Instant::now(),
+            state.clock.now(),
             state.supply_tcp_down,
             state.supply_utp_down,
             dial_done_total,
@@ -390,7 +403,7 @@ pub(super) async fn handle_seed_tick(
     // counter deltas into SessionMetrics (process-level atomics are the
     // sole write point; the tick only reads — same pattern as the
     // utp/DHT query sampling).
-    let obs_now = Instant::now();
+    let obs_now = state.clock.now();
     let mut guard_hits = 0u64;
     let mut guard_worst = Duration::ZERO;
     for face in &state.faces {
@@ -552,6 +565,11 @@ pub(super) async fn handle_seed_tick(
         slot.set_conn_tcp(inb, outb);
         slot.set_conn_utp(utp_in, utp_out);
         slot.set_conn_choked(choked);
+        // Per-class counts (the `taiji_peers_by_class` gauge; an
+        // observation face — independent of the `BH_PEER_CLASS` behavior
+        // switch, it keeps counting with the policy rolled back).
+        let (peers_local, peers_tcp, peers_utp) = count_peers_by_class(&state.faces);
+        slot.set_peers_by_class(peers_local, peers_tcp, peers_utp);
         // Redial pool size (bounded by REDIAL_POOL_CAP).
         slot.set_redial_pool_size(state.redial_pool.len() as u64);
         let depth: u64 = state
@@ -712,7 +730,7 @@ pub(super) async fn handle_seed_tick(
             .add(down_now.saturating_sub(state.last_down_sample));
         state.last_down_sample = down_now;
         if let Some(watch) = state.stop_watch.as_mut() {
-            let speed = state.speed_calc.calculate(Instant::now());
+            let speed = state.speed_calc.calculate(state.clock.now());
             if watch.tick(speed) {
                 // Message verbatim from aria2 `BtStopDownloadCommand.cc`.
                 warn!(target: "taiji::core::engine",
@@ -741,7 +759,8 @@ pub(super) async fn handle_seed_tick(
     // Placed after the stall valve so both rotations can stack during a
     // stall (each capped, total pressure bounded); also runs while
     // seeding (the stop-timeout branch is download-phase only).
-    super::ecology::turnover_tick(state, Instant::now());
+    let turnover_now = state.clock.now();
+    super::ecology::turnover_tick(state, turnover_now);
     // uTP zero-throughput connection governance (`BH_UTP_MUTE=0` restores
     // the plain behavior): a uTP connection whose LEDBAT yields can sit
     // at bps ~ 0 while staying alive and occupying a slot (upstream
@@ -752,7 +771,8 @@ pub(super) async fn handle_seed_tick(
     // independent predicate (transport gate + two-way zero throughput +
     // observation window vs cap proximity + worst-first), neither
     // substitutes for the other.
-    super::ecology::utp_mute_tick(state, Instant::now());
+    let mute_now = state.clock.now();
+    super::ecology::utp_mute_tick(state, mute_now);
     // Slow-peer eviction (`BH_SLOW_PEER_CHURN=0` restores the plain
     // behavior): online-but-slow TCP peers are rotated out by rate
     // distribution (30s cadence: eviction line = pool median x frac%,
@@ -762,7 +782,8 @@ pub(super) async fn handle_seed_tick(
     // turnover treats cap-proximity rigidity (count driven), utp_mute
     // treats zero-throughput uTP, slow_churn treats slow live TCP
     // (rate-distribution driven) — predicates are independent.
-    super::ecology::slow_peer_churn_tick(state, Instant::now());
+    let churn_now = state.clock.now();
+    super::ecology::slow_peer_churn_tick(state, churn_now);
     // SeedCheck (aria2 `SeedCheckCommand.cc`): the latch is set and reset
     // at downloadFinished (the timer starts at completion); satisfaction
     // halts (seeding ends, MSG_SEEDING_END).
@@ -947,17 +968,20 @@ pub(super) async fn autosave_snapshot(
 /// Part 1: budget-derived slots are assembled here; the limiter (an
 /// EngineLoop field) is the budget source for [`budget_derived_slots`]
 /// (the choke decision surface takes it as a parameter; the knob and
-/// bucket rates are read once per 15s round — not a hot path).
+/// bucket rates are read once per 15s round — not a hot path). The
+/// connection-class switch (`BH_PEER_CLASS`, local peers exempt from
+/// slot competition) is read at the same once-per-round point.
 pub(super) fn handle_choke_round(state: &mut EngineLoop) {
     let budget_slots = budget_derived_slots(
         taiji_io::knobs::unchoke_budget_slots_enabled(),
         state.limiter.as_deref(),
     );
+    let class_enabled = taiji_io::knobs::peer_class_enabled();
     for face in &mut state.faces {
         if face.completed {
-            choke_round(face);
+            choke_round(face, class_enabled);
         } else {
-            leecher_choke_round(face, &mut state.choke_rng, budget_slots);
+            leecher_choke_round(face, &mut state.choke_rng, budget_slots, class_enabled);
         }
     }
 }
@@ -966,7 +990,10 @@ pub(super) fn handle_choke_round(state: &mut EngineLoop) {
 /// accumulators (`supply_*_down`, data source for the 30s conn-mix log
 /// and the endgame edge log — truthful even in CLI mode without
 /// SessionMetrics) plus the session-counter feed (the only feed site for
-/// the per-transport /metrics counters; used when coexisting with rpc).
+/// the whole byte-counter family: the per-transport split AND the
+/// direction aggregates — the aggregates' downlink is the split's sum by
+/// construction here, preserving the documented cross-check invariant;
+/// used when coexisting with rpc).
 /// Feed sites: the three counter bridges (2s slow tick / 1s seed tick /
 /// final flush) plus the leave arm's final delta.
 pub(super) fn note_supply_down(
@@ -974,11 +1001,13 @@ pub(super) fn note_supply_down(
     metrics: Option<&SessionMetrics>,
     tcp_delta: u64,
     utp_delta: u64,
+    up_delta: u64,
 ) {
     state.supply_tcp_down = state.supply_tcp_down.saturating_add(tcp_delta);
     state.supply_utp_down = state.supply_utp_down.saturating_add(utp_delta);
     if let Some(m) = metrics {
         m.add_transport_down_bytes(tcp_delta, utp_delta);
+        m.add_bytes(tcp_delta.saturating_add(utp_delta), up_delta);
     }
 }
 
@@ -998,8 +1027,9 @@ pub(super) fn checkpoint_endgame<'a>(
 ) {
     for face in faces {
         if let Some(since) = face.endgame_edge.take() {
-            face.endgame_cum += since.elapsed();
-            face.endgame_edge = Some(Instant::now());
+            let now = face.clock.now();
+            face.endgame_cum += now - since;
+            face.endgame_edge = Some(now);
         }
         if !face.endgame_cum.is_zero() {
             if let Some(m) = metrics {

@@ -171,6 +171,83 @@ taiji <torrent|magnet> -d <dir>
  with `--enable-rpc`, otherwise startup fails with an error (exit 2) — silent
  ignoring has been removed.
 
+## Egress Binding (`--interface`)
+
+```sh
+taiji --interface 10.0.0.5 <torrent|magnet> -d <dir>   # or an interface name: --interface en0
+```
+
+- **Value**: a single IP address or an interface/device name (aria2
+  semantics). A name resolves through the OS interface table (preferring
+  the device's IPv4 address); an unresolvable value logs one warning and
+  the run continues unbound — never a startup refusal.
+- **Effective faces**: HTTP(S) transport connections (every download
+  form — `taiji http`, URL positional, metalink subtasks, RPC tasks,
+  `--input-file` batches), BT peer TCP dials, and the shared UDP socket
+  (uTP + DHT + UDP tracker announce) — all bind the chosen address
+  before connect, so traffic egresses through the chosen interface (the
+  VPN/corporate-LAN case). Binding a v4 address narrows UDP to the v4
+  face (a wildcard v6 face would leak egress off the chosen interface);
+  the same family narrowing applies to a v6 bind. Inbound peer
+  connections are verified against the bind too: a connection whose
+  local address is not the chosen address is rejected at the door and
+  counted (`taiji_peer_blocked_ingress_total`) — inbound and outbound
+  stay on the chosen interface.
+- Startup-only (like `--listen-port`): applies at process start; the RPC
+  option surface has no `interface` key.
+- **Declared narrow residual** (still on the default route, disclosed at
+  startup): the FTP transport (control/data channels are dialed inside
+  the FTP client stack), the magnet metadata/discovery phase (the
+  upgraded payload engine honors the bind), and the HTTP-tracker
+  announce face.
+- Unset = zero change (the OS default route).
+
+## Multi-Interface Listening (`--taiji-listen-interfaces`)
+
+```sh
+taiji --taiji-listen-interfaces "en0:6881,en1:6881" <torrent> -d <dir>
+taiji --taiji-listen-interfaces "10.0.0.5:6881,[2001:db8::a]:6882" <torrent> -d <dir>
+```
+
+- **Value**: a comma list of `device-or-IP:port` entries (the
+  `taiji.`-namespaced extension option — no aria2 counterpart; the
+  capability shape follows libtorrent's `listen_interfaces`). IPv6
+  literals use the `[v6]:port` bracket form. No suffix flags: trailing
+  characters after the port make the entry invalid. Invalid entries
+  each log one warning and are skipped — never a startup refusal.
+- **Effective faces** (ingress): each entry expands through the OS
+  interface table — a device name becomes one listen face per interface
+  address (multi-address devices covered), and a wildcard (`0.0.0.0`
+  or `::`) becomes one face per interface address of that family (the
+  multi-homed rule). Each face = one TCP listener + one UDP socket
+  (uTP accepts, DHT and UDP-tracker traffic ride per face). This is
+  how a dual-homed host (corporate LAN + VPN) accepts peers on both
+  interfaces at once.
+- **Egress dispatch** (uTP + UDP tracker): outbound uTP connections
+  and UDP-tracker announces pick their face per destination — the face
+  whose subnet contains the destination wins (source-address
+  consistency: traffic to the LAN leaves via the LAN face), falling
+  back to the family's first-bound face. With one face per family
+  (the default shape) every pick is that face — no change.
+- **Interaction with `--interface`**: the egress bind's address family
+  narrows the face list (a v4 egress keeps only v4 endpoints, and vice
+  versa); endpoints of the other family are dropped with a warning.
+  With the egress bind armed, inbound peer connections are verified
+  against it: a connection whose local address is not the egress
+  address is rejected at the door and counted
+  (`taiji_peer_blocked_ingress_total`) — inbound and outbound traffic
+  stay on the chosen interface.
+- **Degradation**: if interface enumeration fails or the expansion
+  comes out empty, the engine falls back to the single wildcard listen
+  with a warning. A face whose exact port cannot bind degrades that
+  face (warning; ports never move silently). Startup-only like
+  `--listen-port`; the RPC option surface has no key. Unset = the
+  standing single-listen behavior (zero change).
+- **Declared residuals**: NAT maps the single announce port (the first
+  v4 face's port — per-face mappings are future work), and local
+  service discovery (LSD) stays the session-global multicast face.
+  Design details: `docs/design/listen-interfaces.md`.
+
 ## Torrent Creation
 
 ```sh
@@ -244,3 +321,34 @@ taiji --log-format json --rpc-listen-port 6800 \
   (interactive TTY); redirection to file/pipe is automatically clean (no
   `\x1b` escape sequences), and it is switched off entirely when the
   `NO_COLOR` environment variable is set (no-color.org).
+
+### Session Metrics Trace and Offline Report
+
+`/metrics` is pull-based: whatever happened while nobody was scraping is
+gone. The opt-in capture knob turns the same session metrics snapshot
+into an offline artifact — one JSON line per 1s session tick (every
+snapshot field, keys = the field names):
+
+```sh
+BH_METRICS_TRACE=/tmp/session.jsonl taiji --rpc-listen-port 6800
+# ... run a download, then Ctrl-C / shutdown ...
+python3 scripts/metrics_report.py --input /tmp/session.jsonl
+# -> /tmp/session.jsonl.md (+ chart assets next to it)
+```
+
+- `BH_METRICS_TRACE=<path>` (default off, zero added I/O when unset):
+  the capture opens at session start and closes at shutdown. Failures
+  (unwritable path, full disk) warn and continue — the session is never
+  affected.
+- `BH_METRICS_TRACE_BYTES` (default 64MiB, clamped [1MiB, 1GiB]): the
+  capture file's hard size cap. When the next line would exceed it the
+  file restarts from empty (truncate, not roll — one capped file is a
+  hard total-bytes bound; rolling would multiply cap by generations).
+  Each process run starts a fresh capture.
+- The report has time-series sections for the diagnostic families —
+  throughput (bytes/s), peer supply by class, DHT nodes/queries, and
+  the storage pipeline watermarks. matplotlib is optional: when absent
+  the report degrades to sampled Markdown tables, so the tool runs
+  anywhere python3 does. `python3 scripts/metrics_report.py
+  --self-test` exercises the whole path on synthetic data (safe for
+  CI; needs no matplotlib).

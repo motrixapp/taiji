@@ -69,6 +69,15 @@ fn read_buf_shrink_enabled() -> bool {
     taiji_io::knobs::read_buf_shrink_enabled()
 }
 
+/// ut_close fallback switch (`BH_CLOSE_NOTIFY=0` = neither advertised
+/// nor sent — the runtime rollback knob for the peer-visible
+/// close-reason extension); same read-timing class as
+/// [`request_coalesce_enabled`] (read once per connection at loop
+/// assembly).
+fn close_notify_enabled() -> bool {
+    taiji_io::knobs::close_notify_enabled()
+}
+
 /// Swap a fully-drained Framed buffer down to zero capacity.
 ///
 /// Returns the freed capacity (0 = nothing done). Safety contract: only
@@ -456,6 +465,8 @@ where
         block_arena,
         direct_block_sink,
         peer_fast,
+        peer_ext,
+        close_reason,
         ..
     } = config;
     let ExtConfig {
@@ -479,6 +490,10 @@ where
     // default (`BH_READ_BUF_SHRINK=0` keeps the frozen never-shrink
     // behavior).
     let read_buf_shrink = read_buf_shrink.unwrap_or_else(read_buf_shrink_enabled);
+    // ut_close advertise/send gate (test injection face): None =
+    // environment default (`BH_CLOSE_NOTIFY=0` disables the whole
+    // extension face — no m-dict key, no frames).
+    let close_notify = close_reason.unwrap_or_else(close_notify_enabled);
     // Inbound-activity origin for the idle-buffer shrink (refreshed at
     // every frame-arm entry; the tick arm compares it against
     // [`READ_BUF_IDLE_SHRINK`]).
@@ -590,6 +605,10 @@ where
         m_ut_holepunch: hp_ext
             .as_ref()
             .map(|_| crate::holepunch::OUTBOUND_UT_HOLEPUNCH_ID),
+        // Advertise ut_close when the gate is on (the both-sides
+        // negotiation halves: this key is OUR half; the peer's key lands
+        // in peer_ut_close_id when its ext handshake arrives).
+        m_ut_close: close_notify.then_some(crate::peer::OUTBOUND_UT_CLOSE_ID),
         metadata_size: metadata_serve.as_ref().map(|m| m.metadata().len() as u32),
         upload_only: my_upload_only && super_seed.is_none(),
         p: (my_listen_port != 0).then_some(my_listen_port),
@@ -619,6 +638,14 @@ where
     // The peer's inbound ut_holepunch id (from its m dict — our
     // outbound keys off it).
     let mut peer_ut_holepunch_id: Option<u8> = None;
+    // ---- ut_close face ----
+    // The peer's inbound ut_close id (from its m dict; the disconnect
+    // close frame keys off it — sent only when BOTH sides advertised).
+    let mut peer_ut_close_id: Option<u8> = None;
+    // Inbound ut_close fixed-window rate-limit state (values in the ext
+    // module constants).
+    let mut close_window = Instant::now();
+    let mut close_count: u32 = 0;
     // Fixed-window rate-limit state, separate windows for rendezvous /
     // connect (60s window; values in the ext module constants).
     let mut hp_rv_window = Instant::now();
@@ -881,8 +908,22 @@ where
                                 }
                                 PeerCommand::SetListenPort(port) => {
                                     // BEP10 advertises the current mapped listener,
-                                    // preserving all negotiated extensions.
-                                    if my_listen_port != port {
+                                    // preserving all negotiated extensions. The
+                                    // resend is gated on the peer's BEP10
+                                    // negotiation mirror (`peer_ext`): aria2 only
+                                    // queues the advertisement when
+                                    // `peer_->isExtendedMessagingEnabled()`
+                                    // (`DefaultBtInteractive.cc`) — an Extended
+                                    // frame to a peer that never declared BEP10
+                                    // in its handshake reserved bits is a
+                                    // protocol violation real clients FIN on,
+                                    // killing the connection at registration
+                                    // time (before any request can flow). The
+                                    // gate is the peer's bit (not the local
+                                    // `ext_enabled` services gate) because the
+                                    // advertised listener is meaningful to any
+                                    // ext-capable peer.
+                                    if peer_ext && my_listen_port != port {
                                         my_listen_port = port;
                                         let handshake = ExtHandshake {
                                             m_ut_metadata: Some(OUTBOUND_UT_METADATA_ID),
@@ -890,6 +931,8 @@ where
                                             m_ut_holepunch: hp_ext
                                                 .as_ref()
                                                 .map(|_| crate::holepunch::OUTBOUND_UT_HOLEPUNCH_ID),
+                                            m_ut_close: close_notify
+                                                .then_some(super::OUTBOUND_UT_CLOSE_ID),
                                             metadata_size: metadata_serve
                                                 .as_ref()
                                                 .map(|m| m.metadata().len() as u32),
@@ -911,8 +954,19 @@ where
                                     // flag and resend the ext handshake
                                     // (super-seeding suppression matches
                                     // the initial send — see the my_ext
-                                    // construction).
-                                    if my_upload_only != flag {
+                                    // construction). The resend is gated
+                                    // on the peer's BEP10 negotiation
+                                    // mirror (`peer_ext`): a BEP-21 key
+                                    // inside an Extended frame is a
+                                    // protocol violation to a peer that
+                                    // never declared BEP10 — and the
+                                    // gate is deliberately the peer's
+                                    // bit, not the local `ext_enabled`
+                                    // services gate, because seeding
+                                    // state must advertise upload_only
+                                    // even with no metadata/ut_pex
+                                    // services attached.
+                                    if peer_ext && my_upload_only != flag {
                                         my_upload_only = flag;
                                         let handshake = ExtHandshake {
                                             m_ut_metadata: Some(OUTBOUND_UT_METADATA_ID),
@@ -920,6 +974,8 @@ where
                                             m_ut_holepunch: hp_ext
                                                 .as_ref()
                                                 .map(|_| crate::holepunch::OUTBOUND_UT_HOLEPUNCH_ID),
+                                            m_ut_close: close_notify
+                                                .then_some(super::OUTBOUND_UT_CLOSE_ID),
                                             metadata_size: metadata_serve
                                                 .as_ref()
                                                 .map(|m| m.metadata().len() as u32),
@@ -1151,6 +1207,10 @@ where
                             pex_inbound: &mut pex_inbound,
                             client_deny: client_deny.as_ref(),
                             peer_upload_only: peer_upload_only.as_ref(),
+                            close_notify,
+                            peer_ut_close_id: &mut peer_ut_close_id,
+                            close_window: &mut close_window,
+                            close_count: &mut close_count,
                             serve: read_pool.as_ref().map(|pool| ServeCtx {
                                 pool,
                                 out_tx: &serve_out_tx,
@@ -1323,6 +1383,30 @@ where
     // for all senders to close would stretch every connection teardown
     // to the full budget for no real benefit — TorrentTask holds its
     // handles long-term.)
+    //
+    // ut_close (the peer-visible close-reason extension): sent only when
+    // BOTH sides negotiated (we advertised via the close_notify gate AND
+    // the peer's m dict carried a ut_close id — zero wire change
+    // otherwise). Best-effort: after an io-grade terminal state the
+    // write may fail, which is fine — the frame is diagnostics, not
+    // protocol. The value comes from the single error -> close-reason
+    // table, the same source the local leave-reason metric derives from
+    // (crate::close_reason).
+    if close_notify
+        && let Some(id) = peer_ut_close_id
+        && let Ok(payload) =
+            crate::close_reason::encode_close_frame(crate::close_reason::close_reason_of_end(&end))
+    {
+        debug!(target: "taiji::bt::peer",
+            reason = crate::close_reason::close_reason_of_end(&end).as_str(),
+            "ut_close sent");
+        let _ = writer
+            .send(Message::Extended {
+                ext_id: id,
+                payload: Bytes::from(payload),
+            })
+            .await;
+    }
     debug!(target: "taiji::bt::peer", end = ?end, "peer task exited");
     end
 }

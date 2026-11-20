@@ -474,6 +474,39 @@ Option names are frozen: `--dir`/`--listen-port`/`--rpc-*` use
 aria2-compatible names. aria2 `--listen-port` accepts a port range and
 tries each; `taiji` takes a single value.
 
+`--interface` (aria2-compatible name, a single value = an IP literal or
+an interface/device name) is the egress bind, parsed once in `run`
+before any mode dispatch: HTTP(S) transports bind via
+`ClientConfig.local_address`, BT peer TCP dials via `EngineConfig.egress`
+(bind-before-connect), and the UDP demux face (uTP/DHT/UDP tracker) via
+the same engine field — the non-matching address family's UDP face is
+not spawned (no wildcard egress leak). A device name resolves through
+the OS interface table (if-addrs; IPv4 preferred); an unresolvable value
+warns once and runs unbound (aria2 hard-fails — a declared, gentler
+divergence). Startup-only; the conf key `interface` mirrors the raw
+value face. Narrow declared residual: the FTP transport, the magnet
+metadata phase, and the HTTP-tracker announce face stay on the default
+route.
+
+`--taiji-listen-interfaces` (extension option, the `taiji.` namespace —
+no aria2 counterpart; the libtorrent `listen_interfaces` shape) is the
+declarative multi-interface listen face, parsed once in `run` (invalid
+entries warn individually and are skipped, never fatal; no suffix
+flags in the grammar — trailing characters after the port digits make
+the entry invalid, a stated minimal-surface divergence). Device names
+expand through the OS interface table at engine assembly (bind-time
+resolution); wildcards (`0.0.0.0`/`::`) expand to one face per
+interface address (BEP 32/45). Each face = one TCP listener + one UDP
+demux (uTP accepts per face; the DHT engine, uTP dial service, and
+tracker UDP egress ride each family's first-bound primary face; DHT
+inbound from secondary faces merges into the family engine through the
+inbound gate). Enumeration failure or an empty expansion degrades to
+the single wildcard listen (warn). Startup-only (like `--listen-port`);
+unset = the standing single-listen behavior. The conf key
+`taiji-listen-interfaces` mirrors the raw value face. Full pipeline
+semantics and the `--interface` combination matrix:
+`docs/design/listen-interfaces.md`.
+
 ### Exit codes
 
 Baseline shared by all modes, checked before mode dispatch: `2` = usage /

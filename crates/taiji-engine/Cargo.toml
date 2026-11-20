@@ -46,8 +46,13 @@ socket2 = { workspace = true }
 # serde shape-stable serialization surface of the scheduling-policy config
 # (strategy).
 serde = { workspace = true }
+# The RNG determinism seam's seeded arm (seam.rs, SPEC G6): StdRng
+# construction + seeded draws. rand is an established workspace
+# dependency (bt/core/http/io/domain/rpc register it); this row adds
+# the engine to the existing consumer set, no new external code.
+rand = { workspace = true }
 # v1 piece verification / hybrid swarm identity digests (produced and
-# consumed in run::arms).
+# consumed in run/arms).
 sha1 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

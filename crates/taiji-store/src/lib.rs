@@ -30,6 +30,8 @@ pub mod disk_policy;
 pub mod error;
 pub mod handle_pool;
 pub mod hashpool;
+#[cfg(feature = "null-store")]
+pub mod null_store;
 
 pub mod hashtree;
 pub mod layout;

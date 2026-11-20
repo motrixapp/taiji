@@ -288,6 +288,17 @@ pub(super) struct InboundCtx<'a, S: AsyncRead + AsyncWrite + Unpin> {
     /// Inbound BEP-21 upload_only mirror (None = not recorded — see
     /// [`super::PeerConfig::peer_upload_only`]).
     pub(super) peer_upload_only: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// ut_close advertise/consume gate (false = inbound close frames are
+    /// ignored as unknown extensions; see
+    /// [`crate::close_reason`]).
+    pub(super) close_notify: bool,
+    /// The peer's advertised ut_close id (our outbound close frame keys
+    /// off it).
+    pub(super) peer_ut_close_id: &'a mut Option<u8>,
+    /// Inbound ut_close fixed-window origin (ext module constants).
+    pub(super) close_window: &'a mut Instant,
+    /// Inbound ut_close in-window count.
+    pub(super) close_count: &'a mut u32,
     /// Pooled serving wiring (None = the inline form — pool-less
     /// callers keep the exact same behavior). When Some, an inbound
     /// request's disk read goes into the pool and the completion is
@@ -349,6 +360,10 @@ where
         pex_inbound,
         client_deny,
         peer_upload_only,
+        close_notify,
+        peer_ut_close_id,
+        close_window,
+        close_count,
         serve,
     } = ctx;
     // BEP-52 "immediately follows": any inbound message clears the
@@ -378,11 +393,14 @@ where
             // Unchoke edge reported to the engine: the dispatch face
             // sends zero requests to a choking peer (aria2 fillPiece),
             // so supply recovery after an unchoke depends on this edge —
-            // no other natural event fires in the stall window. Lossy on
-            // a full channel (the next choke round or re-dispatch
-            // heals).
+            // no other natural event fires in the stall window. The
+            // send awaits (lossless): a dropped edge would idle supply
+            // until the engine's periodic re-dispatch, and a peer that
+            // never unchokes again (a seeder answering our Interested
+            // exactly once) has no later frame to re-trigger dispatch —
+            // backpressure on a full channel is the correct coupling.
             if let Some(tx) = &avail_tx {
-                let _ = tx.try_send(AvailEvent::Unchoked { peer: cuid });
+                let _ = tx.send(AvailEvent::Unchoked { peer: cuid }).await;
             }
             peer_choking.store(false, std::sync::atomic::Ordering::Relaxed);
         }
@@ -606,15 +624,28 @@ where
             debug!(target: "taiji::bt::peer", "cancel ignored")
         }
         Message::Have { index } => {
+            // The send awaits (lossless): the engine's dispatch is
+            // advertisement-aware (zero requests to a peer without a
+            // matching advertisement row), so a dropped HAVE removes
+            // that piece from this peer's supply surface until the next
+            // frame. Under a hostile HAVE storm the awaited send
+            // backpressures exactly this connection's read loop — the
+            // attacker fills their own TCP window instead of degrading
+            // our bookkeeping.
             if let Some(tx) = &avail_tx {
-                // Lossy on a full channel: the rarity heuristic tolerates
-                // loss, see the PeerConfig comment.
-                let _ = tx.try_send(AvailEvent::Have { peer: cuid, index });
+                let _ = tx.send(AvailEvent::Have { peer: cuid, index }).await;
             }
         }
         Message::Bitfield { bits } => {
+            // Lossless by the same argument as HAVE, and stronger: a
+            // Bitfield is one-shot per connection (BEP3 sends it
+            // immediately after the handshake and never again; a full
+            // seeder sends no HAVEs afterwards either). A dropped
+            // bitfield empties the peer to dispatch permanently — the
+            // single-seeder startup shape (bitfield in the same beat as
+            // the handshake response) then stalls the download forever.
             if let Some(tx) = &avail_tx {
-                let _ = tx.try_send(AvailEvent::Bitfield { peer: cuid, bits });
+                let _ = tx.send(AvailEvent::Bitfield { peer: cuid, bits }).await;
             }
         }
         Message::Interested | Message::NotInterested => {
@@ -628,15 +659,14 @@ where
             // An INTERESTED rising edge → AvailEvent::Interested (the
             // preemptive unchoke trigger; libtorrent
             // peer_connection.cpp). Low-frequency edge, not level (a
-            // repeated Interested does not re-emit); lossy on full — a
-            // missed edge is covered by the next choke round (degrades
-            // to no preemptive unchoke, same as the round-only
-            // semantics).
+            // repeated Interested does not re-emit). The send awaits
+            // (lossless) like every availability event: a dropped edge
+            // degrades the upload side to round-driven unchoke only.
             if now_interested
                 && !was
                 && let Some(tx) = &avail_tx
             {
-                let _ = tx.try_send(AvailEvent::Interested { peer: cuid });
+                let _ = tx.send(AvailEvent::Interested { peer: cuid }).await;
             }
         }
         Message::Suggest { index } => {
@@ -651,26 +681,29 @@ where
             debug!(target: "taiji::bt::peer", index, "peer suggested piece");
         }
         Message::HaveAll => {
-            // BEP-6: have_all = a full-possession announcement ("replace
+            // BEP6: have_all = a full-possession announcement ("replace
             // the Have Bitfield", BEP-6 wording). Previously only logged,
             // so the engine saw a fast-negotiating seeder as empty and
             // never dispatched to it (a main data source lost). The event
-            // goes up like Have/Bitfield (lossy on full). Divergence
+            // goes up like Have/Bitfield — awaited (lossless): like the
+            // Bitfield it is one-shot possession evidence a full seeder
+            // never repeats. Divergence
             // noted: BEP-6 requires non-fast faces to "MUST close the
             // connection" (libtorrent bt_peer_connection.cpp agrees) —
             // the connection layer does not track fast negotiation, so
             // we accept leniently (trusting an advertisement carries no
             // extra risk); the disconnect gate is out of scope here.
             if let Some(tx) = &avail_tx {
-                let _ = tx.try_send(AvailEvent::HaveAll { peer: cuid });
+                let _ = tx.send(AvailEvent::HaveAll { peer: cuid }).await;
             }
             debug!(target: "taiji::bt::peer", "peer has all pieces (BEP6)");
         }
         Message::HaveNone => {
-            // BEP-6: have_none = an explicit zero-possession announcement
-            // (the same acceptance trade-off as have_all).
+            // BEP6: have_none = an explicit zero-possession announcement
+            // (the same acceptance trade-off as have_all); the send
+            // awaits like every availability event (lossless).
             if let Some(tx) = &avail_tx {
-                let _ = tx.try_send(AvailEvent::HaveNone { peer: cuid });
+                let _ = tx.send(AvailEvent::HaveNone { peer: cuid }).await;
             }
             debug!(target: "taiji::bt::peer", "peer has no pieces (BEP6)");
         }
@@ -876,6 +909,10 @@ where
                     client_deny,
                     client_deny_hit: &mut deny_hit,
                     peer_upload_only,
+                    close_notify,
+                    peer_ut_close_id,
+                    close_window,
+                    close_count,
                 },
             )
             .await;

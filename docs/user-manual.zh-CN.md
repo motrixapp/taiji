@@ -138,6 +138,63 @@ taiji <torrent|magnet> -d <dir>
  模式下必须与 `--enable-rpc` 成对出现，否则启动报错（退出码 2）——
  静默忽略已被移除。
 
+## 出口绑定（`--interface`）
+
+```sh
+taiji --interface 10.0.0.5 <torrent|magnet> -d <dir>   # 也可填接口名：--interface en0
+```
+
+- **取值**：单个 IP 地址或接口/网卡名（aria2 语义）。接口名经系统接口表
+  解析（优先取该接口的 IPv4 地址）；无法解析的值记录一条警告后按未绑定
+  继续运行 —— 不会启动失败。
+- **生效面**：HTTP(S) 传输连接（`taiji http`、URL 位置参数、metalink 子
+  任务、RPC 任务、`--input-file` 批量等全部下载形态）、BT peer TCP 拨号，
+  以及共享 UDP 套接字（uTP + DHT + UDP tracker announce）—— 均在连接前
+  绑定所选地址，流量从选定接口出去（VPN/公司内网场景）。绑定 v4 地址时
+  UDP 收窄到 v4 面（通配 v6 面会让流量绕开所选接口）；绑定 v6 同理。入站
+  peer 连接同样对照绑定校验：本地地址不是所选地址的连接在门口被拒绝并计
+  数（`taiji_peer_blocked_ingress_total`）—— 入站与出站保持在所选接口上。
+- 仅启动时生效（同 `--listen-port`）：进程启动时应用；RPC 选项面无
+  `interface` 键。
+- **声明的窄差异**（仍走默认路由，启动时披露）：FTP 传输（控制/数据连接
+  在 FTP 客户端栈内部拨号）、magnet 元数据/发现阶段（升级后的正式引擎
+  遵守绑定）、HTTP tracker announce 面。
+- 不设置 = 零变化（系统默认路由）。
+
+## 多接口监听（`--taiji-listen-interfaces`）
+
+```sh
+taiji --taiji-listen-interfaces "en0:6881,en1:6881" <torrent> -d <dir>
+taiji --taiji-listen-interfaces "10.0.0.5:6881,[2001:db8::a]:6882" <torrent> -d <dir>
+```
+
+- **取值**：逗号分隔的 `接口名或IP:端口` 列表（`taiji.` 命名空间的扩展
+  选项 —— aria2 无对应项；能力形态对齐 libtorrent 的
+  `listen_interfaces`）。IPv6 字面量使用 `[v6]:port` 方括号形式。无后缀
+  标志：端口数字之后的任何字符都使该条目非法。非法条目各自记录一条
+  警告后被跳过 —— 不会导致启动失败。
+- **生效面**（入站方向）：每个条目经系统接口表展开 —— 接口名展开为该
+  接口每个地址一个监听面（多地址接口全覆盖），通配地址（`0.0.0.0` 或
+  `::`）展开为该族每个接口地址一个面（多宿主规则）。每个面 = 一个 TCP
+  监听 + 一个 UDP 套接字（uTP 接入、DHT 与 UDP tracker 流量按面承载）。
+  双宿主主机（公司内网 + VPN 并存）借此在两个接口上同时接受 peer 连接。
+- **出口分派**（uTP + UDP tracker）：出站 uTP 连接与 UDP tracker 通告按
+  目的地址选面 —— 子网包含目的地址的面胜出（源地址一致性：发往内网的
+  流量走内网面），无匹配时回退到该族第一个绑定的面。每族一面（默认形
+  态）时每次选择都是该面 —— 零变化。
+- **与 `--interface` 的组合**：出口绑定的地址族收窄监听面列表（v4 出口
+  只保留 v4 端点，反之亦然）；另一族的端点被丢弃并记录警告。出口绑定
+  生效时，入站 peer 连接会对照它校验：本地地址不是出口地址的连接在门
+  口被拒绝并计数（`taiji_peer_blocked_ingress_total`）—— 入站与出站
+  流量保持在所选接口上。
+- **降级**：接口枚举失败或展开结果为空时，引擎回退到单一通配监听并记
+  警告。某个面的精确端口绑定失败时该面降级（警告；端口绝不静默漂移）。
+  仅启动时生效（同 `--listen-port`）；RPC 选项面无此键。不设置 = 现行
+  单监听行为（零变化）。
+- **声明的残留**：NAT 只映射单一通告端口（第一个 v4 面的端口 —— 按面
+  映射属后续工作）；本地服务发现（LSD）保持会话级多播面。设计细节见
+  `docs/design/listen-interfaces.md`。
+
 ## 制作种子
 
 ```sh
@@ -202,3 +259,29 @@ taiji --log-format json --rpc-listen-port 6800 \
 - ANSI 颜色仅在 stdout 直连终端（交互式 TTY）时输出；重定向到文件/管道
   自动干净（无 `\x1b` 转义序列）；设置 `NO_COLOR` 环境变量时整体关闭
   （no-color.org）。
+
+### 会话指标轨迹与离线报告
+
+`/metrics` 是拉模式：没人抓取的时段发生的事就此丢失。可选的轨迹开关把
+同一份会话指标快照落成离线工件——每个 1s 会话 tick 一行 JSON（全部快照
+字段，键 = 字段名）：
+
+```sh
+BH_METRICS_TRACE=/tmp/session.jsonl taiji --rpc-listen-port 6800
+# ... 跑一次下载，然后 Ctrl-C / 关闭 ...
+python3 scripts/metrics_report.py --input /tmp/session.jsonl
+# -> /tmp/session.jsonl.md（图表资产输出在旁边）
+```
+
+- `BH_METRICS_TRACE=<path>`（默认关闭，未设置时零额外 I/O）：轨迹随会话
+  启动打开、随关闭落盘。失败（路径不可写、磁盘满）仅告警并继续——绝不
+  影响会话本身。
+- `BH_METRICS_TRACE_BYTES`（默认 64MiB，钳制 [1MiB, 1GiB]）：轨迹文件的
+  硬性大小上限。下一行将超限时文件从空重启（截断而非轮转——单个封顶
+  文件才是硬性总量上界；轮转会把上限乘以保留代数）。每次进程运行都是
+  全新轨迹。
+- 报告按诊断族给出时间序列章节——吞吐（bytes/s）、按类别的 peer 供给、
+  DHT 节点/查询、存储管线水位。matplotlib 为可选依赖：缺失时报告降级为
+  采样的 Markdown 表格，工具在任何有 python3 的地方都能跑。
+  `python3 scripts/metrics_report.py --self-test` 用合成数据走通全链路
+  （CI 友好；无需 matplotlib）。

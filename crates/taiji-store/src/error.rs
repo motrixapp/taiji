@@ -82,9 +82,12 @@ pub enum StoreError {
     #[error("store: disk writer has no open file")]
     FileNotOpen,
 
-    /// Platform/feature explicitly unsupported (Windows stubs, F_NOCACHE
-    /// etc. — never pretend to work; real implementations fail their tasks
-    /// here).
+    /// Platform/feature explicitly unsupported (Windows stubs and other
+    /// platform faces without a safe wrapper — never pretend to work;
+    /// real implementations fail their tasks here. Best-effort hints
+    /// like the volatile-read page-cache advises deliberately do NOT
+    /// use this variant — their failures are counted and ignored per
+    /// the aria2 precedent; see `DiskWriter::read_at_volatile`).
     #[error("store: unsupported feature: {0}")]
     Unsupported(String),
 
@@ -144,5 +147,19 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("/tmp/taiji.sqlite3"), "{msg}");
         assert!(msg.contains("corrupt"), "{msg}");
+    }
+
+    /// The unsupported-branch shape (Windows stubs / platform faces
+    /// without a safe wrapper): a stable `store: unsupported feature:`
+    /// prefix with the payload verbatim — asserted platform-agnostically
+    /// since the Windows no-cache arm cannot run on a unix host. Note
+    /// the volatile-read hint faces never take this variant (failures
+    /// are counted and ignored, see the variant docs).
+    #[test]
+    fn unsupported_error_message_shape() {
+        let e = StoreError::Unsupported("no-cache face on this platform".into());
+        let msg = e.to_string();
+        assert!(msg.starts_with("store: unsupported feature:"), "{msg}");
+        assert!(msg.contains("no-cache face on this platform"), "{msg}");
     }
 }

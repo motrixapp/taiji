@@ -7,6 +7,14 @@
 //! Parse/fallback forms mirror the read points exactly; each accessor's
 //! doc below carries the full rule plus its read timing.
 //!
+//! **Retirement flow**: a knob slated for removal is retired across two
+//! releases — release N keeps the name parsing but marks the machine-
+//! readable registry row deprecated ([`REGISTRY`]; the startup scan
+//! [`warn_knobs_at_startup`] warns once, naming the successor);
+//! release N+1 erases the row and the accessor (the name no longer
+//! parses; a still-set env var of that name takes the unknown-knob
+//! warning path of the same scan).
+//!
 //! | Knob | Default | Parse / fallback |
 //! |---|---|---|
 //! | `BH_PARALLEL_WRITES` | off | trim+lc "1"/"on"/"true" = on; else (incl. unset) off |
@@ -79,6 +87,13 @@
 //! | `BH_ENDGAME_PIECE_DEADLINE_SECS` | 30 | u64 (no trim), fail->30, clamp [0,600]; 0 = per-piece deadline off |
 //! | `BH_ENDGAME_TAIL_WINDOW` | 1 | u64 (no trim), fail->1, clamp [0,8]; 0 = tail window floor off; k>=1 = k x missing blocks |
 //! | `BH_ENDGAME_UNCHOKE_HOLDER` | on | exactly `"0"` = off (tail holder choke priority); else on |
+//! | `BH_PEER_CLASS` | on | exactly `"0"` = off (connection-class policy: local choke-slot exemption + class admission budgets); else on |
+//! | `BH_LOCAL_CONN_FACTOR` | 150 | u64 (no trim), fail->150, clamp [100,500] (%; local budget = ceil(cap x f/100)) |
+//! | `BH_UTP_MAX_PEERS` | single budget | usize after trim, fail/0->caller default (= the current single cap) |
+//! | `BH_METRICS_TRACE` | off | non-empty after trim = Some(path); unset/blank = None (capture off, zero I/O) |
+//! | `BH_METRICS_TRACE_BYTES` | 64MiB | u64 (no trim), fail->64MiB, clamp [1MiB,1GiB] (capture file size cap) |
+//! | `BH_CLOSE_NOTIFY` | on | exactly `"0"` = off (no `ut_close` advertise/send); else on |
+//! | `BH_QUIET_PIECE_LOG_ALIAS` | follows `BH_QUIET_PIECE_LOG` | parse alias (see the accessor docs; **deprecated** — use `BH_QUIET_PIECE_LOG`) |
 //!
 //! # Read-timing classes (zero-behavior-change invariant)
 //!
@@ -1495,6 +1510,579 @@ fn serve_pending_cap_of_raw(raw: Option<&str>) -> u64 {
         .clamp(32, 1024)
 }
 
+/// `BH_PEER_CLASS` (registry in the module docs): exactly `"0"` = off
+/// (the connection-class policy layer — local/LAN choke-slot exemption,
+/// the 1.5x local admission budget, the independent uTP admission budget
+/// — short-circuits to the exact pre-class behavior at both decision
+/// points); anything else (including unset) = on. The per-class gauge
+/// (`taiji_peers_by_class`) is an observation face and keeps counting
+/// with the switch off (the rollback seam covers behavior, not
+/// observability).
+///
+/// Read timing: **per-round / per-event** — read at the choke round
+/// (15s/10s), the preemptive INTERESTED edge, and each admission
+/// decision (inbound accept / redial); none are hot paths; not cached.
+pub fn peer_class_enabled() -> bool {
+    peer_class_enabled_of_raw(std::env::var("BH_PEER_CLASS").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested; same
+/// exactly-"0" convention as `BH_ENDGAME_UNCHOKE_HOLDER`).
+fn peer_class_enabled_of_raw(raw: Option<&str>) -> bool {
+    raw != Some("0")
+}
+
+/// `BH_LOCAL_CONN_FACTOR` (registry in the module docs): `u64` parse
+/// (no trim); parse failure/unset -> default 150 (percent — the local
+/// peer class' connection budget factor: LAN peers may fill up to
+/// `ceil(cap x factor / 100)` connections, the "local peers are allowed
+/// to exceed the normal connection limit by 50%" default, libtorrent
+/// `session_impl.cpp` `connection_limit_factor = 150`); effective value
+/// clamped to [100, 500] (100 = no headroom — the budget equals the
+/// regular cap; 500 = the runaway guard). Consumed only while
+/// `BH_PEER_CLASS` is on.
+///
+/// Read timing: **per-event** — read at each class-aware admission
+/// decision (inbound accept / redial); not cached.
+pub fn local_conn_factor() -> u64 {
+    local_conn_factor_of_raw(std::env::var("BH_LOCAL_CONN_FACTOR").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested).
+fn local_conn_factor_of_raw(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(150)
+        .clamp(100, 500)
+}
+
+/// `BH_UTP_MAX_PEERS` (registry in the module docs): `usize` parse after
+/// trim; parse failure/0 -> default (the caller-supplied current single
+/// connection budget — the engine hard-cap reading; the uTP class
+/// therefore starts with a budget equal to the total cap, i.e. the
+/// independent channel never binds until tuned down: status quo, zero
+/// behavior change by default).
+///
+/// Read timing: **per-event** — read at each class-aware admission
+/// decision (inbound accept); not cached.
+pub fn utp_max_peers(default_max: usize) -> usize {
+    utp_max_peers_of_parts(
+        std::env::var("BH_UTP_MAX_PEERS").ok().as_deref(),
+        default_max,
+    )
+}
+
+/// Pure parse function for the above (decision-table tested; same
+/// parse-after-trim shape as `peer_max`).
+fn utp_max_peers_of_parts(raw: Option<&str>, default_max: usize) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v >= 1)
+        .unwrap_or(default_max)
+}
+
+/// `BH_METRICS_TRACE` (registry in the module docs): a non-empty value
+/// after trim = `Some(path)` (session-metrics JSONL capture target);
+/// unset/blank = `None` (capture off — the consumer must touch no
+/// filesystem path in that state; zero added I/O). The path's
+/// openability is the consumer's concern (open failure = warn and
+/// continue, never fatal).
+///
+/// Read timing: **construction** — read once where the session-side
+/// trace writer is assembled (session start); not cached (a new
+/// session construction re-reads env).
+pub fn metrics_trace_path() -> Option<std::path::PathBuf> {
+    metrics_trace_path_of_raw(std::env::var("BH_METRICS_TRACE").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested; the env
+/// read shell stays out of the table).
+fn metrics_trace_path_of_raw(raw: Option<&str>) -> Option<std::path::PathBuf> {
+    let v = raw?.trim();
+    if v.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(v))
+}
+
+/// Default capture file cap (bytes) for [`metrics_trace_cap_bytes`]:
+/// 64MiB — at the full-snapshot line size (~3KiB at 1 line/s) that is
+/// roughly six hours of coverage, enough for post-hoc analysis of a
+/// whole session without approaching anything disk-filling.
+pub const DEFAULT_METRICS_TRACE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `BH_METRICS_TRACE_BYTES` (registry in the module docs): `u64` parse
+/// (no trim); parse failure/unset -> default 64MiB; effective value
+/// clamped to [1MiB, 1GiB] (the hard bound on the capture file's size
+/// — a bounded-budget discipline: the diagnostic must never be the
+/// thing that fills the disk it is diagnosing).
+///
+/// Read timing: **construction** — same point as
+/// [`metrics_trace_path`]; not cached.
+pub fn metrics_trace_cap_bytes() -> u64 {
+    metrics_trace_cap_bytes_of_raw(std::env::var("BH_METRICS_TRACE_BYTES").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested).
+fn metrics_trace_cap_bytes_of_raw(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_METRICS_TRACE_BYTES)
+        .clamp(1024 * 1024, 1024 * 1024 * 1024)
+}
+
+/// `BH_CLOSE_NOTIFY` (registry in the module docs): exactly `"0"` = off
+/// (the `ut_close` extension is neither advertised in the BEP-10 m dict
+/// nor sent at disconnect — the runtime rollback arm; the wire is
+/// bit-for-bit the pre-extension shape); anything else (including
+/// unset) = on (advertise + consume + best-effort send at disconnect,
+/// only to peers that also negotiated the extension — zero wire change
+/// without both-side negotiation).
+///
+/// Read timing: **construction** — evaluated at each peer-loop assembly
+/// (per connection, the same shape as `BH_REQUEST_COALESCE`); not
+/// cached.
+pub fn close_notify_enabled() -> bool {
+    close_notify_enabled_of_raw(std::env::var("BH_CLOSE_NOTIFY").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested; the
+/// exactly-"0" convention of `BH_ENDGAME_STRICT`).
+fn close_notify_enabled_of_raw(raw: Option<&str>) -> bool {
+    raw != Some("0")
+}
+
+/// `BH_QUIET_PIECE_LOG_ALIAS` (registry in the module docs): parse
+/// alias of [`quiet_piece_log`] — identical decision table, forwarded
+/// verbatim.
+///
+/// **Deprecated from birth — retirement-flow rehearsal row.** Every
+/// production knob currently has live consumers, so the two-step
+/// retirement flow below is rehearsed on this trial alias (a real
+/// registered row with a real decision table, zero production
+/// consumers by design):
+///
+/// - **release N (this state)**: the row exists in [`REGISTRY`] with
+///   `deprecated: Some("BH_QUIET_PIECE_LOG")`; the name still parses
+///   (identical table) and the startup scan
+///   ([`warn_knobs_at_startup`]) warns once, naming the successor;
+/// - **release N+1 (simulated in the tests)**: the row is erased from
+///   [`REGISTRY`] and the accessor deleted; the name no longer parses
+///   and the startup scan reports it through the unknown-knob warning
+///   path (a BH_-prefixed env var with no registry row).
+pub fn quiet_piece_log_alias() -> bool {
+    quiet_piece_log_alias_of_raw(std::env::var("BH_QUIET_PIECE_LOG_ALIAS").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested; forwards
+/// to the successor's table verbatim — the alias contract).
+fn quiet_piece_log_alias_of_raw(raw: Option<&str>) -> bool {
+    quiet_piece_log_of_raw(raw)
+}
+
+// ---- Knob name registry and the two-step retirement flow ----
+
+/// One row of the machine-readable knob registry: the env var name plus
+/// the optional deprecation marker (the successor knob name).
+///
+/// The registry is the retirement face of the knob system (the parse
+/// rules above stay the authority for values):
+/// - **release N**: a knob slated for retirement keeps parsing but its
+///   row gains `deprecated: Some(successor)` — the startup scan warns
+///   once per set deprecated knob, naming the successor;
+/// - **release N+1**: the row (and the accessor) is deleted — the name
+///   no longer parses and the startup scan reports a SET env var of
+///   that name through the unknown-knob warning path.
+///
+/// The registry-name sync test below locks the table against the
+/// `std::env::var` read points in this file (every read name has
+/// exactly one row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnobSpec {
+    /// Env var name (with the `BH_` prefix).
+    pub name: &'static str,
+    /// Deprecation marker: `Some(successor knob name)` = release N of
+    /// the retirement flow (parse still works, startup warning names
+    /// the successor); `None` = active.
+    pub deprecated: Option<&'static str>,
+}
+
+/// The knob name registry (one row per `std::env::var("BH_*")` read
+/// point in this file; order mirrors the module-doc table).
+pub const REGISTRY: &[KnobSpec] = &[
+    KnobSpec {
+        name: "BH_PARALLEL_WRITES",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_WRITE_COALESCE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_REQUEST_COALESCE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CHOKE_ARIA2",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_UNCHOKE_SLOTS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_UNCHOKE_BUDGET_SLOTS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_UNCHOKE_PER_PEER_FLOOR_BPS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_REQ_WINDOW_FLOOR",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_REQ_WINDOW_INIT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_REISSUE_CEIL_SECS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_REQUEST_WINDOW_BDP",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_RATE_EWMA_LONG",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_BDP_WINDOW_HYSTERESIS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_FAST_RECONNECT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_BLOCK_BYPASS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_BLOCK_BATCH_ACK",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_LEAN_TELEMETRY",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ENDGAME_STRICT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_TWO_PHASE_LEDGER",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_MULTI_PIECE_SUPPLY",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_MULTI_PIECE_SUPPLY_MAX",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_MULTI_PIECE_BUDGET_FLOOR",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ENDGAME_LASTMILE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_VERIFY_WORKERS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_WEBSEED",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_WEBSEED_MAX",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_BLOCK_ARENA",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_BLOCK_ARENA_BYTES",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_WR_CACHE_BYTES",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SESSION_UNVERIFIED_BYTES",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SPILL_UNVERIFIED",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SPILL_BYTES",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SPILL_FIXED",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_V2_HASH_PRECOMPUTE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_HOLEPUNCH_MODE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CONNECT_SPEED",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_V6_PREF",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CONNECT_SPEED_HOLD",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CONN_FILL_POOL",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CONN_FILL_RETRY",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CONN_FILL_DHT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_DHT_RAMP_INTERVAL_SECS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_DHT_RAMP_MIN_PEERS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_TRACKER_MIN_PEERS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_DHT_FRONTIER_K",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_UTP_MUTE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SLOW_PEER_CHURN",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SLOW_PEER_FRAC",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SLOW_PEER_K_PCT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SLOW_PEER_MIN_AGE_SECS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SLOW_CHURN_RARITY_EXEMPT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_PEX_IMMEDIATE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_PEER_MAX",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_PEER_TARGET",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_UTP_DIAL_TIMEOUT_SECS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_DIAL_DEAD_TCP_ONLY",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_DIAL_PREFER_UTP",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_QUIET_PIECE_LOG",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CHECKOUT_SOFT_ACCOUNTING",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ENDGAME_FAST_BUSY_K",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ADJACENT_SKIP_N",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SERVE_PENDING_CAP",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_DIAL_BACKOFF",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_SEED_PASSIVE_DHT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_READ_BUF_SHRINK",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_THREAD_STACK_KB",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ENDGAME_TAIL_PCT",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ENDGAME_PIECE_DEADLINE_SECS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ENDGAME_TAIL_WINDOW",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_ENDGAME_UNCHOKE_HOLDER",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_PEER_CLASS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_LOCAL_CONN_FACTOR",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_UTP_MAX_PEERS",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_METRICS_TRACE",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_METRICS_TRACE_BYTES",
+        deprecated: None,
+    },
+    KnobSpec {
+        name: "BH_CLOSE_NOTIFY",
+        deprecated: None,
+    },
+    // Retirement-flow rehearsal row (release N state; see the accessor
+    // docs — release N+1 erases this row and the accessor).
+    KnobSpec {
+        name: "BH_QUIET_PIECE_LOG_ALIAS",
+        deprecated: Some("BH_QUIET_PIECE_LOG"),
+    },
+];
+
+/// Startup classification of one env knob name against a registry
+/// (pure; decision-table tested — the env scan shell stays out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnobLookup {
+    /// Registered, not deprecated: parse per the module-doc table.
+    Active,
+    /// Registered, release N of the retirement flow: still parses, the
+    /// startup warning names the successor.
+    Deprecated(&'static str),
+    /// No registry row (release N+1 name erasure, or a typo): the name
+    /// does not parse — the unknown-knob warning path.
+    Unknown,
+}
+
+/// Classify one knob name against a registry slice (pure).
+pub fn lookup_knob(registry: &[KnobSpec], name: &str) -> KnobLookup {
+    registry
+        .iter()
+        .find(|row| row.name == name)
+        .map(|row| match row.deprecated {
+            Some(successor) => KnobLookup::Deprecated(successor),
+            None => KnobLookup::Active,
+        })
+        .unwrap_or(KnobLookup::Unknown)
+}
+
+/// The startup notice text for one classification (pure; the message is
+/// part of the flow's contract: it must name the knob and — for a
+/// deprecated knob — the successor).
+pub fn knob_startup_notice(name: &str, lookup: KnobLookup) -> String {
+    match lookup {
+        KnobLookup::Active => format!("{name}: set (active knob)"),
+        KnobLookup::Deprecated(successor) => {
+            format!("{name}: deprecated knob, still honored; use {successor} instead")
+        }
+        KnobLookup::Unknown => {
+            format!("{name}: unknown BH_ knob (not parsed; check the knobs registry)")
+        }
+    }
+}
+
+/// Startup knob scan (called ONCE at process start, after the tracing
+/// subscriber is up): every SET `BH_*` env var is classified against
+/// [`REGISTRY`] and warned — deprecated knobs (release N) get the
+/// successor-naming warning, names without a registry row (release N+1
+/// erasure / typos) get the unknown-knob warning. Active knobs stay
+/// silent (the registry table above remains the value authority).
+pub fn warn_knobs_at_startup() {
+    for (name, _value) in std::env::vars() {
+        if !name.starts_with("BH_") {
+            continue;
+        }
+        let lookup = lookup_knob(REGISTRY, &name);
+        if matches!(lookup, KnobLookup::Active) {
+            continue;
+        }
+        tracing::warn!(
+            target: "taiji::io::knobs",
+            "{}",
+            knob_startup_notice(&name, lookup)
+        );
+    }
+}
+
 /// Knob parse decision tables (table-driven; env is process-immutable —
 /// edition 2024 forbids unsafe and tests have no `set_var` — so the
 /// parse faces are driven via the `_of_raw` pure functions; the env read
@@ -2033,5 +2621,264 @@ mod tests {
             50 * 1024
         );
         assert_eq!(peer_request_speed_limit_of_parts(1, 50 * 1024), 1);
+    }
+
+    /// `BH_PEER_CLASS` parse table (the connection-class master switch):
+    /// unset = on (the class policies ship enabled — the defaults are the
+    /// libtorrent-aligned local/tcp/utp behavior); exactly `"0"` = off
+    /// (both decision points — choke-slot exemption and class admission
+    /// budgets — take the pre-class paths bit-for-bit); anything else
+    /// (including whitespace-padded zero, an unset-like non-arm) = on.
+    #[test]
+    fn peer_class_enabled_parse_table() {
+        // Unset = on (default).
+        assert!(peer_class_enabled_of_raw(None));
+        // Exactly "0" = off (the explicit rollback arm).
+        assert!(!peer_class_enabled_of_raw(Some("0")));
+        // Any other value = on (including "1", "off", empty — the
+        // exactly-"0" convention: only the exact fallback value counts).
+        assert!(peer_class_enabled_of_raw(Some("1")));
+        assert!(peer_class_enabled_of_raw(Some("off")));
+        assert!(peer_class_enabled_of_raw(Some("")));
+        assert!(peer_class_enabled_of_raw(Some(" 0")));
+    }
+
+    /// `BH_LOCAL_CONN_FACTOR` parse table: default/invalid -> 150 (the
+    /// libtorrent `connection_limit_factor = 150` default,
+    /// session_impl.cpp); legal values pass through after clamp to
+    /// [100, 500] (100 = no headroom; 500 = runaway guard).
+    #[test]
+    fn local_conn_factor_parse_table() {
+        // Default (unset) = 150 (the "exceed the normal connection limit
+        // by 50%" default).
+        assert_eq!(local_conn_factor_of_raw(None), 150);
+        // Invalid (non-numeric / negative sign / empty) = default.
+        assert_eq!(local_conn_factor_of_raw(Some("abc")), 150);
+        assert_eq!(local_conn_factor_of_raw(Some("-1")), 150);
+        assert_eq!(local_conn_factor_of_raw(Some("")), 150);
+        // Legal values pass through (explicit 150 = fallback arm; 100 =
+        // no local headroom).
+        assert_eq!(local_conn_factor_of_raw(Some("150")), 150);
+        assert_eq!(local_conn_factor_of_raw(Some("100")), 100);
+        assert_eq!(local_conn_factor_of_raw(Some("300")), 300);
+        // Clamped to [100, 500] (0/1/99 -> 100; 501/99999 -> 500).
+        assert_eq!(local_conn_factor_of_raw(Some("0")), 100);
+        assert_eq!(local_conn_factor_of_raw(Some("99")), 100);
+        assert_eq!(local_conn_factor_of_raw(Some("501")), 500);
+        assert_eq!(local_conn_factor_of_raw(Some("99999")), 500);
+    }
+
+    /// `BH_UTP_MAX_PEERS` decision table: default/invalid/0 -> the caller
+    /// default (= the current single connection budget reading; the
+    /// independent uTP channel therefore starts non-binding — status
+    /// quo); a legal value tunes the independent budget.
+    #[test]
+    fn utp_max_peers_of_parts_decision_table() {
+        const DEFAULT: usize = 120;
+        // Default (unset) = the current single budget (status quo arm).
+        assert_eq!(utp_max_peers_of_parts(None, DEFAULT), DEFAULT);
+        // Invalid/0 = default (0 treated as unset — an "unlimited" uTP
+        // budget is not expressible; the total cap still bounds uTP).
+        assert_eq!(utp_max_peers_of_parts(Some("abc"), DEFAULT), DEFAULT);
+        assert_eq!(utp_max_peers_of_parts(Some("0"), DEFAULT), DEFAULT);
+        assert_eq!(utp_max_peers_of_parts(Some(""), DEFAULT), DEFAULT);
+        assert_eq!(utp_max_peers_of_parts(Some("-1"), DEFAULT), DEFAULT);
+        // Legal value passes through (trim tolerated; same shape as
+        // `peer_max`).
+        assert_eq!(utp_max_peers_of_parts(Some("40"), DEFAULT), 40);
+        assert_eq!(utp_max_peers_of_parts(Some(" 40 "), DEFAULT), 40);
+        assert_eq!(utp_max_peers_of_parts(Some("1"), DEFAULT), 1);
+    }
+
+    /// `BH_METRICS_TRACE` parse table: unset/blank (including
+    /// whitespace-only) = None (capture off, zero I/O); a non-empty
+    /// value = that path, surrounding trim tolerated.
+    #[test]
+    fn metrics_trace_path_parse_table() {
+        // Default (unset) = None (capture off).
+        assert_eq!(metrics_trace_path_of_raw(None), None);
+        // Blank values = None (empty / whitespace-only — no capture at
+        // an empty path).
+        assert_eq!(metrics_trace_path_of_raw(Some("")), None);
+        assert_eq!(metrics_trace_path_of_raw(Some("   ")), None);
+        // Non-empty = the path (trim tolerated; interior spaces kept).
+        assert_eq!(
+            metrics_trace_path_of_raw(Some("/tmp/trace.jsonl")),
+            Some(std::path::PathBuf::from("/tmp/trace.jsonl"))
+        );
+        assert_eq!(
+            metrics_trace_path_of_raw(Some("  /tmp/with space.jsonl  ")),
+            Some(std::path::PathBuf::from("/tmp/with space.jsonl"))
+        );
+    }
+
+    /// `BH_METRICS_TRACE_BYTES` parse table: default/invalid -> 64MiB;
+    /// legal values pass through after clamp to [1MiB, 1GiB] (the
+    /// bounded-budget guard: the capture cannot be inflated past 1GiB
+    /// or shrunk under 1MiB).
+    #[test]
+    fn metrics_trace_cap_bytes_parse_table() {
+        const MIB: u64 = 1024 * 1024;
+        // Default (unset) = 64MiB.
+        assert_eq!(metrics_trace_cap_bytes_of_raw(None), 64 * MIB);
+        // Invalid (non-numeric / negative sign / empty) = default.
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("abc")), 64 * MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("-1")), 64 * MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("")), 64 * MIB);
+        // Legal values pass through.
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("33554432")), 32 * MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("2097152")), 2 * MIB);
+        // Clamped to [1MiB, 1GiB] (0 -> floor; 2GiB -> ceiling).
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("0")), MIB);
+        assert_eq!(metrics_trace_cap_bytes_of_raw(Some("1048576")), MIB);
+        assert_eq!(
+            metrics_trace_cap_bytes_of_raw(Some("9999999999")),
+            MIB * 1024
+        );
+    }
+
+    /// `BH_CLOSE_NOTIFY` parse table: unset = on (advertise + send at
+    /// disconnect); exactly `"0"` = off (the rollback arm); any other
+    /// value = on (the exactly-"0" convention).
+    #[test]
+    fn close_notify_parse_table() {
+        // Default (unset) = on.
+        assert!(close_notify_enabled_of_raw(None));
+        // Exactly "0" = off.
+        assert!(!close_notify_enabled_of_raw(Some("0")));
+        // Any other value = on (including whitespace-padded zero).
+        assert!(close_notify_enabled_of_raw(Some("1")));
+        assert!(close_notify_enabled_of_raw(Some("off")));
+        assert!(close_notify_enabled_of_raw(Some("")));
+        assert!(close_notify_enabled_of_raw(Some(" 0")));
+    }
+
+    // ---- Knob registry governance (name sync + retirement flow) ----
+
+    /// Registry-name sync: every `std::env::var("BH_*")` literal read
+    /// point in this file has exactly one registry row, and no row is a
+    /// duplicate. Locks the machine-readable registry against drift
+    /// (a new knob without a row would silently lose its retirement
+    /// face; a stale row would misreport erased names as active).
+    #[test]
+    fn registry_rows_match_source_env_reads() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/knobs.rs"))
+            .unwrap_or_else(|e| panic!("read source: {e}"));
+        // Scan only the non-test body (this test's own needle literal
+        // would match itself).
+        let body = src.split("#[cfg(test)]").next().unwrap_or(src.as_str());
+        // Collect literal names from read points (NOT from the registry
+        // rows or docs: the pattern requires `std::env::var("BH_` with
+        // an uppercase/digit/underscore body, which the registry rows
+        // and the doc ellipsis mention do not match).
+        let needle = "std::env::var(\"BH_";
+        let mut read_names: Vec<&str> = Vec::new();
+        let mut rest = body;
+        while let Some(pos) = rest.find(needle) {
+            let after = &rest[pos + needle.len()..];
+            let end = after
+                .find('"')
+                .unwrap_or_else(|| panic!("unterminated literal"));
+            read_names.push(&after[..end]);
+            rest = &after[end..];
+        }
+        // Doc-comment placeholders (the ellipsis mention, the `BH_*`
+        // family reference) are not read points: keep only strict
+        // knob-name bodies.
+        read_names.retain(|n| {
+            !n.is_empty()
+                && n.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        });
+        assert!(
+            !read_names.is_empty(),
+            "source scan found no read points (pattern drifted?)"
+        );
+        let read_names: Vec<String> = read_names.iter().map(|n| format!("BH_{n}")).collect();
+        let mut row_names: Vec<&str> = REGISTRY.iter().map(|r| r.name).collect();
+        let mut sorted_reads = read_names.clone();
+        sorted_reads.sort_unstable();
+        row_names.sort_unstable();
+        let sorted_reads: Vec<&str> = sorted_reads.iter().map(|s| s.as_str()).collect();
+        // Set equality with cardinality: every read point has a row and
+        // no row is duplicated.
+        assert_eq!(
+            sorted_reads, row_names,
+            "registry rows and source env read points must correspond one to one"
+        );
+    }
+
+    /// Retirement flow, step N (deprecated row): the trial knob still
+    /// parses (identical decision table — the alias contract), the
+    /// registry classifies it Deprecated with the successor, and the
+    /// startup notice names BOTH the knob and the successor.
+    #[test]
+    fn knob_retirement_step_n_parse_and_warning() {
+        const NAME: &str = "BH_QUIET_PIECE_LOG_ALIAS";
+        const SUCCESSOR: &str = "BH_QUIET_PIECE_LOG";
+        // (a) Parse still works and matches the successor's table
+        //     verbatim (rows from the successor's own decision table).
+        for raw in [
+            None,
+            Some("0"),
+            Some("off"),
+            Some("false"),
+            Some("1"),
+            Some("On"),
+        ] {
+            assert_eq!(
+                quiet_piece_log_alias_of_raw(raw),
+                quiet_piece_log_of_raw(raw),
+                "alias parse must forward to the successor table (raw {raw:?})"
+            );
+        }
+        // (b) Registry classification: deprecated, naming the successor.
+        assert_eq!(
+            lookup_knob(REGISTRY, NAME),
+            KnobLookup::Deprecated(SUCCESSOR)
+        );
+        // (c) The startup notice names the knob and the successor.
+        let notice = knob_startup_notice(NAME, lookup_knob(REGISTRY, NAME));
+        assert!(notice.contains(NAME), "notice must name the knob: {notice}");
+        assert!(
+            notice.contains(SUCCESSOR),
+            "notice must name the successor: {notice}"
+        );
+        // Sanity: a regular knob classifies Active and stays out of the
+        // warning path.
+        assert_eq!(lookup_knob(REGISTRY, "BH_CLOSE_NOTIFY"), KnobLookup::Active);
+        assert!(knob_startup_notice("BH_CLOSE_NOTIFY", KnobLookup::Active).contains("active"));
+    }
+
+    /// Retirement flow, step N+1 (name erasure), simulated: with the
+    /// trial row removed from the registry (the next release's state —
+    /// row deleted together with the accessor), the classification
+    /// flips to Unknown and the startup notice takes the unknown-knob
+    /// path (no successor named: there is nothing to migrate to
+    /// anymore).
+    #[test]
+    fn knob_retirement_step_n_plus_one_name_erasure() {
+        const NAME: &str = "BH_QUIET_PIECE_LOG_ALIAS";
+        // The simulated next-release registry: this release's rows
+        // minus the retired trial row.
+        let next: Vec<KnobSpec> = REGISTRY
+            .iter()
+            .copied()
+            .filter(|r| r.name != NAME)
+            .collect();
+        // The name no longer parses: the unknown-knob warning path.
+        assert_eq!(lookup_knob(&next, NAME), KnobLookup::Unknown);
+        let notice = knob_startup_notice(NAME, lookup_knob(&next, NAME));
+        assert!(notice.contains(NAME), "notice must name the knob: {notice}");
+        assert!(
+            notice.contains("unknown"),
+            "erased names take the unknown-knob path: {notice}"
+        );
+        assert!(
+            !notice.contains("use BH_"),
+            "no successor naming after erasure: {notice}"
+        );
+        // Unrelated rows are unaffected by the erasure.
+        assert_eq!(lookup_knob(&next, "BH_QUIET_PIECE_LOG"), KnobLookup::Active);
     }
 }

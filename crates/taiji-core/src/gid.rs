@@ -30,6 +30,11 @@ pub use taiji_domain::gid::{GID_HIGH_BIT, Gid};
 #[derive(Debug, Default)]
 pub struct GidAllocator {
     used: HashSet<u64>,
+    /// Randomness seam (SPEC G6): default = OS entropy (identical to
+    /// the former scattered `rand::random` reads); a fixed-seed
+    /// construction replays the allocation sequence deterministically
+    /// (the session injects its shared seam handle).
+    rng: crate::engine::Rng,
 }
 
 impl GidAllocator {
@@ -37,11 +42,20 @@ impl GidAllocator {
         Self::default()
     }
 
+    /// Determinism-seam construction (a pinned RNG source; see the
+    /// `rng` field docs).
+    pub fn with_rng(rng: crate::engine::Rng) -> Self {
+        GidAllocator {
+            used: HashSet::new(),
+            rng,
+        }
+    }
+
     /// Allocate a new GID: random u64 | high bit 1, deduped against the
     /// allocated set.
     pub fn allocate(&mut self) -> Gid {
         loop {
-            let raw = rand::random::<u64>() | GID_HIGH_BIT;
+            let raw = self.rng.next_u64() | GID_HIGH_BIT;
             if self.used.insert(raw) {
                 return Gid::from_u64(raw);
             }
@@ -106,4 +120,26 @@ mod tests {
             assert_ne!(alloc.allocate().as_u64(), reserved);
         }
     }
+}
+
+/// Determinism seam (SPEC G6): two allocators built from one
+/// pinned seed replay the same allocation sequence; a different
+/// seed diverges.
+#[test]
+fn fixed_seed_allocator_replays_the_sequence() {
+    let mut a = GidAllocator::with_rng(crate::engine::Rng::from_seed(0xC0FF_EE01));
+    let mut b = GidAllocator::with_rng(crate::engine::Rng::from_seed(0xC0FF_EE01));
+    for _ in 0..8 {
+        assert_eq!(
+            a.allocate().as_u64(),
+            b.allocate().as_u64(),
+            "one pinned seed must replay the allocation sequence"
+        );
+    }
+    let mut c = GidAllocator::with_rng(crate::engine::Rng::from_seed(0xC0FF_EE02));
+    assert_ne!(
+        a.allocate().as_u64(),
+        c.allocate().as_u64(),
+        "a different seed must diverge"
+    );
 }

@@ -383,6 +383,8 @@ fn config(
         web: None,
         stats: None,
         ip_guard: None,
+        egress: None,
+        listen_interfaces: Vec::new(),
     }
 }
 

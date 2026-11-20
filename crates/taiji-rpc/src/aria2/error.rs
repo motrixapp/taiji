@@ -325,6 +325,71 @@ pub(crate) fn multicall_inline_error(message: &str) -> serde_json::Value {
     serde_json::json!({ "code": CODE_GENERIC, "message": message })
 }
 
+/// Caller-misuse grading for the RPC statistics face (labels only —
+/// no error-type restructuring, no behavior change): true = the call
+/// was rejected by THIS layer's own input validation and is a client
+/// bug; false = the method reached execution and failed inside the
+/// session/engine (or hit an unimplemented face) — triage treats
+/// those as ours.
+///
+/// Classification runs over the frozen wire faces only:
+/// - the JSON-RPC protocol codes (-32700/-32600/-32602: the request
+///   shape itself was malformed);
+/// - the byte-frozen validation texts this table owns (the `MSG_*`
+///   constants, the parameter templates, the closed-domain rejections
+///   and cap receipts below) — matching their shapes is stable by the
+///   same rule that freezes them;
+/// - the unauthorized face (bad credentials — a caller problem; the
+///   dedicated `rpc_auth_fail` counter remains the security
+///   observability face).
+///
+/// Deliberate scope boundary: free-form session error texts
+/// (`map_session_error`, e.g. a missing GID) are NOT graded — they
+/// flow from core semantics and are often client mistakes, but
+/// classifying free-form texts would be brittle; the misuse label
+/// covers exactly the RPC adapter's validation surface.
+pub fn is_caller_misuse(code: i64, message: &str) -> bool {
+    match code {
+        CODE_PARSE_ERROR | CODE_INVALID_REQUEST | CODE_INVALID_PARAMS => true,
+        CODE_GENERIC => {
+            // Parameter validation templates (the aria2 checkParam family
+            // + the taiji.* extension parameter rejections share the
+            // "The [integer] parameter at" prefixes).
+            message.starts_with("The parameter at ")
+                || message.starts_with("The integer parameter at ")
+                || message.starts_with("No such method: ")
+                || message.starts_with(STR_OPTION_INVALID)
+                || message.starts_with(STR_TOO_MANY_ITEMS)
+                || message.starts_with(STR_REQUEST_TOO_LARGE)
+                || message.starts_with(STR_METALINK_PARSE_FAILED)
+                || message.starts_with(STR_METALINK_UNSUPPORTED_VERSION)
+                || message.starts_with("unknown torrent format: ")
+                || message.starts_with("unknown scheduler policy: ")
+                || message.starts_with("unknown disk tier: ")
+                || message == "Unauthorized"
+                || message == MSG_ILLEGAL_ARGUMENT
+                || message == MSG_INTEGER_GE_ONE
+                || message == MSG_RECURSIVE_MULTICALL
+                || message == MSG_MULTICALL_EXPECTED_STRUCT
+                || message == MSG_MULTICALL_MISSING_METHOD_NAME
+                || message == MSG_URI_NOT_PROVIDED
+                || message == MSG_URL_NOT_PROVIDED
+                || message == MSG_TORRENT_NOT_BASE64
+                || message == MSG_FILE_PATHS_NOT_PROVIDED
+                || message == MSG_TRACKER_URLS_NOT_PROVIDED
+                || message == MSG_COOKIE_TOO_MANY
+                || message == MSG_COOKIE_NOT_OBJECT
+                || message == MSG_COOKIE_UNKNOWN_FIELD
+                || message == MSG_COOKIE_SYNTAX
+                || message == MSG_COOKIE_DOMAIN
+                || message == MSG_COOKIE_EXPIRY
+                || message == MSG_COOKIE_STRING_FIELD
+                || message == MSG_COOKIE_BOOL_FIELD
+        }
+        _ => false,
+    }
+}
+
 /// SessionError -> RPC error (the single mapping point; core only supplies semantics).
 pub fn map_session_error(err: &SessionError) -> RpcError {
     match err {
@@ -635,6 +700,137 @@ mod tests {
         assert_eq!(e.code, 1);
         assert_eq!(e.message, "Unauthorized");
         assert!(e.unauthorized);
+    }
+
+    /// Misuse grading decision table (labels only): every frozen
+    /// validation face this adapter produces grades as caller misuse;
+    /// execution failures, capability gaps and session closures grade
+    /// as internal (ours). Free-form session texts are out of scope by
+    /// design (see [`is_caller_misuse`]).
+    #[test]
+    fn misuse_grading_decision_table() {
+        // ---- caller misuse: parameter decode + closed domains ----
+        for e in [
+            RpcError::param_missing(2),
+            RpcError::param_wrong_type(0),
+            RpcError::integer_param_not_ge_zero(1),
+            RpcError::playhead_bps_zero(),
+            RpcError::file_priority_pairs_empty(),
+            RpcError::file_priority_entry_bad_priority(3),
+            RpcError::no_such_method("aria2.getX"),
+            RpcError::unknown_torrent_format("v3"),
+            RpcError::unknown_scheduler_policy("fifo"),
+            RpcError::unknown_disk_tier("nvme", &["volatile", "cold"]),
+            RpcError::request_too_large(),
+            RpcError::too_many_items(1000),
+            RpcError::subcall_budget_exceeded(10001, 10_000),
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_ILLEGAL_ARGUMENT.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_INTEGER_GE_ONE.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_RECURSIVE_MULTICALL.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_MULTICALL_EXPECTED_STRUCT.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_MULTICALL_MISSING_METHOD_NAME.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_URI_NOT_PROVIDED.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_TORRENT_NOT_BASE64.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_TRACKER_URLS_NOT_PROVIDED.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_COOKIE_SYNTAX.to_string(),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: MSG_COOKIE_EXPIRY.to_string(),
+                unauthorized: false,
+            },
+            RpcError::unauthorized(),
+        ] {
+            assert!(
+                is_caller_misuse(e.code, &e.message),
+                "must grade as caller misuse: {}/{}",
+                e.code,
+                e.message
+            );
+        }
+        // Protocol-shape codes (whatever text accompanies them).
+        for code in [CODE_PARSE_ERROR, CODE_INVALID_REQUEST, CODE_INVALID_PARAMS] {
+            assert!(is_caller_misuse(code, "any text"));
+        }
+        // The metalink caller-document rejections.
+        assert!(is_caller_misuse(
+            CODE_GENERIC,
+            "taiji.metalink.unsupported_version: v3"
+        ));
+        assert!(is_caller_misuse(
+            CODE_GENERIC,
+            "taiji.metalink.parse_failed: document too large"
+        ));
+        // The core-raised option rejection carries the same frozen
+        // string code through session texts.
+        assert!(is_caller_misuse(
+            CODE_GENERIC,
+            "taiji.option.invalid: --bt-max-peers out of range"
+        ));
+
+        // ---- internal: execution failures / capability faces ----
+        for e in [
+            map_session_error(&SessionError::Failed {
+                message: "GID 2089c4b0 not found".into(),
+            }),
+            map_session_error(&SessionError::NotSupported {
+                method: "renameFile",
+            }),
+            map_session_error(&SessionError::SessionClosed),
+            RpcError::unexpected_reply("tellStatus", &"weird"),
+            RpcError {
+                code: CODE_GENERIC,
+                message: format!("{STR_CREATE_TORRENT_FAILED}: stat failed"),
+                unauthorized: false,
+            },
+            RpcError {
+                code: CODE_GENERIC,
+                message: format!("{STR_CREATE_TORRENT_TIMEOUT}: 600s"),
+                unauthorized: false,
+            },
+        ] {
+            assert!(
+                !is_caller_misuse(e.code, &e.message),
+                "must NOT grade as misuse: {}/{}",
+                e.code,
+                e.message
+            );
+        }
     }
 
     // ---- HTTP failure -> aria2 numeric codes: mapping-table

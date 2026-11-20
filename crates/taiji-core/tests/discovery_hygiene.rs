@@ -266,9 +266,14 @@ async fn tracker_arm_hygiene_rejects_bogon_and_dials_legit() {
 
     let root = CancellationToken::new();
     let cfg = EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
+        egress: None,
+        listen_interfaces: Vec::new(),
         peer_id: *b"-TJ0001-HYGIENEHYGN1",
         announce: format!("http://{tracker}/announce"),
         listen_port: 0,

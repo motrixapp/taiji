@@ -198,6 +198,41 @@ taiji --interface 10.0.0.5 <torrent|magnet> -d <dir>   # or an interface name: -
   announce face.
 - Unset = zero change (the OS default route).
 
+## Multi-Interface Listening (`--taiji-listen-interfaces`)
+
+```sh
+taiji --taiji-listen-interfaces "en0:6881,en1:6881" <torrent> -d <dir>
+taiji --taiji-listen-interfaces "10.0.0.5:6881,[2001:db8::a]:6882" <torrent> -d <dir>
+```
+
+- **Value**: a comma list of `device-or-IP:port` entries (the
+  `taiji.`-namespaced extension option — no aria2 counterpart; the
+  capability shape follows libtorrent's `listen_interfaces`). IPv6
+  literals use the `[v6]:port` bracket form. No suffix flags: trailing
+  characters after the port make the entry invalid. Invalid entries
+  each log one warning and are skipped — never a startup refusal.
+- **Effective faces** (ingress): each entry expands through the OS
+  interface table — a device name becomes one listen face per interface
+  address (multi-address devices covered), and a wildcard (`0.0.0.0`
+  or `::`) becomes one face per interface address of that family (the
+  multi-homed rule). Each face = one TCP listener + one UDP socket
+  (uTP accepts, DHT and UDP-tracker traffic ride per face). This is
+  how a dual-homed host (corporate LAN + VPN) accepts peers on both
+  interfaces at once.
+- **Interaction with `--interface`**: the egress bind's address family
+  narrows the face list (a v4 egress keeps only v4 endpoints, and vice
+  versa); endpoints of the other family are dropped with a warning.
+- **Degradation**: if interface enumeration fails or the expansion
+  comes out empty, the engine falls back to the single wildcard listen
+  with a warning. A face whose exact port cannot bind degrades that
+  face (warning; ports never move silently). Startup-only like
+  `--listen-port`; the RPC option surface has no key. Unset = the
+  standing single-listen behavior (zero change).
+- **Declared residuals**: NAT maps the single announce port (the first
+  v4 face's port — per-face mappings are future work), and local
+  service discovery (LSD) stays the session-global multicast face.
+  Design details: `docs/design/listen-interfaces.md`.
+
 ## Torrent Creation
 
 ```sh

@@ -310,8 +310,22 @@ fn v6_face_bind_addr(probed: Option<IpAddr>) -> IpAddr {
 /// traded for a globally routable outbound source (with `[::]` binding
 /// on mixed networks, UDP source selection can pick a ULA, making v6
 /// DHT effectively unusable).
+///
+/// `egress` (`--interface`, `EngineConfig::egress`): when set, the plan
+/// narrows to the matching family bound to that exact address and the
+/// other family's face is **not spawned** — DHT, UDP tracker and uTP
+/// all ride the demux socket, so this is what pins **all UDP egress**
+/// to the chosen interface (a wildcard face for the other family would
+/// leak egress outside it; the family narrowing is inherent to the
+/// single-value semantics, the same as aria2 binding a v4-only
+/// interface). A bind failure under an egress plan does NOT fall back
+/// to the wildcard address (that would silently un-pin the egress) —
+/// the face degrades as unavailable like any other bind failure. LSD
+/// (BEP14 multicast) keeps its own socket on the default route (a
+/// link-local multicast face, phase-1 residual).
 pub(super) async fn spawn_udp_face(
     port: u16,
+    egress: Option<IpAddr>,
     token: &CancellationToken,
 ) -> Vec<(DhtFamily, udp_demux::DemuxChannels, UdpDemuxHandle)> {
     let mut faces = Vec::new();
@@ -321,10 +335,7 @@ pub(super) async fn spawn_udp_face(
     // concurrently; latency = the fastest reachable target's RTT, see
     // security.rs).
     let v6_bind = v6_face_bind_addr(taiji_bt::dht::security::probe_source_ip(true).await);
-    for (family, bind) in [
-        (DhtFamily::V4, IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-        (DhtFamily::V6, v6_bind),
-    ] {
+    for (family, bind) in udp_face_plan(egress, v6_bind) {
         let config = DemuxConfig {
             port,
             ..DemuxConfig::default()
@@ -337,7 +348,7 @@ pub(super) async fn spawn_udp_face(
                 }
                 faces.push((family, channels, handle));
             }
-            Err(e) if family == DhtFamily::V6 => {
+            Err(e) if family == DhtFamily::V6 && egress.is_none() => {
                 if bind != IpAddr::V6(Ipv6Addr::UNSPECIFIED) {
                     info!(target: "taiji::core::engine", %e, bind = %bind, port,
                         "v6 udp face bind to probed address failed; falling back to [::]");
@@ -359,13 +370,43 @@ pub(super) async fn spawn_udp_face(
                         "v6 udp face unavailable (v4-only UDP: tracker/DHT)");
                 }
             }
+            Err(e) if family == DhtFamily::V6 => {
+                // Egress plan: no wildcard fallback (see the function
+                // doc) — degrade as unavailable.
+                info!(target: "taiji::core::engine", %e, %bind, port,
+                    "v6 udp face bind to the egress address failed (no wildcard fallback \
+                     while --interface pins egress; tracker/DHT v6 face unavailable)");
+            }
             Err(e) => {
-                warn!(target: "taiji::core::engine", %e, port,
+                warn!(target: "taiji::core::engine", %e, %bind, port,
                     "udp face bind failed (tracker UDP + DHT disabled)");
             }
         }
     }
+    if egress.is_some() {
+        info!(target: "taiji::core::engine", egress = ?egress, port,
+            "udp faces narrowed to the egress bind family (--interface: uTP/DHT/UDP-tracker \
+             egress pinned to the chosen address)");
+    }
     faces
+}
+
+/// UDP-face plan under an egress bind (a pure decision, table-tested):
+/// `None` → the status-quo pair (wildcard v4 + the probed v6 bind
+/// address); `Some(v4)` → only the v4 face bound to the address;
+/// `Some(v6)` → only the v6 face bound to the address (the probed GUA
+/// is superseded — the user's explicit address wins). The other family
+/// is intentionally absent (see [`spawn_udp_face`] for the leak
+/// rationale).
+fn udp_face_plan(egress: Option<IpAddr>, probed_v6: IpAddr) -> Vec<(DhtFamily, IpAddr)> {
+    match egress {
+        None => vec![
+            (DhtFamily::V4, IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            (DhtFamily::V6, probed_v6),
+        ],
+        Some(local @ IpAddr::V4(_)) => vec![(DhtFamily::V4, local)],
+        Some(local @ IpAddr::V6(_)) => vec![(DhtFamily::V6, local)],
+    }
 }
 
 /// v6 router fallback bootstrap constants (same shape as the v4
@@ -1221,6 +1262,40 @@ mod tests {
         );
     }
 
+    /// UDP-face plan under an egress bind (pure decision, the
+    /// `--interface` face): None = the status-quo pair (wildcard v4 +
+    /// the probed v6 bind); Some(v4) = only the v4 face bound to the
+    /// address; Some(v6) = only the v6 face bound to the address (the
+    /// user's explicit address supersedes the probe). The other family
+    /// is deliberately absent — a wildcard face there would leak egress
+    /// outside the chosen interface (spawn_udp_face doc rationale).
+    #[test]
+    fn udp_face_plan_under_egress_bind() {
+        let gua = IpAddr::V6(Ipv6Addr::new(0x240e, 0x0390, 0x1234, 0, 0, 0, 0, 0x1));
+        use DhtFamily::{V4, V6};
+        // None: the status-quo two-face pair, unchanged.
+        assert_eq!(
+            udp_face_plan(None, gua),
+            vec![(V4, IpAddr::V4(Ipv4Addr::UNSPECIFIED)), (V6, gua)],
+            "no egress bind = the standing wildcard v4 + probed v6 plan"
+        );
+        // A v4 egress: only the v4 face, bound to the exact address.
+        let v4_bind = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(
+            udp_face_plan(Some(v4_bind), gua),
+            vec![(V4, v4_bind)],
+            "a v4 --interface narrows to the v4 face on that address (no v6 leak face)"
+        );
+        // A v6 egress: only the v6 face, and the user's address wins
+        // over the probe.
+        let v6_bind = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0x7));
+        assert_eq!(
+            udp_face_plan(Some(v6_bind), gua),
+            vec![(V6, v6_bind)],
+            "a v6 --interface narrows to the v6 face on that address (probe superseded)"
+        );
+    }
+
     /// Criteria (integration surface): the v6 face binds the probed GUA
     /// (host with global v6) or falls back to `[::]` (no global v6 host,
     /// status quo); and in either bind shape, KRPC bytes sent from local
@@ -1241,7 +1316,7 @@ mod tests {
             return;
         }
         let token = CancellationToken::new();
-        let faces = spawn_udp_face(0, &token).await;
+        let faces = spawn_udp_face(0, None, &token).await;
         let Some((mut dht_rx, handle)) = faces
             .into_iter()
             .find_map(|(f, ch, h)| (f == DhtFamily::V6).then_some((ch.dht, h)))
@@ -1296,5 +1371,86 @@ mod tests {
                 .unwrap_or_else(|e| panic!("local_addr: {e}"))
         );
         assert_eq!(packet.data.as_ref(), payload);
+    }
+
+    /// Slow-path boundary sweep under the manual clock (SPEC G6; the
+    /// connection-admission timeout class): the DHT PeersFound dial
+    /// dedup windows are minute-scale behavior real-time tests cannot
+    /// cover — a dialed address is skipped for the 10min plain window,
+    /// a failed dial extends the window (30min with the
+    /// `BH_DIAL_BACKOFF` switch on, its default; the effective window is
+    /// read through the same knob so the boundary assertions hold under
+    /// either switch state), and a revived peer (successful handshake)
+    /// returns to the plain window. Driven through the exact call shape
+    /// the driver arms use (`admit(addr, clock.now())` /
+    /// `note_failed` / `note_connected`, run/dial.rs), every boundary
+    /// asserted exactly (1ns before = skip, at the window = admit) —
+    /// 40+ virtual minutes in microseconds of wall time.
+    #[test]
+    fn dial_dedup_window_boundaries_under_the_manual_clock() {
+        use crate::seam::ManualClock;
+        use std::time::Duration;
+
+        let addr: std::net::SocketAddr =
+            "203.0.113.7:6881".parse().unwrap_or_else(|e| panic!("{e}"));
+        let clock = ManualClock::new(std::time::Instant::now());
+        let mut dedup = DialDedup::new();
+
+        // Plain window: first admit, then skip until exactly 10min.
+        assert!(dedup.admit(addr, clock.now()), "first dial admits");
+        clock.advance(DHT_DIAL_DEDUP_WINDOW - Duration::from_nanos(1));
+        assert!(
+            !dedup.admit(addr, clock.now()),
+            "1ns before the 10min window: the re-supply is skipped"
+        );
+        clock.advance(Duration::from_nanos(1));
+        assert!(
+            dedup.admit(addr, clock.now()),
+            "at exactly the 10min window: the address is dialable again"
+        );
+
+        // Failed dial: the window extends. The effective failed window is
+        // knob-dependent; the boundary is asserted against whichever is
+        // active (the exactness claim is about the boundary, not the
+        // knob state).
+        let admitted_at = clock.now();
+        dedup.note_failed(&addr);
+        let failed_window = if taiji_io::knobs::dial_backoff_enabled() {
+            DHT_DIAL_DEDUP_FAILED_WINDOW
+        } else {
+            DHT_DIAL_DEDUP_WINDOW
+        };
+        if failed_window > DHT_DIAL_DEDUP_WINDOW {
+            clock.advance(DHT_DIAL_DEDUP_WINDOW);
+            assert!(
+                !dedup.admit(addr, clock.now()),
+                "at the plain 10min window a failed address stays skipped"
+            );
+        }
+        clock.advance(admitted_at + failed_window - Duration::from_nanos(1) - clock.now());
+        assert!(
+            !dedup.admit(addr, clock.now()),
+            "1ns before the failed window: still skipped"
+        );
+        clock.advance(Duration::from_nanos(1));
+        assert!(
+            dedup.admit(addr, clock.now()),
+            "at exactly the failed window: dialable again"
+        );
+
+        // Revival: a successful handshake clears the failed mark — the
+        // next cycle is on the plain window again.
+        dedup.note_failed(&addr);
+        dedup.note_connected(&addr);
+        clock.advance(DHT_DIAL_DEDUP_WINDOW - Duration::from_nanos(1));
+        assert!(
+            !dedup.admit(addr, clock.now()),
+            "revived peer still respects the plain window (1ns before)"
+        );
+        clock.advance(Duration::from_nanos(1));
+        assert!(
+            dedup.admit(addr, clock.now()),
+            "revived peer dialable at exactly the plain window"
+        );
     }
 }

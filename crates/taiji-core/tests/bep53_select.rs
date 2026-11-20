@@ -232,9 +232,13 @@ async fn bep53_select_file_downloads_only_selection() {
 
     let root = tokio_util::sync::CancellationToken::new();
     let cfg = EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         announce: format!("http://{tracker_addr}/announce"),
         listen_port: 0,
@@ -287,9 +291,13 @@ async fn bep53_select_file_downloads_only_selection() {
     let (engine2, join2) = DownloadEngine::spawn_controlled(
         {
             let mut c = EngineConfig {
+                // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+                clock: Default::default(),
+                rng: Default::default(),
                 initial_selection: None,
                 preset_progress: None, // default None, zero behavior delta
                 tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+                egress: None,
                 peer_id: *b"-TJ0001-ENGINEENGIN1",
                 // Verification-only engine: unreachable tracker (never
                 // connects to the seeder, keeping the request record clean
@@ -636,9 +644,13 @@ async fn bep53_select_file_v2_only_downloads_only_selection() {
 
     let root = tokio_util::sync::CancellationToken::new();
     let cfg = EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, zero behavior delta
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // default announce client options (aria2-equal values)
+        egress: None,
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         announce: format!("http://{tracker_addr}/announce"),
         listen_port: 0,

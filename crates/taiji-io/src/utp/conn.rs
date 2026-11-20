@@ -1304,6 +1304,31 @@ impl Driver {
     /// - the `closed` latch and `State::Closed` move together (both are set
     ///   only by `shutdown`).
     ///
+    /// Packet-buffer continuity (the sequence bookkeeping re-derived
+    /// wholesale — every buffer below is written by several arms: the
+    /// pump, the ack face, the retransmit scan, the reorder insert, the
+    /// delivery loop):
+    /// - `cur_window` == Σ wire sizes of the sent-not-yet-acked `outq`
+    ///   entries (BEP-29 §"overview" byte-counts the window; every send
+    ///   adds exactly its wire size, every ack/sack removal subtracts
+    ///   it — a drift means a path adjusted one side only, and the
+    ///   window gate would throttle or overshoot the real in-flight
+    ///   volume);
+    /// - consecutive `outq` entries advance seq by exactly one in the
+    ///   u16 wrapping space (each queued packet consumes one `seq_nr`;
+    ///   retransmits reuse entries in place — a gap means a queued
+    ///   packet skipped a number the peer will never cumulative-ack
+    ///   past);
+    /// - the reorder buffer is strictly ascending by seq with no
+    ///   duplicates (inserts go through the partition_point + dup
+    ///   check; a violation dup-counts bytes and breaks the sack
+    ///   mask);
+    /// - `reorder_bytes` == Σ reorder payload lengths and
+    ///   `pending_bytes` == Σ pending chunk lengths (the receive-side
+    ///   byte accounting that backs the advertised window and the
+    ///   per-connection caps — a drift silently mis-advertises the
+    ///   window or trips the caps early).
+    ///
     /// Checked at the top of every `run` iteration and at the end of `pump`
     /// (the sole FIN-queue site).
     #[track_caller]
@@ -1328,6 +1353,47 @@ impl Driver {
             self.state == State::Closed,
             "closed latch out of sync: state={:?}",
             self.state
+        );
+        // Packet-buffer continuity (see the doc above for the WHY).
+        let sent_unacked: u32 = self
+            .outq
+            .iter()
+            .filter(|e| e.sent_at.is_some())
+            .map(OutPkt::wire_size)
+            .sum();
+        debug_assert_eq!(
+            self.cur_window, sent_unacked,
+            "cur_window (BEP-29 byte-counted in-flight) != Σ sent-unacked outq wire sizes"
+        );
+        for (a, b) in self.outq.iter().zip(self.outq.iter().skip(1)) {
+            debug_assert_eq!(
+                b.seq,
+                a.seq.wrapping_add(1),
+                "outq seq chain broken around seq {}",
+                a.seq
+            );
+        }
+        for (a, b) in self.reorder.iter().zip(self.reorder.iter().skip(1)) {
+            debug_assert!(
+                packet::seq_gt(b.0, a.0),
+                "reorder buffer not strictly ascending: {} after {}",
+                b.0,
+                a.0
+            );
+        }
+        let reorder_sum: usize = self
+            .reorder
+            .iter()
+            .map(|(_, p)| p.as_ref().map_or(0, Bytes::len))
+            .sum();
+        debug_assert_eq!(
+            self.reorder_bytes, reorder_sum,
+            "reorder_bytes != Σ reorder payload lengths"
+        );
+        let pending_sum: usize = self.pending.iter().map(Bytes::len).sum();
+        debug_assert_eq!(
+            self.pending_bytes, pending_sum,
+            "pending_bytes != Σ pending chunk lengths"
         );
     }
 }
@@ -1487,6 +1553,114 @@ mod phase_invariants {
         assert_eq!(*err_rx.borrow(), CloseState::Graceful);
         d.pump().await;
         assert!(out_rx.try_recv().is_err(), "a closed driver sends nothing");
+        d.assert_invariants();
+    }
+}
+
+#[cfg(test)]
+/// Mutation validation for the packet-buffer continuity checks (the
+/// anti-vacuity discipline: each check must be able to go red). Each
+/// test corrupts exactly one buffer encoding and asserts
+/// `assert_invariants` fires. The corruptions are chosen so the
+/// driver's Drop releases zero ledger bytes (the corrupted counters
+/// stay 0 / the planted content was never claimed from the process
+/// receive ledger) — the global ledger other tests read stays clean.
+mod buffer_invariant_mutations {
+    use super::*;
+
+    const PEER: SocketAddr = SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+        2000,
+    );
+    const RECV_ID: u16 = 0x1234;
+
+    /// A fresh initiator driver (SYN queued, unsent) over a live
+    /// channel set.
+    fn driver() -> Driver {
+        let cfg = UtpConfig::default();
+        let (_in_tx, in_rx) = mpsc::channel(cfg.inbound_channel);
+        let (_write_tx, write_rx) = mpsc::channel(cfg.write_queue_packets);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(16);
+        let (data_tx, _data_rx) = mpsc::channel(cfg.data_queue_packets);
+        let (err_tx, _err_rx) = watch::channel(CloseState::Open);
+        let (out_tx, _out_rx) = mpsc::channel(cfg.outbound_channel);
+        Driver::new(
+            cfg,
+            ConnSpec {
+                addr: PEER,
+                role: Role::Initiator {
+                    conn_id_recv: RECV_ID,
+                },
+            },
+            DriverChannels {
+                inbound: in_rx,
+                write: write_rx,
+                ctrl: ctrl_rx,
+                data: data_tx,
+                out: out_tx,
+                err: err_tx,
+            },
+            None,
+        )
+    }
+
+    /// cur_window drift (a path adjusted the window without a matching
+    /// send/ack) must go red.
+    #[test]
+    #[should_panic(expected = "cur_window")]
+    fn mutation_cur_window_drift_fires() {
+        let mut d = driver();
+        // SYN queued but unsent: the honest reading is 0.
+        d.cur_window = 42;
+        d.assert_invariants();
+    }
+
+    /// A gap in the outq seq chain must go red.
+    #[test]
+    #[should_panic(expected = "outq seq chain broken")]
+    fn mutation_outq_seq_chain_fires() {
+        let mut d = driver();
+        // The SYN holds seq 1; the next queued packet must consume
+        // seq 2, not 99.
+        d.outq.push_back(OutPkt {
+            seq: 99,
+            payload: Bytes::new(),
+            kind: Kind::Data,
+            sent_at: None,
+            transmissions: 0,
+            loss_retransmitted: false,
+        });
+        d.assert_invariants();
+    }
+
+    /// A non-ascending reorder buffer must go red.
+    #[test]
+    #[should_panic(expected = "reorder buffer not strictly ascending")]
+    fn mutation_reorder_order_fires() {
+        let mut d = driver();
+        // FIN placeholders carry no payload (reorder_bytes stays 0).
+        d.reorder.push_back((3, None));
+        d.reorder.push_back((2, None));
+        d.assert_invariants();
+    }
+
+    /// reorder_bytes drift vs the buffered content must go red.
+    #[test]
+    #[should_panic(expected = "reorder_bytes")]
+    fn mutation_reorder_bytes_drift_fires() {
+        let mut d = driver();
+        // Four buffered bytes, an accounting of zero.
+        d.reorder.push_back((5, Some(Bytes::from_static(b"abcd"))));
+        d.assert_invariants();
+    }
+
+    /// pending_bytes drift vs the queued chunks must go red.
+    #[test]
+    #[should_panic(expected = "pending_bytes")]
+    fn mutation_pending_bytes_drift_fires() {
+        let mut d = driver();
+        // A queued chunk the byte account never saw.
+        d.pending.push_back(Bytes::from_static(b"wxyz"));
         d.assert_invariants();
     }
 }

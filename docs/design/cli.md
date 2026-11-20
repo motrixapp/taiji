@@ -474,6 +474,20 @@ Option names are frozen: `--dir`/`--listen-port`/`--rpc-*` use
 aria2-compatible names. aria2 `--listen-port` accepts a port range and
 tries each; `taiji` takes a single value.
 
+`--interface` (aria2-compatible name, a single value = an IP literal or
+an interface/device name) is the egress bind, parsed once in `run`
+before any mode dispatch: HTTP(S) transports bind via
+`ClientConfig.local_address`, BT peer TCP dials via `EngineConfig.egress`
+(bind-before-connect), and the UDP demux face (uTP/DHT/UDP tracker) via
+the same engine field — the non-matching address family's UDP face is
+not spawned (no wildcard egress leak). A device name resolves through
+the OS interface table (if-addrs; IPv4 preferred); an unresolvable value
+warns once and runs unbound (aria2 hard-fails — a declared, gentler
+divergence). Startup-only; the conf key `interface` mirrors the raw
+value face. Narrow declared residual: the FTP transport, the magnet
+metadata phase, and the HTTP-tracker announce face stay on the default
+route.
+
 ### Exit codes
 
 Baseline shared by all modes, checked before mode dispatch: `2` = usage /

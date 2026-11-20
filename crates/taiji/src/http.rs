@@ -1510,6 +1510,7 @@ async fn open_session_for_metalink(
     dir: PathBuf,
     http_max_per_host: u32,
     summary_interval: u32,
+    interface: Option<std::net::IpAddr>,
 ) -> (
     std::sync::Arc<SessionHandle>,
     tokio::task::JoinHandle<()>,
@@ -1535,6 +1536,10 @@ async fn open_session_for_metalink(
             http_max_per_host,
             // Periodic task summary (direct CLI mapping; 0 = disabled).
             summary_interval,
+            // `--interface` (top-level flag; the same session-global stamp
+            // face as the single-URL form — every metalink subtask's HTTP
+            // transport binds before connect).
+            interface,
             ..Default::default()
         },
     };
@@ -1913,7 +1918,7 @@ fn remove_dot_segments(path: &str) -> String {
 /// interruption = 1; document-level failure (missing/unreadable/over the
 /// 16MiB cap/parse failure/zero usable entries) = 2.
 #[cfg(feature = "metalink")]
-async fn run_metalink(args: HttpArgs, path: PathBuf) -> i32 {
+async fn run_metalink(args: HttpArgs, path: PathBuf, interface: Option<std::net::IpAddr>) -> i32 {
     use taiji_rpc::metalink::{expand_add_uri_plans, parse};
 
     args.warn_deferred();
@@ -2025,6 +2030,9 @@ async fn run_metalink(args: HttpArgs, path: PathBuf) -> i32 {
         // Periodic task summary interval (direct CLI mapping; 0 =
         // disabled).
         args.summary_interval,
+        // `--interface` egress bind (the top-level flag, threaded from
+        // the main run).
+        interface,
     )
     .await;
 
@@ -2161,18 +2169,20 @@ pub(crate) async fn delegate_positional(
     summary_interval: u32,
     ca_certificate: Option<String>,
     load_cookies: Option<String>,
+    interface: Option<std::net::IpAddr>,
 ) -> i32 {
-    run(args_from_positional(
-        url,
-        dir,
-        summary_interval,
-        ca_certificate,
-        load_cookies,
-    ))
+    run(
+        args_from_positional(url, dir, summary_interval, ca_certificate, load_cookies),
+        interface,
+    )
     .await
 }
 
-pub async fn run(args: HttpArgs) -> i32 {
+/// `taiji http` pipeline. `interface` = the top-level `--interface`
+/// egress bind (parsed once in the main run; the flag sits on the
+/// top-level CLI face, so it must be threaded in here explicitly —
+/// pass it before the subcommand: `taiji --interface <NAME> http …`).
+pub async fn run(args: HttpArgs, interface: Option<std::net::IpAddr>) -> i32 {
     // Metalink form (`--metalink-file`): expand the document into tasks,
     // then wait for each task's terminal state — an independent flow
     // (multi-GID polling / no attach) sharing the lock and session
@@ -2184,7 +2194,7 @@ pub async fn run(args: HttpArgs) -> i32 {
                 "taiji http: --metalink-file and positional URLs are mutually exclusive");
             return 2;
         }
-        return run_metalink(args, path).await;
+        return run_metalink(args, path, interface).await;
     }
     if args.urls.is_empty() {
         error!(target: "taiji::cli", "taiji http: at least one URL is required");
@@ -2300,6 +2310,11 @@ pub async fn run(args: HttpArgs) -> i32 {
             // One-shot form: a task reaching an error terminal state has
             // its cookies cleared immediately.
             one_shot: true,
+            // `--interface` (top-level flag, parsed once in main run):
+            // the session global the actor stamps onto every HTTP task's
+            // runtime opts (ClientConfig.local_address — the transport
+            // binds before connect). None = unbound.
+            interface,
             // `--http-max-per-host` seeds the session HostCap
             // initialization (the attach form used to drop it silently —
             // without the addUri channel the value had no effect); addUri

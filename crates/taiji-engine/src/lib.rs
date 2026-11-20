@@ -255,11 +255,19 @@ mod config;
 mod dht;
 mod dispatch;
 mod faces;
+/// Built-in connection classes (local/tcp/utp): the libtorrent-aligned
+/// address/transport assignment table and the class budget arithmetic
+/// (consumed by the choke round, connection admission, and the
+/// per-class metrics gauge).
+mod peer_class;
 mod pipeline;
 mod progress;
 mod query;
 mod redial;
 mod run;
+/// Driver determinism seams: the injected clock and RNG handles
+/// (SPEC G6) — re-exported on the public facade below.
+mod seam;
 mod strategy;
 mod superseed;
 mod tracker;
@@ -324,7 +332,20 @@ mod tests;
 /// inline tests; the test bodies are kept verbatim).
 mod config_tests;
 #[cfg(test)]
+/// State-consistency invariant sweep (the per-round self-audit
+/// vehicle over the first-batch remotely-influenced structures; test
+/// builds only — the harness and the in-crate suites call it after
+/// their rounds, nothing of it exists in non-test compilation).
+mod invariant;
+#[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+/// Swarm simulation harness over the determinism seams (SPEC G6): the
+/// `fake_peer + setup_swarm` shape driving choke/dispatch rounds under
+/// a manual clock — the timing-regression layer (optimistic-unchoke
+/// rotation, endgame duplicate caps; module docs carry the scope and
+/// the performance budget).
+mod swarm_sim;
 
 // ---- Public facade (every existing `taiji_core::engine::*` path
 // resolves) ----
@@ -343,7 +364,11 @@ pub use config::{
 pub use dht::load_dht_restore_state;
 pub use progress::{EngineEnd, Progress};
 pub use query::{EnginePeerSnapshot, EngineStatusSnapshot};
+// Determinism seams (SPEC G6): the injected clock/RNG handles and the
+// manual clock driver — the simulation harness constructs engines
+// with these through EngineConfig's public fields.
 pub use run::DownloadEngine;
+pub use seam::{Clock, ManualClock, Rng};
 pub use transit::peer_connection_type_str;
 // Scheduling policy configuration face (the session mirror + RPC
 // params/receipts + the config_json payload).

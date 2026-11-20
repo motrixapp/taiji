@@ -167,12 +167,16 @@ enum ReadHandle {
 }
 
 impl ReadHandle {
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
+    fn read_at(&self, offset: u64, buf: &mut [u8], volatile: bool) -> Result<usize, StoreError> {
         let w: &dyn DiskWriter = match self {
             ReadHandle::Pooled(w) => w.as_ref(),
             ReadHandle::Temp(w) => w.as_ref(),
         };
-        w.read_at(offset, buf)
+        if volatile {
+            w.read_at_volatile(offset, buf)
+        } else {
+            w.read_at(offset, buf)
+        }
     }
 }
 
@@ -387,7 +391,7 @@ impl TorrentReader {
                 // stay sparse zeros (download-time semantics unchanged);
                 // real IO errors propagate as-is.
                 let handle = self.acquire_read_handle(&f_path)?;
-                let n = handle.read_at(in_file, &mut buf[base..base + take])?;
+                let n = handle.read_at(in_file, &mut buf[base..base + take], false)?;
                 buf[base + n..base + take].fill(0);
             } else {
                 // Pad ranges zero-fill (BEP47 L87 serving duty; explicit
@@ -409,6 +413,30 @@ impl TorrentReader {
     /// of serving zero bytes), pad ranges zero-filled (BEP47 L87 serving
     /// duty). Returns the actually filled byte count.
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
+        self.read_at_inner(offset, buf, false)
+    }
+
+    /// Read-once variant of [`TorrentReader::read_at`] (hash
+    /// verification / recheck and other read-once-discard paths — the
+    /// seeding serve face below stays on the cached `read_at`): the
+    /// per-file preads dispatch to [`DiskWriter::read_at_volatile`],
+    /// which hints the page cache to evict the just-read range
+    /// (libtorrent `volatile_read` semantics; platform faces and the
+    /// counted non-fatal failure stance documented there). Byte results
+    /// and the error surface are identical to `read_at` — the hint only
+    /// affects cache residency, never the data.
+    pub fn read_at_volatile(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
+        self.read_at_inner(offset, buf, true)
+    }
+
+    /// Shared body of the two read faces (`volatile` picks the per-file
+    /// dispatch; semantics above).
+    fn read_at_inner(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+        volatile: bool,
+    ) -> Result<usize, StoreError> {
         let mut goff = offset;
         let mut filled = 0usize;
         while filled < buf.len() {
@@ -440,7 +468,7 @@ impl TorrentReader {
                 // O(requests) to O(active files)); unpooled = temporary
                 // open (existing behavior).
                 let handle = self.acquire_read_handle(&f_path)?;
-                let n = handle.read_at(in_file, &mut buf[filled..filled + take])?;
+                let n = handle.read_at(in_file, &mut buf[filled..filled + take], volatile)?;
                 buf[filled + n..filled + take].fill(0);
             }
             filled += take;
@@ -728,6 +756,14 @@ impl DiskWriter for TorrentWriter {
     /// handles, no pool; `&self`).
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
         TorrentReader::new(self.layout.clone(), self.root.clone()).read_at(offset, buf)
+    }
+
+    /// Read-once variant: same delegation (the per-file preads then
+    /// dispatch through [`TorrentReader::read_at_volatile`]'s volatile
+    /// face; the trait default's plain-read fallback would lose the
+    /// per-file hint split).
+    fn read_at_volatile(&self, offset: u64, buf: &mut [u8]) -> Result<usize, StoreError> {
+        TorrentReader::new(self.layout.clone(), self.root.clone()).read_at_volatile(offset, buf)
     }
 
     fn flush_os_buffers(&self) -> Result<(), StoreError> {
@@ -1068,6 +1104,54 @@ mod tests {
             .read_coalesced(&specs, 0, 0, None)
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(plain, got);
+    }
+
+    /// Volatile read face (`read_at_volatile` — recheck/read-then-hash
+    /// consumers): byte-identical to `read_at` across file boundaries
+    /// and pad spans (a cross-pad span covers three per-file dispatches
+    /// incl. the pad zero-fill), and each per-file pread dispatch
+    /// counts as a volatile read (process-registry delta, monotonic —
+    /// race-safe under parallel tests).
+    #[test]
+    fn reader_volatile_read_matches_cached_face() {
+        let (tmp, mut w) = setup("volatile-reader", 8);
+        w.allocate().unwrap_or_else(|e| panic!("{e}"));
+        let mut stream = Vec::new();
+        stream.extend((0..70000u32).map(|i| (i % 251) as u8));
+        stream.extend(std::iter::repeat_n(0u8, 11920));
+        stream.extend((0..30000u32).map(|i| (i % 253) as u8));
+        w.write_at(0, &stream).unwrap_or_else(|e| panic!("{e}"));
+
+        let layout = w.layout().clone();
+        let reader = TorrentReader::new(layout, tmp.0.clone());
+        // Span [69000, 89000): a's tail + the pad + b's head — the same
+        // cross-file/cross-pad shape as the write-side split test.
+        let (off, len) = (69000u64, 20000usize);
+        let mut cached = vec![0u8; len];
+        let n = reader
+            .read_at(off, &mut cached)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(n, len);
+
+        let disk = taiji_io::metrics::registry_default();
+        let before = disk.disk().snapshot().volatile_reads_total;
+        let mut got = vec![0u8; len];
+        let n = reader
+            .read_at_volatile(off, &mut got)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(n, len);
+        assert_eq!(
+            got, cached,
+            "the volatile face must be byte-identical to read_at"
+        );
+        let after = disk.disk().snapshot().volatile_reads_total;
+        // Two per-file preads (a tail + b head; the pad zero-fill is not
+        // a disk read) — delta >= 2 guards the plumbing without pinning
+        // parallel-test interleavings.
+        assert!(
+            after - before >= 2,
+            "per-file volatile dispatches count (delta {before} -> {after})"
+        );
     }
 
     /// allocate_with mode surface: prealloc fully allocates (files exist +

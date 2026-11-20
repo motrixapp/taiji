@@ -808,9 +808,13 @@ impl Drop for SinkWriteGuard {
 /// write_at` (the disk sink write path), taiji-http `PartFile`
 /// (prealloc `set_len` / file fsync), the core snapshot pipeline fsync
 /// seam `PartFileSync::sync`, taiji-http `Finalizer` (rename /
-/// directory fsync). All through the registry injection pattern —
-/// components bind the process default instance by default, tests
-/// inject independent instances).
+/// directory fsync), taiji-store `disk` (volatile-read requests and
+/// page-cache hint failures — that crate already depends on taiji-io
+/// for the winpath edge, so its `DiskWriter` boundary feeds the
+/// process default registry directly; the volatile-read counters are
+/// monotonic deltas in tests, no per-test injection). All through the
+/// registry injection pattern — components bind the process default
+/// instance by default, tests inject independent instances).
 ///
 /// Caliber notes (honest face):
 /// - `sink_inflight` semantics = **the concurrent in-flight write_at
@@ -827,6 +831,8 @@ pub struct DiskMetrics {
     sink_writes_total: Counter,
     sink_writes_bytes_total: Counter,
     sink_inflight: Arc<AtomicU64>,
+    volatile_reads_total: Counter,
+    cache_advise_failures_total: Counter,
     finalize_file_fsync: Histogram,
     finalize_fsync_dir: Histogram,
     finalize_rename: Histogram,
@@ -845,6 +851,8 @@ impl DiskMetrics {
             sink_writes_total: Counter::default(),
             sink_writes_bytes_total: Counter::default(),
             sink_inflight: Arc::new(AtomicU64::new(0)),
+            volatile_reads_total: Counter::default(),
+            cache_advise_failures_total: Counter::default(),
             finalize_file_fsync: Histogram::new(DISK_FINALIZE_BUCKETS_SECONDS),
             finalize_fsync_dir: Histogram::new(DISK_FINALIZE_BUCKETS_SECONDS),
             finalize_rename: Histogram::new(DISK_FINALIZE_BUCKETS_SECONDS),
@@ -858,6 +866,29 @@ impl DiskMetrics {
     pub fn note_sink_write(&self, bytes: u64) {
         self.sink_writes_total.inc();
         self.sink_writes_bytes_total.add(bytes);
+    }
+
+    /// Read-once (volatile) positioned read count (feed point = the
+    /// taiji-store `DiskWriter::read_at_volatile` boundary — hash
+    /// verification/recheck and other read-once-discard paths; the unit
+    /// is the per-handle read call, mirroring the write-side
+    /// `sink_writes_total` caliber). Counted on every platform
+    /// including ones where the cache hint itself is a no-op — the
+    /// counter reports volatile read *requests*, not hint successes
+    /// (the hint failure face is
+    /// [`Self::note_cache_advise_failure`]).
+    pub fn note_volatile_read(&self) {
+        self.volatile_reads_total.inc();
+    }
+
+    /// Page-cache hint failures: `posix_fadvise(POSIX_FADV_DONTNEED)`
+    /// (Linux) / `fcntl(F_NOCACHE)` (macOS) returning an error on the
+    /// volatile read / no-cache faces. Deliberately counted, never
+    /// propagated — a failed hint degrades to plain cached IO (the
+    /// aria2 precedent: `openFileWithFlags` ignores its `__APPLE__`
+    /// F_NOCACHE failure, functionality unaffected).
+    pub fn note_cache_advise_failure(&self) {
+        self.cache_advise_failures_total.inc();
     }
 
     /// Enters an in-flight write (gauge +1; returns a guard whose drop
@@ -894,6 +925,8 @@ impl DiskMetrics {
             sink_writes_total: self.sink_writes_total.get(),
             sink_writes_bytes_total: self.sink_writes_bytes_total.get(),
             sink_inflight: self.sink_inflight.load(Ordering::Relaxed),
+            volatile_reads_total: self.volatile_reads_total.get(),
+            cache_advise_failures_total: self.cache_advise_failures_total.get(),
             finalize_file_fsync: self.finalize_file_fsync.snapshot(),
             finalize_fsync_dir: self.finalize_fsync_dir.snapshot(),
             finalize_rename: self.finalize_rename.snapshot(),
@@ -909,6 +942,8 @@ pub struct DiskMetricsSnapshot {
     pub sink_writes_total: u64,
     pub sink_writes_bytes_total: u64,
     pub sink_inflight: u64,
+    pub volatile_reads_total: u64,
+    pub cache_advise_failures_total: u64,
     pub finalize_file_fsync: HistogramSnapshot,
     pub finalize_fsync_dir: HistogramSnapshot,
     pub finalize_rename: HistogramSnapshot,
@@ -1444,6 +1479,17 @@ mod tests {
         );
         assert_eq!(s.prealloc_seconds.count, 1);
         assert_eq!(s.prealloc_seconds.buckets[2], 1, "40ms lands in le=0.05");
+
+        // Volatile-read faces: requests counted independently of hint
+        // outcomes; failures counted only at the failure feed point.
+        assert_eq!(s.volatile_reads_total, 0, "honest zero-value start");
+        assert_eq!(s.cache_advise_failures_total, 0);
+        m.note_volatile_read();
+        m.note_volatile_read();
+        m.note_cache_advise_failure();
+        let v = m.snapshot();
+        assert_eq!(v.volatile_reads_total, 2);
+        assert_eq!(v.cache_advise_failures_total, 1);
     }
 
     /// In-flight write guard: concurrent writes enter and their exits

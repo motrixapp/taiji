@@ -637,6 +637,7 @@ fn test_config(
         stats: None,
         // Existing chain cases carry no ban face (None = no gate).
         ip_guard: None,
+        egress: None,
         webseeding_enabled: true,
     }
 }

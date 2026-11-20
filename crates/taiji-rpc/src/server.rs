@@ -849,7 +849,9 @@ async fn http_jsonrpc(State(state): State<Arc<AppState>>, req: Request) -> Respo
         Err(_) => {
             // Parse failure → -32700 (HTTP 500, mirroring the
             // HttpServerBodyCommand.cc default branch; see error.rs
-            // http_status).
+            // http_status). Unparseable body = caller misuse; graded
+            // here (this path bypasses the dispatch counting seam).
+            state.session.metrics().note_rpc_error(true);
             let resp = parse_error_response();
             let outcome = crate::dispatch::RpcOutcome {
                 code: resp.code,
@@ -1254,10 +1256,18 @@ async fn ws_handle_text(ws: &mut WebSocket, state: &AppState, ip: IpAddr, text: 
     // app-layer check catches configuration drift and exactly-over
     // boundary messages.
     let reply = if text.len() > state.max_request_size {
+        // Misuse-graded like the HTTP parse arm (over-limit drop =
+        // caller-side shape violation; bypasses process_call).
+        state.session.metrics().note_rpc_error(true);
         parse_error_response().encode()
     } else {
         match serde_json::from_str::<serde_json::Value>(text) {
-            Err(_) => parse_error_response().encode(),
+            Err(_) => {
+                // Unparseable WS body = caller misuse (same grading as
+                // the HTTP parse arm).
+                state.session.metrics().note_rpc_error(true);
+                parse_error_response().encode()
+            }
             Ok(v) => {
                 let outcome = handle_payload(state, &v, Some(ip)).await;
                 // Hardening: the unauthorized delay is consumed like the

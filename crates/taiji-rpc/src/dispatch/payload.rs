@@ -83,9 +83,12 @@ pub(crate) async fn handle_payload(st: &AppState, v: &Value, ip: Option<IpAddr>)
         Value::Array(items) => {
             // Item cap: reject the whole batch (a single error object,
             // not an array) — before per-item processing, to preclude
-            // memory amplification.
+            // memory amplification. The rejection is caller misuse by
+            // construction (a documented cap), so it is graded here at
+            // the arm (these paths bypass process_call).
             if items.len() > MAX_BATCH_ITEMS {
                 let resp = too_many_items(Value::Null);
+                st.session.metrics().note_rpc_error(true);
                 return RpcOutcome {
                     code: resp.code,
                     unauthorized: false,
@@ -95,13 +98,14 @@ pub(crate) async fn handle_payload(st: &AppState, v: &Value, ip: Option<IpAddr>)
             // Request-level total subcall preflight — over-cap rejects
             // the whole batch (same shape as the item cap: before
             // per-item execution, precluding 10⁶-subcall
-            // amplification).
+            // amplification); misuse-graded like the item cap.
             let total_subcalls: usize = items.iter().map(item_subcall_count).sum();
             if total_subcalls > MAX_REQUEST_SUBCALLS {
                 let resp = RpcResponse::error(
                     &RpcError::subcall_budget_exceeded(total_subcalls, MAX_REQUEST_SUBCALLS),
                     Value::Null,
                 );
+                st.session.metrics().note_rpc_error(true);
                 return RpcOutcome {
                     code: resp.code,
                     unauthorized: false,
@@ -131,11 +135,14 @@ pub(crate) async fn handle_payload(st: &AppState, v: &Value, ip: Option<IpAddr>)
         }
         _ => {
             // Valid JSON but neither object nor array -> Invalid
-            // Request (HttpServerBodyCommand.cc).
+            // Request (HttpServerBodyCommand.cc). Protocol-shape
+            // rejection = caller misuse; graded here (bypasses
+            // process_call).
             let resp = match parse_request(v) {
                 ParsedCall::ProtocolError(resp) => resp,
                 ParsedCall::Request(_) => unreachable!("scalar cannot parse as request"),
             };
+            st.session.metrics().note_rpc_error(true);
             RpcOutcome {
                 code: resp.code,
                 unauthorized: false,
@@ -150,6 +157,12 @@ pub(crate) async fn single(st: &AppState, v: &Value, ip: Option<IpAddr>) -> RpcR
         ParsedCall::Request(req) => {
             process_call(st, &req.method, req.params, req.id, false, ip).await
         }
-        ParsedCall::ProtocolError(resp) => resp,
+        // Malformed request object (missing id / non-string method /
+        // non-array params) — protocol-shape rejection = caller misuse;
+        // graded here (bypasses process_call).
+        ParsedCall::ProtocolError(resp) => {
+            st.session.metrics().note_rpc_error(true);
+            resp
+        }
     }
 }

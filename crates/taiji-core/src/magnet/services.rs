@@ -73,13 +73,29 @@ impl MagnetServices {
         Self::with_dns(persist, taiji_io::dns::SharedDns::shared_default())
     }
 
+    /// Determinism-seam construction (SPEC G6): the NAT binding owner
+    /// draws from the injected RNG (default = OS entropy, zero change).
+    pub fn with_rng(persist: Option<PersistHandle>, rng: crate::engine::Rng) -> Self {
+        Self::with_dns_and_rng(persist, taiji_io::dns::SharedDns::shared_default(), rng)
+    }
+
     /// Reuse one resolver across metadata tracker and DHT discovery.
     /// Embedders can supply a service with their own resolution policy.
     pub fn with_dns(persist: Option<PersistHandle>, dns: Arc<taiji_io::dns::SharedDns>) -> Self {
+        Self::with_dns_and_rng(persist, dns, crate::engine::Rng::default())
+    }
+
+    /// Full-construction form of [`Self::with_dns`] with the randomness
+    /// seam injected (the binding owner's byte source).
+    pub fn with_dns_and_rng(
+        persist: Option<PersistHandle>,
+        dns: Arc<taiji_io::dns::SharedDns>,
+        rng: crate::engine::Rng,
+    ) -> Self {
         Self {
             runtime: tokio::sync::Mutex::new(None),
             persist,
-            binding: crate::nat::PeerNetworkBinding::new(rand::random()),
+            binding: crate::nat::PeerNetworkBinding::new(rng.next_u64()),
             sequence: AtomicU64::new(1),
             cache: Mutex::new(Vec::new()),
             dns,

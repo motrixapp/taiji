@@ -501,6 +501,25 @@ pub struct GlobalOptions {
     /// reasons live in the table row notes). Consumed by each no-op row's
     /// echo projection (single point, [`global_option_echo`]).
     pub unwired_option_values: BTreeMap<String, String>,
+    /// `--interface` (wired; aria2-compatible name — the reference
+    /// `OptionHandlerFactory.cc` `PREF_INTERFACE`; a single value: an IP
+    /// literal or an interface/device name, resolved to one address by
+    /// the CLI parse point). The egress bind of the session: HTTP tasks
+    /// stamp it onto their runtime opts at every creation site
+    /// ([`HttpTaskOpts::with_session_interface`] ->
+    /// `ClientConfig.local_address`), and BT engines receive it at
+    /// activation (`EngineConfig.egress`: the TCP peer dial binds it
+    /// before connect; the UDP demux — uTP/DHT/UDP-tracker — binds it
+    /// instead of the unspecified address). **Startup-only option**:
+    /// changeGlobalOption does not accept it (the RPC/session option
+    /// face has no `interface` key; takes effect on restart, same rule
+    /// as listen-port). `None` = unbound, zero change. Declared narrow
+    /// residual (still unbound): the FTP transport (the control/data
+    /// channels are dialed inside the FTP client stack, no bind seam),
+    /// the magnet metadata/discovery phase (its own sockets; the
+    /// upgraded payload engine honors the bind), and the HTTP-tracker
+    /// announce face (taiji-bt, frozen).
+    pub interface: Option<std::net::IpAddr>,
 }
 
 impl Default for GlobalOptions {
@@ -599,6 +618,9 @@ impl Default for GlobalOptions {
             // The no-op value face defaults to an empty map (a missing key
             // = unset = the empty-string echo).
             unwired_option_values: BTreeMap::new(),
+            // `--interface` default unset (None = egress unbound, the
+            // status-quo default route).
+            interface: None,
         }
     }
 }

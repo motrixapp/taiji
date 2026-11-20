@@ -47,6 +47,7 @@
 //! | `taiji_torrent_bytes_total{direction}` | engine 1s tick delta bridge + terminal flush |
 //! | `taiji_peer_supply_bytes_total{transport}` | same bridge, split by transport (tcp|utp) |
 //! | `taiji_peer_connections{...}` / `_choked` | engine 1s tick (peer_meta/choke mirror) |
+//! | `taiji_peers_by_class{class}` | engine 1s tick (peer_class classify, address-wins) |
 //! | `taiji_peer_bans_total` | engine `BanBook::enact` (ban enforcement) |
 //! | `taiji_redial_attempts_total` / `_connected_total` | redial arm (dial / handshake ok) |
 //! | `taiji_redial_pool_size` | engine 1s gauge tick |
@@ -77,6 +78,7 @@
 //! | `taiji_rpc_conn_rejected_total{scope}` | rpc transport guard (conn gate) |
 //! | `taiji_rpc_auth_fail_total` | rpc transport guard (auth failure) |
 //! | `taiji_dns_*` | taiji-io shared resolver (io registry seam) |
+//! | `taiji_disk_volatile_reads_total` / `taiji_disk_cache_advise_failures_total` | store `DiskWriter::read_at_volatile` boundary (io registry disk family seam) |
 //!
 //! Value-range narrowing (honest terms; the ranges below are revised
 //! alongside the observation faces):
@@ -254,6 +256,11 @@ pub struct EngineGauges {
     /// sink increments, pipeline batch-ack decrements - the "handed to
     /// the pipeline, not yet confirmed" watermark; feeds no decisions).
     block_inflight: AtomicU64,
+    /// Per-class connection counts (local/tcp/utp; one class per
+    /// connection, the address dimension wins — see `peer_class`).
+    peers_local: AtomicU64,
+    peers_tcp: AtomicU64,
+    peers_utp: AtomicU64,
 }
 
 impl EngineGauges {
@@ -310,6 +317,15 @@ impl EngineGauges {
     /// Pre-registered in-flight block counter (1s tick, summed over all faces, SET).
     pub(crate) fn set_block_inflight(&self, inflight: u64) {
         self.block_inflight.store(inflight, Ordering::Relaxed);
+    }
+
+    /// Per-class connection counts (1s tick, summed over faces, SET; an
+    /// observation face — counts regardless of the `BH_PEER_CLASS`
+    /// behavior switch).
+    pub(crate) fn set_peers_by_class(&self, local: u64, tcp: u64, utp: u64) {
+        self.peers_local.store(local, Ordering::Relaxed);
+        self.peers_tcp.store(tcp, Ordering::Relaxed);
+        self.peers_utp.store(utp, Ordering::Relaxed);
     }
 
     fn conn_tcp_in(&self) -> u64 {
@@ -372,6 +388,18 @@ impl EngineGauges {
     fn block_inflight(&self) -> u64 {
         self.block_inflight.load(Ordering::Relaxed)
     }
+
+    fn peers_local(&self) -> u64 {
+        self.peers_local.load(Ordering::Relaxed)
+    }
+
+    fn peers_tcp(&self) -> u64 {
+        self.peers_tcp.load(Ordering::Relaxed)
+    }
+
+    fn peers_utp(&self) -> u64 {
+        self.peers_utp.load(Ordering::Relaxed)
+    }
 }
 
 /// Per-HTTP-task gauge slots (SET semantics; refreshed by the driver's
@@ -425,12 +453,28 @@ pub struct MetricsSnapshot {
     /// families sum to the same source as `bytes_down_total`).
     pub bytes_down_tcp_total: u64,
     pub bytes_down_utp_total: u64,
+    /// Failed JSON-RPC calls by semantic grade (the misuse/internal
+    /// distinction; rendered as `taiji_rpc_errors_total{grade="misuse"
+    /// |"internal"}` — misuse = rejected by the RPC layer's own input
+    /// validation, a client bug; internal = the method failed inside
+    /// the session/engine. Labels/statistics only: no error-type
+    /// restructuring).
+    pub rpc_error_misuse_total: u64,
+    pub rpc_error_internal_total: u64,
     /// Connection gauges (sum of engine slots).
     pub conn_tcp_in: u64,
     pub conn_tcp_out: u64,
     pub conn_utp_in: u64,
     pub conn_utp_out: u64,
     pub conn_choked: u64,
+    /// Per-class connection counts (sum of engine slots; one class per
+    /// connection — the address dimension wins over transport, a local
+    /// uTP peer counts as local; the `taiji_peers_by_class{class}` label
+    /// range local|tcp|utp is fixed, no host/gid labels). An observation
+    /// face: counts regardless of the `BH_PEER_CLASS` behavior switch.
+    pub peers_by_class_local: u64,
+    pub peers_by_class_tcp: u64,
+    pub peers_by_class_utp: u64,
     /// Ban enforcement total (BanBook::enact).
     pub peer_bans_total: u64,
     /// Redial dial attempts (spawn point of the redial scan arm).
@@ -671,6 +715,12 @@ pub struct MetricsSnapshot {
     pub disk_sink_writes_total: u64,
     pub disk_sink_writes_bytes_total: u64,
     pub disk_sink_inflight: u64,
+    /// Read-once (volatile) positioned reads at the store `DiskWriter`
+    /// boundary (recheck / read-then-hash / checksum verification
+    /// prefetch; counted on every platform, hint or not) and the
+    /// fadvise/F_NOCACHE hint failures (counted, never fatal).
+    pub disk_volatile_reads_total: u64,
+    pub disk_cache_advise_failures_total: u64,
     /// Finalize histogram, three ops (file_fsync/fsync_dir/rename;
     /// non-cumulative bucket counts + count + microseconds, indices align
     /// with [`DISK_FINALIZE_BUCKETS_SECONDS`]).
@@ -711,11 +761,16 @@ impl Default for MetricsSnapshot {
             bytes_up_total: 0,
             bytes_down_tcp_total: 0,
             bytes_down_utp_total: 0,
+            rpc_error_misuse_total: 0,
+            rpc_error_internal_total: 0,
             conn_tcp_in: 0,
             conn_tcp_out: 0,
             conn_utp_in: 0,
             conn_utp_out: 0,
             conn_choked: 0,
+            peers_by_class_local: 0,
+            peers_by_class_tcp: 0,
+            peers_by_class_utp: 0,
             peer_bans_total: 0,
             redial_attempts_total: 0,
             redial_connected_total: 0,
@@ -844,6 +899,8 @@ impl Default for MetricsSnapshot {
             disk_sink_writes_total: 0,
             disk_sink_writes_bytes_total: 0,
             disk_sink_inflight: 0,
+            disk_volatile_reads_total: 0,
+            disk_cache_advise_failures_total: 0,
             disk_finalize_file_fsync_buckets: vec![0; DISK_FINALIZE_BUCKETS_SECONDS.len()],
             disk_finalize_file_fsync_count: 0,
             disk_finalize_file_fsync_sum_us: 0,
@@ -1076,6 +1133,18 @@ pub struct SessionMetrics {
     rpc_conn_rejected_total: AtomicU64,
     rpc_conn_rejected_per_ip: AtomicU64,
     rpc_auth_fail_total: AtomicU64,
+    /// Failed JSON-RPC calls by semantic grade (the misuse/internal
+    /// distinction, labels only): misuse = the call was rejected by
+    /// the RPC layer's own input validation (malformed protocol shape,
+    /// parameter decode, closed value domains, caps, unknown method,
+    /// bad credentials) — a client bug; internal = the method reached
+    /// execution and failed inside the session/engine — triage treats
+    /// those as ours. Rendered as `taiji_rpc_errors_total{grade}`;
+    /// counted at the single dispatch seam (taiji-rpc process_call +
+    /// the payload-level protocol rejections), no error-type
+    /// restructuring anywhere.
+    rpc_error_misuse_total: AtomicU64,
+    rpc_error_internal_total: AtomicU64,
     /// HTTP steal grants (single decision point; the driver feeds
     /// increments polled from runtime stats, the `stolen_total` counter).
     http_stolen_total: AtomicU64,
@@ -1221,6 +1290,8 @@ impl SessionMetrics {
             rpc_conn_rejected_total: AtomicU64::new(0),
             rpc_conn_rejected_per_ip: AtomicU64::new(0),
             rpc_auth_fail_total: AtomicU64::new(0),
+            rpc_error_misuse_total: AtomicU64::new(0),
+            rpc_error_internal_total: AtomicU64::new(0),
             http_stolen_total: AtomicU64::new(0),
             engine_gauges: Mutex::new(Vec::new()),
             http_task_gauges: Mutex::new(Vec::new()),
@@ -1871,6 +1942,58 @@ impl SessionMetrics {
         self.rpc_auth_fail_total.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One failed JSON-RPC call by semantic grade (see the
+    /// `rpc_error_*_total` field docs; the counting seam is taiji-rpc's
+    /// dispatch — every failing call passes it exactly once, batch and
+    /// multicall sub-calls included).
+    pub fn note_rpc_error(&self, misuse: bool) {
+        if misuse {
+            self.rpc_error_misuse_total.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.rpc_error_internal_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// One-line compact counter snapshot for the CLI panic report (the
+    /// triage package: a pasted panic then carries the key session
+    /// counters plus the live engine-gauge sums — connections, DHT
+    /// table size). Fixed key order, one allocation, made only at
+    /// panic time (the hook stays allocation-light: this is the single
+    /// formatting point). The key set is frozen: triage greps it.
+    pub fn panic_counter_line(&self) -> String {
+        let (mut conns_tcp, mut conns_utp, mut dht_nodes) = (0u64, 0u64, 0u64);
+        // Engine gauge sums (the same retain+upgrade loop snapshot()
+        // uses; dead Weak slots die with their engines).
+        if let Ok(mut table) = self.engine_gauges.lock() {
+            table.retain(|w| w.upgrade().is_some());
+            for w in table.iter() {
+                if let Some(g) = w.upgrade() {
+                    conns_tcp += g.conn_tcp_in() + g.conn_tcp_out();
+                    conns_utp += g.conn_utp_in() + g.conn_utp_out();
+                    dht_nodes += g.dht_nodes_v4() + g.dht_nodes_v6();
+                }
+            }
+        }
+        format!(
+            "uptime_s={} bytes_down={} bytes_up={} torrents_completed={} \
+             blocks_verified={} peer_bans={} utp_recv={} utp_drop={} \
+             rpc_auth_fail={} conns_tcp={} conns_utp={} dht_nodes={}",
+            self.started.elapsed().as_secs(),
+            self.bytes_down_total.load(Ordering::Relaxed),
+            self.bytes_up_total.load(Ordering::Relaxed),
+            self.torrent_completed_total.load(Ordering::Relaxed),
+            self.blocks_verified_total.load(Ordering::Relaxed),
+            self.peer_bans_total.load(Ordering::Relaxed),
+            self.utp_recv_total.load(Ordering::Relaxed),
+            self.utp_drop_total.load(Ordering::Relaxed),
+            self.rpc_auth_fail_total.load(Ordering::Relaxed),
+            conns_tcp,
+            conns_utp,
+            dht_nodes,
+        )
+    }
+
     /// Rendering input snapshot (the rpc `/metrics` read entry; live
     /// engine slots summed + all counters).
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -2002,6 +2125,8 @@ impl SessionMetrics {
         snap.rpc_conn_rejected_total_scope_per_ip =
             self.rpc_conn_rejected_per_ip.load(Ordering::Relaxed);
         snap.rpc_auth_fail_total = self.rpc_auth_fail_total.load(Ordering::Relaxed);
+        snap.rpc_error_misuse_total = self.rpc_error_misuse_total.load(Ordering::Relaxed);
+        snap.rpc_error_internal_total = self.rpc_error_internal_total.load(Ordering::Relaxed);
         // io registry aggregation seam (DNS family + HTTP transport
         // family; multiple atomics, non-consistent snapshot - see the
         // module and field docs).
@@ -2068,6 +2193,8 @@ impl SessionMetrics {
         snap.disk_sink_writes_total = disk.sink_writes_total;
         snap.disk_sink_writes_bytes_total = disk.sink_writes_bytes_total;
         snap.disk_sink_inflight = disk.sink_inflight;
+        snap.disk_volatile_reads_total = disk.volatile_reads_total;
+        snap.disk_cache_advise_failures_total = disk.cache_advise_failures_total;
         snap.disk_finalize_file_fsync_buckets = disk.finalize_file_fsync.buckets.clone();
         snap.disk_finalize_file_fsync_count = disk.finalize_file_fsync.count;
         snap.disk_finalize_file_fsync_sum_us = disk.finalize_file_fsync.sum_us;
@@ -2097,6 +2224,9 @@ impl SessionMetrics {
                     snap.conn_utp_in += g.conn_utp_in();
                     snap.conn_utp_out += g.conn_utp_out();
                     snap.conn_choked += g.conn_choked();
+                    snap.peers_by_class_local += g.peers_local();
+                    snap.peers_by_class_tcp += g.peers_tcp();
+                    snap.peers_by_class_utp += g.peers_utp();
                     snap.redial_pool_size += g.redial_pool_size();
                     snap.dht_nodes_v4 += g.dht_nodes_v4();
                     snap.dht_nodes_v6 += g.dht_nodes_v6();
@@ -2177,6 +2307,64 @@ mod tests {
         m.add_utp_packets(0, 0);
         m.add_blocks_verified(0);
         assert_eq!(m.snapshot().bytes_down_total, 10);
+    }
+
+    /// RPC error semantic grades: the two counters are independent and
+    /// land in the snapshot (the misuse/internal distinction the
+    /// `taiji_rpc_errors_total{grade}` family renders).
+    #[test]
+    fn rpc_error_grades_land_in_snapshot() {
+        let m =
+            SessionMetrics::with_io_metrics(Arc::new(taiji_io::metrics::MetricsRegistry::new()));
+        let zero = m.snapshot();
+        assert_eq!(zero.rpc_error_misuse_total, 0);
+        assert_eq!(zero.rpc_error_internal_total, 0);
+        m.note_rpc_error(true);
+        m.note_rpc_error(true);
+        m.note_rpc_error(false);
+        let s = m.snapshot();
+        assert_eq!(s.rpc_error_misuse_total, 2);
+        assert_eq!(s.rpc_error_internal_total, 1);
+    }
+
+    /// The panic-report counter line: fixed key set (triage greps it),
+    /// values reflect the counters, engine-gauge sums default to zero
+    /// with no engine registered.
+    #[test]
+    fn panic_counter_line_has_frozen_keys_and_live_values() {
+        let m =
+            SessionMetrics::with_io_metrics(Arc::new(taiji_io::metrics::MetricsRegistry::new()));
+        let line = m.panic_counter_line();
+        for key in [
+            "uptime_s=",
+            "bytes_down=",
+            "bytes_up=",
+            "torrents_completed=",
+            "blocks_verified=",
+            "peer_bans=",
+            "utp_recv=",
+            "utp_drop=",
+            "rpc_auth_fail=",
+            "conns_tcp=",
+            "conns_utp=",
+            "dht_nodes=",
+        ] {
+            assert!(
+                line.contains(key),
+                "panic counter line misses {key}: {line}"
+            );
+        }
+        assert!(
+            line.contains("bytes_down=0 ") && line.contains("blocks_verified=0"),
+            "fresh instance reads zeros: {line}"
+        );
+        m.add_bytes(1234, 5);
+        m.add_blocks_verified(2);
+        let line = m.panic_counter_line();
+        assert!(
+            line.contains("bytes_down=1234") && line.contains("blocks_verified=2"),
+            "fed counters read back: {line}"
+        );
     }
 
     /// Instrumentation feed points: evicted-byte deltas, per-peer
@@ -2515,6 +2703,7 @@ mod tests {
         g1.set_conn_choked(1);
         g1.set_dht_nodes(100, 7);
         g1.set_hash_queue_depth(5);
+        g1.set_peers_by_class(2, 5, 1);
         g2.set_conn_tcp(10, 20);
         let s = m.snapshot();
         assert_eq!(s.conn_tcp_in, 13);
@@ -2523,6 +2712,12 @@ mod tests {
         assert_eq!(s.dht_nodes_v4, 100);
         assert_eq!(s.dht_nodes_v6, 7);
         assert_eq!(s.hashpool_queue_depth, 5);
+        // Per-class counts sum across live engine slots (the default
+        // snapshot's honest zeros are covered by the == default assert in
+        // `feed_points_land_in_snapshot`).
+        assert_eq!(s.peers_by_class_local, 2);
+        assert_eq!(s.peers_by_class_tcp, 5);
+        assert_eq!(s.peers_by_class_utp, 1);
         // Slot death (engine exit) -> totals fall back, no dead entries remain.
         drop(g2);
         let s = m.snapshot();
@@ -2740,9 +2935,10 @@ mod tests {
     /// io registry aggregation seam (disk/finalize family): inject an
     /// isolated registry -> feed points via the
     /// [`SessionMetrics::io_registry`] handle -> the snapshot pulls in
-    /// the `disk_*` fields (write count/bytes, in-flight gauge, finalize
-    /// three ops and prealloc histograms aligned with
-    /// [`DISK_FINALIZE_BUCKETS_SECONDS`]); unfed = honest zeros.
+    /// the `disk_*` fields (write count/bytes, in-flight gauge, the
+    /// volatile-read counters, finalize three ops and prealloc
+    /// histograms aligned with [`DISK_FINALIZE_BUCKETS_SECONDS`]);
+    /// unfed = honest zeros.
     #[test]
     fn io_registry_disk_metrics_aggregate_into_snapshot() {
         let registry = Arc::new(taiji_io::metrics::MetricsRegistry::new());
@@ -2750,6 +2946,8 @@ mod tests {
         let zero = m.snapshot();
         assert_eq!(zero.disk_sink_writes_total, 0, "honest zero-value baseline");
         assert_eq!(zero.disk_sink_inflight, 0);
+        assert_eq!(zero.disk_volatile_reads_total, 0);
+        assert_eq!(zero.disk_cache_advise_failures_total, 0);
         assert_eq!(zero.disk_finalize_rename_count, 0);
         assert_eq!(
             zero.disk_finalize_file_fsync_buckets.len(),
@@ -2763,6 +2961,9 @@ mod tests {
         let disk = registry.disk();
         disk.note_sink_write(4096);
         let guard = disk.enter_sink_write();
+        disk.note_volatile_read();
+        disk.note_volatile_read();
+        disk.note_cache_advise_failure();
         disk.observe_finalize(
             taiji_io::metrics::FinalizeOp::FileFsync,
             Duration::from_millis(2),
@@ -2780,6 +2981,8 @@ mod tests {
         let s = m.snapshot();
         assert_eq!(s.disk_sink_writes_total, 1);
         assert_eq!(s.disk_sink_writes_bytes_total, 4096);
+        assert_eq!(s.disk_volatile_reads_total, 2);
+        assert_eq!(s.disk_cache_advise_failures_total, 1);
         assert_eq!(
             s.disk_sink_inflight, 1,
             "in-flight sampled reading (guard not dropped)"

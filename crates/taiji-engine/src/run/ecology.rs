@@ -827,7 +827,7 @@ pub(super) fn drain_dial_candidates(
     token: &CancellationToken,
     actual_port: u16,
 ) {
-    let now = Instant::now();
+    let now = state.clock.now();
     // (0) Admission gate (the leecher target shape — the discovery
     // arms' per-batch gate is the same form, run::dial docs): closed =
     // skip the whole round, candidates wait in the table.

@@ -1039,6 +1039,277 @@ async fn ledbat_delay_p95_local_loop() {
         .expect_ok();
 }
 
+// ---- paced bottleneck: sharing/yield trend under a shared link ----
+
+/// One-direction PACED wire: a token-bucket bottleneck shared by every
+/// uTP connection on the link. The wire drains at most `tick_budget`
+/// bytes of payload per `tick` (FIFO across connections — the shared
+/// queue IS the bottleneck); `greedy_pct` of each tick's budget models
+/// a competing non-yielding flow occupying the same link (its packets
+/// traverse the same queue but are not ours to receive — the receiving
+/// demux drops unknown connections, so the share is deducted at the
+/// drain point; nothing else differs). This is the closest
+/// competing-TCP shape this in-process mock can represent: a true
+/// reactive TCP competitor would need an independent congestion
+/// controller reacting to the same kernel queue, which the channel
+/// wire does not have. Trend assertions only — no exact values.
+async fn paced_wire_forward(
+    mut rx: mpsc::Receiver<OutboundPacket>,
+    tx: mpsc::Sender<InboundPacket>,
+    from: SocketAddr,
+    tick_budget: usize,
+    tick: Duration,
+    greedy_pct: u32,
+) {
+    let mut queued: std::collections::VecDeque<bytes::Bytes> = std::collections::VecDeque::new();
+    let mut ticker = tokio::time::interval(tick);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await; // the first tick completes immediately
+    loop {
+        tokio::select! {
+            pkt = rx.recv() => {
+                match pkt {
+                    Some(p) => queued.push_back(p.data),
+                    None => break, // sender side gone: drain what is left
+                }
+            }
+            _ = ticker.tick() => {
+                // The uTP flows' share of the drain budget (the greedy
+                // competitor's occupancy is deducted up front).
+                let mut budget = tick_budget.saturating_sub(
+                    tick_budget.saturating_mul(greedy_pct as usize) / 100,
+                );
+                while let Some(front) = queued.front() {
+                    if front.len() > budget {
+                        break; // next tick (whole-packet drainage)
+                    }
+                    budget -= front.len();
+                    let Some(data) = queued.pop_front() else {
+                        break;
+                    };
+                    if tx
+                        .send(InboundPacket {
+                            from,
+                            data,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    // End of stream: flush the residual queue without pacing (the peers
+    // are closing; a paced tail would only delay teardown).
+    while let Some(data) = queued.pop_front() {
+        if tx.send(InboundPacket { from, data }).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Two listeners over one paced A->B bottleneck (the B->A return
+/// direction stays clean — acks are not the contended resource).
+async fn build_paced_loop(
+    tick_budget: usize,
+    tick: Duration,
+    greedy_pct: u32,
+) -> (UtpListenerHandle, UtpListenerHandle) {
+    let mut cfg = UtpConfig::default();
+    // Same relaxed LEDBAT target as build_loop (in-process scheduling
+    // noise vs BEP-29 CCONTROL_TARGET; the vector tests pin the
+    // production constant).
+    cfg.ledbat.target_us = 2_000_000;
+    let token = CancellationToken::new();
+    let (in_a, in_rx_a) = mpsc::channel(512);
+    let (out_a, out_rx_a) = mpsc::channel(512);
+    let (in_b, in_rx_b) = mpsc::channel(512);
+    let (out_b, out_rx_b) = mpsc::channel(512);
+    let ha = spawn_with_sink(cfg.clone(), in_rx_a, out_a, token.clone());
+    let hb = spawn_with_sink(cfg, in_rx_b, out_b, token.clone());
+    tokio::spawn(paced_wire_forward(
+        out_rx_a,
+        in_b,
+        PEER_A,
+        tick_budget,
+        tick,
+        greedy_pct,
+    ));
+    tokio::spawn(wire_forward(
+        out_rx_b,
+        in_a,
+        PEER_B,
+        WirePolicy {
+            loss_pct: 0,
+            dup_pct: 0,
+            reorder: false,
+        },
+        0xfeed_face,
+    ));
+    (ha, hb)
+}
+
+/// Sharing trend, two concurrent uTP flows through ONE shared paced
+/// bottleneck (the LEDBAT-coexistence regression): both flows make
+/// progress concurrently, neither starves (when the faster flow
+/// finishes, the slower one has already carried a substantial share of
+/// its payload), both deliver byte-identical payloads, and the
+/// completion times stay within the same order of magnitude (a fairish
+/// share, not a winner-takes-all link). Trend assertions only —
+/// magnitudes and directions, no exact values.
+#[tokio::test]
+async fn two_utp_flows_share_paced_bottleneck_without_starvation() {
+    const TICK_BUDGET: usize = 24 * 1024;
+    let (ha, mut hb) = build_paced_loop(TICK_BUDGET, Duration::from_millis(10), 0).await;
+    // Distinct sizes distinguish the two flows' payloads.
+    let payload_a: Vec<u8> = (0..256 * 1024).map(|i| (i * 7 + 3) as u8).collect();
+    let payload_b: Vec<u8> = (0..192 * 1024).map(|i| (i * 13 + 1) as u8).collect();
+    let a1 = ha.connect(PEER_B);
+    let a2 = ha.connect(PEER_B);
+    let b1 = tokio::time::timeout(Duration::from_secs(10), hb.accept())
+        .await
+        .expect_ok()
+        .expect_ok();
+    let b2 = tokio::time::timeout(Duration::from_secs(10), hb.accept())
+        .await
+        .expect_ok()
+        .expect_ok();
+
+    // Progress-observing readers: byte counters are sampled when the
+    // first flow completes (the no-starvation trend face).
+    let read_to_end_counting =
+        |stream: UtpStream, progress: std::sync::Arc<std::sync::atomic::AtomicUsize>| async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut stream = stream;
+            let mut got = Vec::new();
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        got.extend_from_slice(&chunk[..n]);
+                        progress.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+            got
+        };
+    let p1 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let p2 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reader1 = tokio::spawn(read_to_end_counting(b1, std::sync::Arc::clone(&p1)));
+    let reader2 = tokio::spawn(read_to_end_counting(b2, std::sync::Arc::clone(&p2)));
+
+    async fn write_all_and_close(mut stream: UtpStream, payload: Vec<u8>) {
+        stream.write_all(&payload).await.expect_ok();
+        stream.shutdown().await.expect_ok();
+    }
+    let started = Instant::now();
+    let w1 = tokio::spawn(write_all_and_close(a1, payload_a.clone()));
+    let w2 = tokio::spawn(write_all_and_close(a2, payload_b.clone()));
+    let (r1, r2) = tokio::join!(w1, w2);
+    r1.expect_ok();
+    r2.expect_ok();
+
+    let got1 = tokio::time::timeout(Duration::from_secs(60), reader1)
+        .await
+        .expect_ok()
+        .expect_ok();
+    let t1 = started.elapsed();
+    let prog2_at_t1 = p2.load(std::sync::atomic::Ordering::Relaxed);
+    let got2 = tokio::time::timeout(Duration::from_secs(60), reader2)
+        .await
+        .expect_ok()
+        .expect_ok();
+    let t2 = started.elapsed();
+
+    // Byte-identical delivery (either order — the accepts may swap).
+    let (len_a, len_b) = (payload_a.len(), payload_b.len());
+    let sorted_lens = [got1.len(), got2.len()];
+    assert!(
+        (sorted_lens[0] == len_a && sorted_lens[1] == len_b)
+            || (sorted_lens[0] == len_b && sorted_lens[1] == len_a),
+        "both payloads delivered byte-complete: got lengths {sorted_lens:?}, want {len_a}/{len_b}"
+    );
+    if got1.len() == len_a {
+        assert_eq!(got1, payload_a);
+        assert_eq!(got2, payload_b);
+    } else {
+        assert_eq!(got1, payload_b);
+        assert_eq!(got2, payload_a);
+    }
+    // No starvation: when the first flow finished, the second had
+    // already carried at least a quarter of its payload (concurrent
+    // progress, not a serialized link).
+    let slower_total = got2.len().max(1);
+    assert!(
+        prog2_at_t1 >= slower_total / 4,
+        "the surviving flow must hold a meaningful share when the first \
+         completes: {prog2_at_t1}/{slower_total} bytes"
+    );
+    // Fair-ish share: completion times within the same order of
+    // magnitude (winner-takes-all would serialize them at the full
+    // transfer time each).
+    let (fast, slow) = (t1.min(t2), t1.max(t2));
+    assert!(
+        slow < fast * 4,
+        "completion times within 4x (fair-ish share): {fast:?} vs {slow:?}"
+    );
+}
+
+/// LEDBAT yield trend under a greedy competitor on the shared
+/// bottleneck: with 60% of the drain budget consumed by a
+/// non-yielding background flow, the uTP transfer still completes (no
+/// starvation, windows stay alive) but its goodput is materially below
+/// the alone-on-the-wire baseline (the yield direction: the greedy flow
+/// keeps the larger share and the LEDBAT flow cedes it without
+/// collapsing). Trend assertions only — magnitudes and directions.
+#[tokio::test]
+async fn ledbat_flow_yields_but_survives_greedy_competitor() {
+    const TICK_BUDGET: usize = 32 * 1024;
+    const PAYLOAD: usize = 512 * 1024;
+    let run_once = |greedy_pct: u32| async move {
+        let (ha, mut hb) =
+            build_paced_loop(TICK_BUDGET, Duration::from_millis(10), greedy_pct).await;
+        let payload = vec![0xA5u8; PAYLOAD];
+        let mut a = ha.connect(PEER_B);
+        let mut b = tokio::time::timeout(Duration::from_secs(10), hb.accept())
+            .await
+            .expect_ok()
+            .expect_ok();
+        let started = Instant::now();
+        let writer = tokio::spawn(async move {
+            a.write_all(&payload).await.expect_ok();
+            a.shutdown().await.expect_ok();
+        });
+        let mut got = Vec::new();
+        tokio::time::timeout(Duration::from_secs(90), b.read_to_end(&mut got))
+            .await
+            .expect_ok()
+            .expect_ok();
+        let elapsed = started.elapsed();
+        tokio::time::timeout(Duration::from_secs(10), writer)
+            .await
+            .expect_ok()
+            .expect_ok();
+        assert_eq!(got.len(), PAYLOAD, "byte-complete delivery");
+        elapsed
+    };
+    let alone = run_once(0).await;
+    let yielded = run_once(60).await;
+    assert!(
+        yielded > alone + alone / 2,
+        "the greedy competitor must cost the LEDBAT flow a material goodput \
+         share (yield direction): alone {alone:?} vs yielded {yielded:?}"
+    );
+    assert!(
+        yielded < Duration::from_secs(30),
+        "no starvation: the yielded transfer must stay well inside the \
+         budget (LEDBAT cedes share, it does not collapse)"
+    );
+}
+
 // ---- Policy/stats surface ----
 
 /// Route-table observability: the entry is removed after the connection closes.

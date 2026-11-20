@@ -122,7 +122,9 @@ impl SessionActor {
                 // source, one value — the announce-side TrackerWiring.peer_id
                 // and the handshake-side DialCtx.peer_id consume the same
                 // field; assemble.rs wires the single source).
-                let peer_id = generate_peer_id(self.global.peer_id_prefix.as_bytes(), rand::random);
+                let prefix = self.global.peer_id_prefix.as_bytes();
+                let rng = &self.rng;
+                let peer_id = generate_peer_id(prefix, || rng.byte());
                 // Three-layer merge (the EngineConfig injection face):
                 // effective = per-torrent table (built-in announce-list ∪
                 // tracker edits via taiji.addTracker/removeTracker) ∪ the
@@ -168,7 +170,7 @@ impl SessionActor {
                 // singleton supervisor; None = both switches off — the
                 // existing nat: None shape is unchanged). Field-disjoint
                 // borrow, same discipline as self.global.
-                let network = crate::nat::PeerNetworkBinding::new(rand::random());
+                let network = crate::nat::PeerNetworkBinding::new(self.rng.next_u64());
                 let nat_engine = Some(
                     network.observe(
                         self.nat
@@ -329,6 +331,13 @@ impl SessionActor {
                 }
                 config.dht.engine.message_timeout =
                     std::time::Duration::from_secs(dht_message_timeout);
+                // Egress bind (`--interface`, session startup global):
+                // the engine's TCP peer dials and the UDP demux face
+                // (uTP/DHT/UDP-tracker) bind this address instead of
+                // the unspecified address; None = unpowered, zero
+                // change (the field doc declares the narrow residual —
+                // FTP/metadata-phase faces stay on the default route).
+                config.egress = self.global.interface;
                 config.initial_selection = selected_files.clone();
                 let (engine, join) = DownloadEngine::spawn_controlled(
                     config,
@@ -579,7 +588,7 @@ impl SessionActor {
                 let tiers = merge_global_trackers(&mj.tiers, &self.global.bt_tracker);
                 let (tracker_updates, tracker_receiver) =
                     tokio::sync::watch::channel(tiers.clone());
-                let network = crate::nat::PeerNetworkBinding::new(rand::random());
+                let network = crate::nat::PeerNetworkBinding::new(self.rng.next_u64());
                 let nat_engine = network.observe(
                     self.nat
                         .as_ref()
@@ -602,7 +611,10 @@ impl SessionActor {
                     // source and value — this config's single peer_id field
                     // serves both faces; the upgraded engine regenerates
                     // from the same option on the activation path).
-                    peer_id: generate_peer_id(self.global.peer_id_prefix.as_bytes(), rand::random),
+                    peer_id: {
+                        let rng = &self.rng;
+                        generate_peer_id(self.global.peer_id_prefix.as_bytes(), || rng.byte())
+                    },
                     options: mj.options.clone(),
                     // Metadata-phase lease faces: LSD lease as above; DHT
                     // lease = the dedicated metadata-phase engine (above).
@@ -674,6 +686,11 @@ impl SessionActor {
                     // points, live tasks read the latest at each dial — the
                     // push_all_ban_configs extension).
                     ip_guard: Some(self.meta_guard.clone()),
+                    // Egress bind of the upgraded engine (`--interface`;
+                    // the torrent activation path injects at the same
+                    // point — the metadata phase's own sockets stay on
+                    // the default route, declared residual).
+                    egress: self.global.interface,
                 };
                 // Controlled spawn — upgrade notification face (the upgraded
                 // engine handle returns to the session, followedBy served as
@@ -2672,8 +2689,12 @@ impl SessionActor {
             );
         }
         // Runtime option face: timeouts / credentials / proxy / UA / header
-        // / certificate faces.
-        let http_opts = http_task_runtime_options(&options, &http_task::HttpTaskOpts::default())?;
+        // / certificate faces. The base carries the session-global
+        // egress bind (`--interface`; see with_session_interface).
+        let http_opts = http_task_runtime_options(
+            &options,
+            &http_task::HttpTaskOpts::default().with_session_interface(self.global.interface),
+        )?;
         // `--out` sanitization: basename-only domain — path separators,
         // absolute paths, and parent-directory components escaping `--dir`
         // (the out-of-dir write red line) and option-injection shapes
@@ -3799,7 +3820,8 @@ impl SessionActor {
                 max_download_limit: 0,
                 max_upload_limit: 0,
                 hooks: Arc::new(self.global.hooks.clone()),
-                opts: http_task::HttpTaskOpts::default(),
+                opts: http_task::HttpTaskOpts::default()
+                    .with_session_interface(self.global.interface),
                 restore: Some(row),
                 mirror: None,
                 cookies: snap.cookies,
@@ -3870,7 +3892,8 @@ impl SessionActor {
                 max_download_limit: 0,
                 max_upload_limit: 0,
                 hooks,
-                opts: http_task::HttpTaskOpts::default(),
+                opts: http_task::HttpTaskOpts::default()
+                    .with_session_interface(self.global.interface),
                 restore: None,
                 mirror: None,
                 cookies: Vec::new(),

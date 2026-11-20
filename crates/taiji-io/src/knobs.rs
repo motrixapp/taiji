@@ -79,6 +79,9 @@
 //! | `BH_ENDGAME_PIECE_DEADLINE_SECS` | 30 | u64 (no trim), fail->30, clamp [0,600]; 0 = per-piece deadline off |
 //! | `BH_ENDGAME_TAIL_WINDOW` | 1 | u64 (no trim), fail->1, clamp [0,8]; 0 = tail window floor off; k>=1 = k x missing blocks |
 //! | `BH_ENDGAME_UNCHOKE_HOLDER` | on | exactly `"0"` = off (tail holder choke priority); else on |
+//! | `BH_PEER_CLASS` | on | exactly `"0"` = off (connection-class policy: local choke-slot exemption + class admission budgets); else on |
+//! | `BH_LOCAL_CONN_FACTOR` | 150 | u64 (no trim), fail->150, clamp [100,500] (%; local budget = ceil(cap x f/100)) |
+//! | `BH_UTP_MAX_PEERS` | single budget | usize after trim, fail/0->caller default (= the current single cap) |
 //!
 //! # Read-timing classes (zero-behavior-change invariant)
 //!
@@ -1495,6 +1498,75 @@ fn serve_pending_cap_of_raw(raw: Option<&str>) -> u64 {
         .clamp(32, 1024)
 }
 
+/// `BH_PEER_CLASS` (registry in the module docs): exactly `"0"` = off
+/// (the connection-class policy layer — local/LAN choke-slot exemption,
+/// the 1.5x local admission budget, the independent uTP admission budget
+/// — short-circuits to the exact pre-class behavior at both decision
+/// points); anything else (including unset) = on. The per-class gauge
+/// (`taiji_peers_by_class`) is an observation face and keeps counting
+/// with the switch off (the rollback seam covers behavior, not
+/// observability).
+///
+/// Read timing: **per-round / per-event** — read at the choke round
+/// (15s/10s), the preemptive INTERESTED edge, and each admission
+/// decision (inbound accept / redial); none are hot paths; not cached.
+pub fn peer_class_enabled() -> bool {
+    peer_class_enabled_of_raw(std::env::var("BH_PEER_CLASS").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested; same
+/// exactly-"0" convention as `BH_ENDGAME_UNCHOKE_HOLDER`).
+fn peer_class_enabled_of_raw(raw: Option<&str>) -> bool {
+    raw != Some("0")
+}
+
+/// `BH_LOCAL_CONN_FACTOR` (registry in the module docs): `u64` parse
+/// (no trim); parse failure/unset -> default 150 (percent — the local
+/// peer class' connection budget factor: LAN peers may fill up to
+/// `ceil(cap x factor / 100)` connections, the "local peers are allowed
+/// to exceed the normal connection limit by 50%" default, libtorrent
+/// `session_impl.cpp` `connection_limit_factor = 150`); effective value
+/// clamped to [100, 500] (100 = no headroom — the budget equals the
+/// regular cap; 500 = the runaway guard). Consumed only while
+/// `BH_PEER_CLASS` is on.
+///
+/// Read timing: **per-event** — read at each class-aware admission
+/// decision (inbound accept / redial); not cached.
+pub fn local_conn_factor() -> u64 {
+    local_conn_factor_of_raw(std::env::var("BH_LOCAL_CONN_FACTOR").ok().as_deref())
+}
+
+/// Pure parse function for the above (decision-table tested).
+fn local_conn_factor_of_raw(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(150)
+        .clamp(100, 500)
+}
+
+/// `BH_UTP_MAX_PEERS` (registry in the module docs): `usize` parse after
+/// trim; parse failure/0 -> default (the caller-supplied current single
+/// connection budget — the engine hard-cap reading; the uTP class
+/// therefore starts with a budget equal to the total cap, i.e. the
+/// independent channel never binds until tuned down: status quo, zero
+/// behavior change by default).
+///
+/// Read timing: **per-event** — read at each class-aware admission
+/// decision (inbound accept); not cached.
+pub fn utp_max_peers(default_max: usize) -> usize {
+    utp_max_peers_of_parts(
+        std::env::var("BH_UTP_MAX_PEERS").ok().as_deref(),
+        default_max,
+    )
+}
+
+/// Pure parse function for the above (decision-table tested; same
+/// parse-after-trim shape as `peer_max`).
+fn utp_max_peers_of_parts(raw: Option<&str>, default_max: usize) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v >= 1)
+        .unwrap_or(default_max)
+}
+
 /// Knob parse decision tables (table-driven; env is process-immutable —
 /// edition 2024 forbids unsafe and tests have no `set_var` — so the
 /// parse faces are driven via the `_of_raw` pure functions; the env read
@@ -2033,5 +2105,72 @@ mod tests {
             50 * 1024
         );
         assert_eq!(peer_request_speed_limit_of_parts(1, 50 * 1024), 1);
+    }
+
+    /// `BH_PEER_CLASS` parse table (the connection-class master switch):
+    /// unset = on (the class policies ship enabled — the defaults are the
+    /// libtorrent-aligned local/tcp/utp behavior); exactly `"0"` = off
+    /// (both decision points — choke-slot exemption and class admission
+    /// budgets — take the pre-class paths bit-for-bit); anything else
+    /// (including whitespace-padded zero, an unset-like non-arm) = on.
+    #[test]
+    fn peer_class_enabled_parse_table() {
+        // Unset = on (default).
+        assert!(peer_class_enabled_of_raw(None));
+        // Exactly "0" = off (the explicit rollback arm).
+        assert!(!peer_class_enabled_of_raw(Some("0")));
+        // Any other value = on (including "1", "off", empty — the
+        // exactly-"0" convention: only the exact fallback value counts).
+        assert!(peer_class_enabled_of_raw(Some("1")));
+        assert!(peer_class_enabled_of_raw(Some("off")));
+        assert!(peer_class_enabled_of_raw(Some("")));
+        assert!(peer_class_enabled_of_raw(Some(" 0")));
+    }
+
+    /// `BH_LOCAL_CONN_FACTOR` parse table: default/invalid -> 150 (the
+    /// libtorrent `connection_limit_factor = 150` default,
+    /// session_impl.cpp); legal values pass through after clamp to
+    /// [100, 500] (100 = no headroom; 500 = runaway guard).
+    #[test]
+    fn local_conn_factor_parse_table() {
+        // Default (unset) = 150 (the "exceed the normal connection limit
+        // by 50%" default).
+        assert_eq!(local_conn_factor_of_raw(None), 150);
+        // Invalid (non-numeric / negative sign / empty) = default.
+        assert_eq!(local_conn_factor_of_raw(Some("abc")), 150);
+        assert_eq!(local_conn_factor_of_raw(Some("-1")), 150);
+        assert_eq!(local_conn_factor_of_raw(Some("")), 150);
+        // Legal values pass through (explicit 150 = fallback arm; 100 =
+        // no local headroom).
+        assert_eq!(local_conn_factor_of_raw(Some("150")), 150);
+        assert_eq!(local_conn_factor_of_raw(Some("100")), 100);
+        assert_eq!(local_conn_factor_of_raw(Some("300")), 300);
+        // Clamped to [100, 500] (0/1/99 -> 100; 501/99999 -> 500).
+        assert_eq!(local_conn_factor_of_raw(Some("0")), 100);
+        assert_eq!(local_conn_factor_of_raw(Some("99")), 100);
+        assert_eq!(local_conn_factor_of_raw(Some("501")), 500);
+        assert_eq!(local_conn_factor_of_raw(Some("99999")), 500);
+    }
+
+    /// `BH_UTP_MAX_PEERS` decision table: default/invalid/0 -> the caller
+    /// default (= the current single connection budget reading; the
+    /// independent uTP channel therefore starts non-binding — status
+    /// quo); a legal value tunes the independent budget.
+    #[test]
+    fn utp_max_peers_of_parts_decision_table() {
+        const DEFAULT: usize = 120;
+        // Default (unset) = the current single budget (status quo arm).
+        assert_eq!(utp_max_peers_of_parts(None, DEFAULT), DEFAULT);
+        // Invalid/0 = default (0 treated as unset — an "unlimited" uTP
+        // budget is not expressible; the total cap still bounds uTP).
+        assert_eq!(utp_max_peers_of_parts(Some("abc"), DEFAULT), DEFAULT);
+        assert_eq!(utp_max_peers_of_parts(Some("0"), DEFAULT), DEFAULT);
+        assert_eq!(utp_max_peers_of_parts(Some(""), DEFAULT), DEFAULT);
+        assert_eq!(utp_max_peers_of_parts(Some("-1"), DEFAULT), DEFAULT);
+        // Legal value passes through (trim tolerated; same shape as
+        // `peer_max`).
+        assert_eq!(utp_max_peers_of_parts(Some("40"), DEFAULT), 40);
+        assert_eq!(utp_max_peers_of_parts(Some(" 40 "), DEFAULT), 40);
+        assert_eq!(utp_max_peers_of_parts(Some("1"), DEFAULT), 1);
     }
 }

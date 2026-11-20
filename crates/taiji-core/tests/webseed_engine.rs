@@ -184,9 +184,13 @@ async fn engine_downloads_from_webseed_only() {
 
     let root = tokio_util::sync::CancellationToken::new();
     let cfg = EngineConfig {
+        // Determinism seams: real clock / OS entropy defaults (zero behavior difference).
+        clock: Default::default(),
+        rng: Default::default(),
         initial_selection: None,
         preset_progress: None, // default None, no behavior change
         tracker_options: taiji_bt::tracker::TrackerOptions::default(), // announce client options at defaults (same values as aria2)
+        egress: None,
         peer_id: *b"-TJ0001-ENGINEENGIN1",
         // Empty announce = no tracker: the minimal isolation for
         // pure-webseed supply — zero BT peers is this acceptance's

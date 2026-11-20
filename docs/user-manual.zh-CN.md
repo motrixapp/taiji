@@ -138,6 +138,27 @@ taiji <torrent|magnet> -d <dir>
  模式下必须与 `--enable-rpc` 成对出现，否则启动报错（退出码 2）——
  静默忽略已被移除。
 
+## 出口绑定（`--interface`）
+
+```sh
+taiji --interface 10.0.0.5 <torrent|magnet> -d <dir>   # 也可填接口名：--interface en0
+```
+
+- **取值**：单个 IP 地址或接口/网卡名（aria2 语义）。接口名经系统接口表
+  解析（优先取该接口的 IPv4 地址）；无法解析的值记录一条警告后按未绑定
+  继续运行 —— 不会启动失败。
+- **生效面**：HTTP(S) 传输连接（`taiji http`、URL 位置参数、metalink 子
+  任务、RPC 任务、`--input-file` 批量等全部下载形态）、BT peer TCP 拨号，
+  以及共享 UDP 套接字（uTP + DHT + UDP tracker announce）—— 均在连接前
+  绑定所选地址，流量从选定接口出去（VPN/公司内网场景）。绑定 v4 地址时
+  UDP 收窄到 v4 面（通配 v6 面会让流量绕开所选接口）；绑定 v6 同理。
+- 仅启动时生效（同 `--listen-port`）：进程启动时应用；RPC 选项面无
+  `interface` 键。
+- **声明的窄差异**（仍走默认路由，启动时披露）：FTP 传输（控制/数据连接
+  在 FTP 客户端栈内部拨号）、magnet 元数据/发现阶段（升级后的正式引擎
+  遵守绑定）、HTTP tracker announce 面。
+- 不设置 = 零变化（系统默认路由）。
+
 ## 制作种子
 
 ```sh

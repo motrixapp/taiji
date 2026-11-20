@@ -29,7 +29,7 @@
     use crate::pipeline::DataFlushState;
     use crate::progress::{encode_v2_file_bits, restore_progress_bits};
     use crate::query::drain_peer_counters;
-    use crate::run::{PEER_CONNECTIONS_MAX, PEER_CONNECTIONS_TARGET, PeerStallRow, SEEDER_ROTATE_BATCH, SEEDER_ROTATE_IDLE_SECS, STALL_ACTION_PERIOD, STALL_DETECT_SECS, SlowChurnParams, StallValve, UTP_MUTE_AFTER, admission_verdict, admission_verdict_limits, rotation_pick, slow_churn_faces, stall_valve_advance, utp_mute_face};
+    use crate::run::{PEER_CONNECTIONS_MAX, PEER_CONNECTIONS_TARGET, PeerStallRow, SEEDER_ROTATE_BATCH, SEEDER_ROTATE_IDLE_SECS, STALL_ACTION_PERIOD, STALL_DETECT_SECS, SlowChurnParams, StallValve, UTP_MUTE_AFTER, admission_verdict, admission_verdict_limits, class_admission_verdict, rotation_pick, slow_churn_faces, stall_valve_advance, utp_mute_face};
     use crate::strategy::{PieceSelectionStrategy, Playhead, RarestFirstStrategy, SelectionCtx, StreamGeo, StreamPlan, StreamingStrategy};
     use crate::tracker::{TrackerMirror, epoch_secs};
     use crate::bitmap::PieceBitmap;
@@ -661,7 +661,11 @@
             }
 
             let mut rng = XorShift(0x2545F4914F6CDD1Du64);
-            leecher_choke_round(&mut face, &mut rng, None);  // static arm (default-off: no behavior change)
+            leecher_choke_round(&mut face, &mut rng, None, true);  // static arm (default-off: no behavior change; class arm on = production default)
+            // Post-round invariant sweep (the state-audit vehicle): the
+            // round just rewrote the choke-round book — re-derive its
+            // integrity (slot sets, key agreement, leave closures).
+            crate::invariant::sweep_face(&face);
             // Read frames from every peer until drained: tally unchoke(1)/
             // choke(0) landings.
             let mut unchoke_by = [0usize; 4];
@@ -706,7 +710,8 @@
             // the optimistic holder is kept across rounds — no re-election
             // when round != 0, cc:231-233) -> zero frames in both rows
             // (idempotent landings).
-            leecher_choke_round(&mut face, &mut rng, None);  // static arm (default-off: no behavior change)
+            leecher_choke_round(&mut face, &mut rng, None, true);  // static arm (default-off: no behavior change; class arm on = production default)
+            crate::invariant::sweep_face(&face);
             for remote in remotes.iter_mut() {
                 assert!(
                     read_wire_msg_id(remote).await.is_none(),
@@ -739,7 +744,8 @@
             let mut choke_by = [0usize; 4];
             let mut extra_unchoke = 0usize;
             for _ in 0..2 {
-                leecher_choke_round(&mut face, &mut rng, None);  // static arm (default-off: no behavior change)
+                leecher_choke_round(&mut face, &mut rng, None, true);  // static arm (default-off: no behavior change; class arm on = production default)
+                crate::invariant::sweep_face(&face);
                 for (i, remote) in remotes.iter_mut().enumerate() {
                     while let Some(id) = read_wire_msg_id(remote).await {
                         match id {
@@ -822,6 +828,221 @@
         assert_eq!(budget_derived_slots(true, global_only.as_ref()), Some(8));
     }
 
+    /// Local-class choke exemption wiring (both arms of the
+    /// `BH_PEER_CLASS` switch; the leecher 8-slot round incl. the
+    /// optimistic seat): 10 interested peers — cuid 1 is a LAN peer
+    /// (192.168.1.50, the slowest rate), cuids 2..=10 are internet
+    /// peers with descending rates (9 remote > 8 total slots).
+    ///
+    /// - on arm: the LAN peer never enters the decision input — the 8
+    ///   slots (7 regular + 1 optimistic) all go to remote peers, the
+    ///   slowest remote (cuid 10) loses, and the LAN peer is unchoked
+    ///   **outside** the slot budget (ignore_unchoke_slots: "local
+    ///   peers are always unchoked", libtorrent session_impl.cpp
+    ///   663-667) -> 9 Unchoke frames total, `regular_unchoked`
+    ///   excludes the local cuid;
+    /// - off arm (the rollback shape): the LAN peer competes like
+    ///   anyone else — the slowest rate loses, so the LAN peer gets no
+    ///   Unchoke and exactly 8 remote peers do (the pre-class verdict
+    ///   bit-for-bit).
+    #[tokio::test]
+    async fn local_class_choke_exemption_leecher_round() {
+        use std::net::IpAddr;
+        for (row, class_on) in [("class-on", true), ("class-off", false)] {
+            let root = CancellationToken::new();
+            let mut face = adv_face(8);
+            let mut remotes = Vec::new();
+            for cuid in 1..=10u64 {
+                let (handle, remote) = choke_peer_pair(&root).await;
+                face.peers.push(handle);
+                face.peer_cuids.push(cuid);
+                remotes.push(remote);
+            }
+            // All 10 interested (raw frames; wait for the mirrors).
+            use tokio::io::AsyncWriteExt as _;
+            for remote in remotes.iter_mut() {
+                remote
+                    .write_all(&[0, 0, 0, 1, 2])
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"));
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while face.peers.iter().any(|p| !p.is_interested())
+                && Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                face.peers.iter().all(|p| p.is_interested()),
+                "row {row}: mirror-set timeout"
+            );
+            // Rates: cuid 1 (LAN, slowest) 50; cuids 2..=10 descending
+            // 1000..200 (the sort key). Addresses: cuid 1 LAN, the rest
+            // public. The LAN peer carries a recent optimistic-unchoke
+            // timestamp so the off arm's optimistic seat (waits-longest,
+            // None first) goes to cuid 2, not to the input-order-first
+            // LAN peer — without it the off arm's verdict would
+            // accidentally unchoke the LAN peer through the optimistic
+            // seat and mask the rollback difference.
+            for (cuid, rate) in (1u64..=10).map(|c| (c, if c == 1 { 50 } else { 1200 - c * 100 }))
+            {
+                let mut w = RateWindow::new();
+                for _ in 0..RateWindow::WINDOW_SECS {
+                    w.advance();
+                    w.add(rate);
+                }
+                let row = face.peer_state_row(cuid);
+                row.ip = Some(IpAddr::V4(
+                    if cuid == 1 {
+                        [192, 168, 1, 50]
+                    } else {
+                        [203, 0, 113, cuid as u8]
+                    }
+                    .into(),
+                ));
+                row.down_window = Some(w);
+                if cuid == 1 {
+                    row.last_opt_unchoke = Some(Instant::now());
+                }
+            }
+
+            let mut rng = XorShift(0x2545F4914F6CDD1Du64);
+            leecher_choke_round(&mut face, &mut rng, None, class_on);
+            // Frame tally per peer (drain each remote).
+            let mut unchoke_by = [0usize; 10];
+            for (i, remote) in remotes.iter_mut().enumerate() {
+                while let Some(id) = read_wire_msg_id(remote).await {
+                    if id == 1 {
+                        unchoke_by[i] += 1;
+                    }
+                }
+            }
+            let local_unchoked = face
+                .peer_state
+                .get(&1u64)
+                .is_some_and(|ps| ps.am_unchoked);
+            if class_on {
+                assert!(
+                    unchoke_by.iter().sum::<usize>() == 9 && unchoke_by[0] == 1,
+                    "row {row}: 9 unchokes (8 slot holders + the exempt LAN peer), got {unchoke_by:?}"
+                );
+                assert!(local_unchoked, "row {row}: the LAN peer is always unchoked");
+                assert!(
+                    unchoke_by[9] == 0,
+                    "row {row}: the slowest REMOTE peer loses its slot to the exemption"
+                );
+                assert!(
+                    unchoke_by[1..9].iter().all(|&n| n == 1),
+                    "row {row}: the 8 slots are all remote ({unchoke_by:?})"
+                );
+                assert!(
+                    !face.regular_unchoked.contains(&1u64),
+                    "row {row}: the LAN peer holds no regular slot (keep-position key)"
+                );
+                assert_eq!(
+                    face.regular_unchoked.len(),
+                    7,
+                    "row {row}: 7 regular remote slots (the 8th seat is the optimistic one)"
+                );
+            } else {
+                assert_eq!(
+                    unchoke_by.iter().sum::<usize>(),
+                    8,
+                    "row {row}: exactly the 8 slots (the pre-class verdict)"
+                );
+                assert!(
+                    unchoke_by[0] == 0 && !local_unchoked,
+                    "row {row}: the slowest LAN peer competes and loses (rollback shape)"
+                );
+                assert_eq!(face.regular_unchoked.len(), 7);
+            }
+            root.cancel();
+        }
+    }
+
+    /// Local-class choke exemption, seeder path (fastest_upload): 10
+    /// interested peers — cuid 1 is a LAN peer with zero upload rate,
+    /// cuids 2..=9 hold rates, cuid 10 is a zero-rate remote. With the
+    /// class layer on, the LAN peer is unchoked outside the 8 seeder
+    /// slots and the zero-rate remote still loses (9 unchokes); with it
+    /// off, both zero-rate peers lose (the pre-class verdict).
+    #[tokio::test]
+    async fn local_class_choke_exemption_seeder_round() {
+        use std::net::IpAddr;
+        for (row, class_on) in [("class-on", true), ("class-off", false)] {
+            let root = CancellationToken::new();
+            let mut face = adv_face(8);
+            face.completed = true;
+            let mut remotes = Vec::new();
+            for cuid in 1..=10u64 {
+                let (handle, remote) = choke_peer_pair(&root).await;
+                face.peers.push(handle);
+                face.peer_cuids.push(cuid);
+                remotes.push(remote);
+            }
+            use tokio::io::AsyncWriteExt as _;
+            for remote in remotes.iter_mut() {
+                remote
+                    .write_all(&[0, 0, 0, 1, 2])
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"));
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while face.peers.iter().any(|p| !p.is_interested())
+                && Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // fastest_upload key: cuids 2..=9 fed 200B two seconds ago
+            // (= 100 B/s); cuid 1 (LAN) and cuid 10 (remote) zero rate.
+            for cuid in 2..=9u64 {
+                let mut rate = PeerRate {
+                    up: taiji_domain::seed::SessionSpeedCalc::default(),
+                    down: taiji_domain::seed::SessionSpeedCalc::default(),
+                    last_up: 0,
+                    last_down: 0,
+                };
+                rate.up.add_at(Instant::now() - Duration::from_secs(2), 200);
+                face.peer_state_row(cuid).rates = Some(rate);
+            }
+            for cuid in 1..=10u64 {
+                face.peer_state_row(cuid).ip = Some(IpAddr::V4(
+                    if cuid == 1 {
+                        [10, 0, 0, 7]
+                    } else {
+                        [198, 51, 100, cuid as u8]
+                    }
+                    .into(),
+                ));
+            }
+            choke_round(&mut face, class_on);
+            let mut unchoke_by = [0usize; 10];
+            for (i, remote) in remotes.iter_mut().enumerate() {
+                if wait_wire_msg_id(remote, 1, Duration::from_secs(5)).await {
+                    unchoke_by[i] = 1;
+                }
+            }
+            if class_on {
+                assert_eq!(
+                    unchoke_by.iter().sum::<usize>(),
+                    9,
+                    "row {row}: 8 rate slots + the exempt LAN peer, got {unchoke_by:?}"
+                );
+                assert_eq!(unchoke_by[0], 1, "row {row}: the LAN peer is always unchoked");
+                assert_eq!(unchoke_by[9], 0, "row {row}: the zero-rate remote still loses");
+            } else {
+                assert_eq!(
+                    unchoke_by.iter().sum::<usize>(),
+                    8,
+                    "row {row}: exactly the 8 slots (the pre-class verdict)"
+                );
+                assert_eq!(unchoke_by[0], 0, "row {row}: the LAN zero-rate peer loses (rollback shape)");
+                assert_eq!(unchoke_by[9], 0);
+            }
+            root.cancel();
+        }
+    }
+
     /// Preemptive unchoke decision table (the preemptive edge; libtorrent
     /// peer_connection.cpp + session_impl.cpp).
     /// Row 1 free slot (7/8) -> the edge fires an Unchoke frame +
@@ -851,7 +1072,7 @@
         // Row 1: free slot (7 < 8) -> the edge fires Unchoke (peer 1 sees
         // id=1 on the wire; polling within budget — under full load the
         // PeerTask may write the frame later than a single 400ms read).
-        preemptive_unchoke(&mut face, 1);
+        preemptive_unchoke(&mut face, 1, true);
         assert!(
             face.peer_state.get(&1).is_some_and(|ps| ps.am_unchoked),
             "row 1: the state set"
@@ -862,7 +1083,7 @@
         );
 
         // Row 2: full slots (8/8) -> zero frames, no state.
-        preemptive_unchoke(&mut face, 2);
+        preemptive_unchoke(&mut face, 2, true);
         assert!(
             !face.peer_state.get(&2).is_some_and(|ps| ps.am_unchoked),
             "row 2: full slots refuse entry"
@@ -873,7 +1094,7 @@
         );
 
         // Row 3: already unchoked (level-idempotent) -> no resend.
-        preemptive_unchoke(&mut face, 1);
+        preemptive_unchoke(&mut face, 1, true);
         assert!(
             read_wire_msg_id(&mut remotes[0]).await.is_none(),
             "row 3: already unchoked emits zero frames"
@@ -887,7 +1108,7 @@
         let (handle, mut remote) = choke_peer_pair(&root).await;
         face_aria2.peers.push(handle);
         face_aria2.peer_cuids.push(7);
-        preemptive_unchoke(&mut face_aria2, 7);
+        preemptive_unchoke(&mut face_aria2, 7, true);
         assert!(
             !face_aria2.peer_state.get(&7).is_some_and(|ps| ps.am_unchoked),
             "row 4: aria2 fallback sets no state"
@@ -899,7 +1120,7 @@
 
         // Row 5: unregistered cuid (the peer already left) -> zero frames,
         // no panic.
-        preemptive_unchoke(&mut face, 999);
+        preemptive_unchoke(&mut face, 999, true);
         root.cancel();
     }
 
@@ -960,7 +1181,7 @@
             rate.up.add_at(Instant::now() - Duration::from_secs(2), 200);
             face.peer_state_row(cuid).rates = Some(rate);
         }
-        choke_round(&mut face);
+        choke_round(&mut face, true);
         // The first 8 (cuid 1..=8, 100 B/s) each get an Unchoke frame
         // (poll within budget).
         for remote in remotes.iter_mut().take(8) {
@@ -993,7 +1214,7 @@
     /// Minimal FaceState (v1 single file, `piece_count` pieces of 16KiB
     /// each, no peer connections) — driven by the pure functions for
     /// advertisement bookkeeping, piece selection, and dispatch gating.
-    fn adv_face(piece_count: usize) -> FaceState {
+    pub(crate) fn adv_face(piece_count: usize) -> FaceState {
         let (block_tx, _rx) = mpsc::channel(1);
         let (fetch_tx, _frx) = mpsc::channel(1);
         // Final-flush barrier seam: the fixture has no pipeline
@@ -1006,6 +1227,9 @@
         let mut stat_rng = XorShift(0x853C49E6748FEA9Bu64);
         let file_len = piece_count as u64 * merkle::BLOCK_SIZE as u64;
         FaceState {
+            // Real-clock default: the fixture's seam clock (tests that
+            // drive time overwrite this field with a manual handle).
+            clock: crate::seam::Clock::default(),
             kind: FaceKind::V1,
             info_hash: [0u8; 20],
             reserved: Reserved::aria2_default(),
@@ -3181,6 +3405,140 @@
         }
     }
 
+    /// Class-dimension admission decision table
+    /// (`run::state::class_admission_verdict`; the composition of
+    /// libtorrent's inbound gate — the connection limit scales by the
+    /// incoming connection's class factor, session_impl.cpp:3233-3250):
+    ///
+    /// - local budget row: factor 150 over cap 100 -> the local ceiling
+    ///   is 150 — a local connection admits at totals that already
+    ///   reject a tcp one (100..149), stops at 150; factor 100 = no
+    ///   headroom (the plain cap); the widened ceiling also lifts the
+    ///   stall reprieve band and the seeding count gate;
+    /// - independent uTP channel row (min composition, whichever binds
+    ///   first): a tuned-down `utp_max` rejects uTP connections at
+    ///   `utp_count >= utp_max` while tcp/local connections are
+    ///   unaffected by the channel; the default `utp_max = max` never
+    ///   binds (the total budget is always the tighter channel — status
+    ///   quo);
+    /// - rollback-equivalence row: with factor 100 and an unbounded
+    ///   uTP channel the verdict equals [`admission_verdict_limits`]
+    ///   bit-for-bit for every class across a total sweep (the
+    ///   parameter-level shape of `BH_PEER_CLASS=0`, whose wiring takes
+    ///   the untouched [`admission_verdict`] path instead).
+    #[test]
+    fn class_admission_local_budget_and_utp_channel_table() {
+        use crate::peer_class::PeerClass;
+        let (t, m) = (100usize, 100usize); // target = cap: isolate the hard-cap shape
+        let f150 = 150u64;
+
+        // -- Local budget rows (hard-cap shape, healthy leecher). --
+        // Below the plain cap every class admits.
+        for &class in &[PeerClass::Local, PeerClass::Tcp, PeerClass::Utp] {
+            assert!(
+                class_admission_verdict(99, 0, class, false, true, true, t, m, f150, m),
+                "below the cap: {class:?} admits"
+            );
+        }
+        // At the plain cap: tcp/utp close, local still admits (its own
+        // ceiling is 150).
+        assert!(!class_admission_verdict(100, 0, PeerClass::Tcp, false, true, true, t, m, f150, m));
+        assert!(!class_admission_verdict(100, 0, PeerClass::Utp, false, true, true, t, m, f150, m));
+        assert!(
+            class_admission_verdict(100, 0, PeerClass::Local, false, true, true, t, m, f150, m),
+            "the local class' own 150% ceiling is open at the plain cap"
+        );
+        // The local ceiling is exactly ceil(100 x 150 / 100) = 150: the
+        // last admit at 149, the first reject at 150.
+        assert!(
+            class_admission_verdict(149, 0, PeerClass::Local, false, true, true, t, m, f150, m)
+        );
+        assert!(
+            !class_admission_verdict(150, 0, PeerClass::Local, false, true, true, t, m, f150, m),
+            "the local budget stops at its own ceiling"
+        );
+        // The widening is self-only: at total 110 a tcp connection is
+        // still closed (the local peers' headroom does not reopen the
+        // gate for other classes).
+        assert!(!class_admission_verdict(110, 0, PeerClass::Tcp, false, true, true, t, m, f150, m));
+        // Factor 100 = no headroom: the local ceiling equals the plain
+        // cap (the plain verdict).
+        assert!(
+            !class_admission_verdict(100, 0, PeerClass::Local, false, true, true, t, m, 100, m),
+            "factor 100: no local headroom"
+        );
+        // The widened ceiling lifts the stall reprieve band too: at
+        // total 130 (past the plain cap) an unhealthy leecher's
+        // discovery shape still admits a local connection up to 150.
+        assert!(
+            class_admission_verdict(130, 0, PeerClass::Local, false, false, false, t, m, f150, m),
+            "the reprieve band follows the class ceiling"
+        );
+        assert!(
+            !class_admission_verdict(130, 0, PeerClass::Tcp, false, false, false, t, m, f150, m),
+            "the reprieve band for tcp stays capped at the plain cap"
+        );
+        // Seeding: the count gate scales by the class factor the same
+        // way (libtorrent applies connection_limit_factor regardless of
+        // state).
+        assert!(class_admission_verdict(140, 0, PeerClass::Local, true, true, true, t, m, f150, m));
+        assert!(!class_admission_verdict(140, 0, PeerClass::Tcp, true, true, true, t, m, f150, m));
+
+        // -- Independent uTP channel rows (min composition). --
+        // Tuned down: utp_max 10 — the channel rejects at utp_count 10
+        // even far below the total cap, and only for the utp class.
+        assert!(
+            !class_admission_verdict(50, 10, PeerClass::Utp, false, true, true, t, m, f150, 10),
+            "the independent uTP budget binds first"
+        );
+        assert!(
+            class_admission_verdict(50, 9, PeerClass::Utp, false, true, true, t, m, f150, 10),
+            "one below the independent budget admits"
+        );
+        assert!(
+            class_admission_verdict(50, 50, PeerClass::Tcp, false, true, true, t, m, f150, 10),
+            "tcp connections never contend for the uTP budget"
+        );
+        assert!(
+            class_admission_verdict(50, 50, PeerClass::Local, false, true, true, t, m, f150, 10),
+            "local uTP peers are class local — no uTP-channel contention"
+        );
+        // Default (utp_max = the total cap): the channel never binds —
+        // at any total the plain cap admits, the uTP count cannot
+        // exceed the total and so is always under its own budget
+        // (status quo).
+        for &total in &[0usize, 1, 50, 99] {
+            assert!(
+                class_admission_verdict(total, total, PeerClass::Utp, false, true, true, t, m, f150, m),
+                "default utp_max: a uTP-only pool is bounded by the total budget only (total={total})"
+            );
+        }
+
+        // -- Rollback-equivalence sweep (the BH_PEER_CLASS=0 parameter
+        // shape): factor 100 + an unbounded uTP channel collapse the
+        // class dimension onto the base verdict for every class. --
+        for &class in &[PeerClass::Local, PeerClass::Tcp, PeerClass::Utp] {
+            for &completed in &[false, true] {
+                for &healthy in &[true, false] {
+                    for &hard in &[true, false] {
+                        for total in 0..=(m + 5) {
+                            assert_eq!(
+                                class_admission_verdict(
+                                    total, total / 2, class, completed, healthy, hard, t, m, 100,
+                                    usize::MAX
+                                ),
+                                admission_verdict_limits(total, completed, healthy, hard, t, m),
+                                "degenerate class parameters must equal the base verdict: \
+                                 class={class:?} total={total} completed={completed} \
+                                 healthy={healthy} hard={hard}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ---- Stall detection valve (seeder slot starvation + connection bloat) ----
 
     /// Stall-detection state machine, table-driven
@@ -3629,6 +3987,11 @@
         // (1) hash pass: the HAVE broadcast is immediate, the progress and
         // advertising bitmaps advance, completion does not flip.
         on_piece_verified(std::slice::from_mut(&mut face), 0, 0);
+        // Post-event invariant sweep (the state-audit vehicle): the
+        // verified half of the completion encodings just moved —
+        // re-derive counters/models/bitmap agreement (written still
+        // empty: the bitmap-never-leads direction is exercised below).
+        crate::invariant::sweep_face(&face);
         let (id, body) = read_wire_frame(&mut remote)
             .await
             .unwrap_or_else(|| panic!("the HAVE frame never arrived after hash pass"));
@@ -3663,6 +4026,7 @@
         // served; completion still does not flip (piece 1 not yet
         // flushed).
         on_piece_written(std::slice::from_mut(&mut face), 0, 0, &[2], None);
+        crate::invariant::sweep_face(&face);
         assert!(face.written_bits.get(0), "flushing sets the written bit");
         let n = partial
             .read_block(0, 0, &mut buf)
@@ -3677,6 +4041,7 @@
         on_piece_verified(std::slice::from_mut(&mut face), 0, 1);
         assert!(!face.completed, "all hash-passed does not equal complete (the written semantics)");
         let all = on_piece_written(std::slice::from_mut(&mut face), 0, 1, &[2], None);
+        crate::invariant::sweep_face(&face);
         assert!(all, "all pieces flushed -> the whole face complete");
         assert!(face.completed, "the face completion flag flips with the last piece written");
 
@@ -5578,7 +5943,7 @@ async fn streaming_dispatch_no_duplicate_when_all_inflight() {
             }
             note_peer_have(&mut face, 10, done_until);
             let mut rng = XorShift(0x2545F4914F6CDD1Du64);
-            leecher_choke_round(&mut face, &mut rng, None);
+            leecher_choke_round(&mut face, &mut rng, None, true);
             let holder_in = face
                 .peer_state
                 .get(&10u64)
@@ -7875,3 +8240,177 @@ async fn streaming_dispatch_no_duplicate_when_all_inflight() {
             "the readout accumulation semantics matches the return value"
         );
     }
+
+// ------------------------------------------------------------------
+// Determinism-seam driver tests (SPEC G6): a manual clock injected
+// through the face's seam handle (the same handle EngineConfig.clock
+// hands the assembled engine) drives the timeout/backoff boundary
+// transitions; the public config surface accepts the injection.
+// ------------------------------------------------------------------
+
+/// Timeout-path boundary (SPEC G6): the dispatch reissue window — an
+/// unconfirmed in-flight block becomes takeover-eligible exactly at
+/// [`DISPATCH_REISSUE_WINDOW`] (the unowned-mark fallback window; the
+/// same shape as the stale-claim row in the spread table, with time
+/// driven by the manual clock instead of a pre-stamped past instant).
+/// One nanosecond before the boundary the claim is fresh (no
+/// takeover); at exactly the boundary the block is re-dispatched to a
+/// peer.
+#[tokio::test]
+async fn manual_clock_drives_reissue_takeover_at_the_boundary() {
+    let mut roots = Vec::new();
+    // The spread-table fixture shape: 48 single-block pieces, three
+    // fully advertising unchoked peers.
+    async fn seeded_face(
+        root: &tokio_util::sync::CancellationToken,
+    ) -> (FaceState, Vec<tokio::io::DuplexStream>) {
+        let mut face = adv_face(48);
+        let mut remotes = Vec::new();
+        for cuid in 1..=3u64 {
+            let (handle, remote) = choke_peer_pair(root).await;
+            face.peers.push(handle);
+            face.peer_cuids.push(cuid);
+            note_peer_bitfield(&mut face, cuid, &[0xFF; 6]);
+            remotes.push(remote);
+        }
+        (face, remotes)
+    }
+
+    // Pre-boundary round: piece 0's mark ages to window-1ns — still
+    // fresh, so nothing dispatches (every piece claimed).
+    let root = tokio_util::sync::CancellationToken::new();
+    let (mut face, remotes) = seeded_face(&root).await;
+    roots.push(root);
+    let t0 = Instant::now();
+    let manual = ManualClock::new(t0);
+    face.clock = manual.clock();
+    seed_blocks_sent(&mut face, 0, t0, &[(0, BlockState::InFlight)]);
+    manual.advance(DISPATCH_REISSUE_WINDOW - Duration::from_nanos(1));
+    for p in 1..48u64 {
+        seed_blocks_sent(&mut face, p, manual.now(), &[(0, BlockState::InFlight)]);
+    }
+    dispatch_face(&mut face, 0);
+    assert!(
+        dispatch_owner(&face, 0, 0).is_none(),
+        "1ns before the boundary the in-flight mark is fresh: no takeover"
+    );
+    let _keep_alive: Vec<tokio::io::DuplexStream> = remotes;
+
+    // Boundary round: a fresh face, piece 0's mark aged to exactly the
+    // window — stale, the takeover fires.
+    let root = tokio_util::sync::CancellationToken::new();
+    let (mut face, remotes) = seeded_face(&root).await;
+    roots.push(root);
+    let t1 = Instant::now();
+    let manual = ManualClock::new(t1);
+    face.clock = manual.clock();
+    seed_blocks_sent(&mut face, 0, t1, &[(0, BlockState::InFlight)]);
+    manual.advance(DISPATCH_REISSUE_WINDOW);
+    for p in 1..48u64 {
+        seed_blocks_sent(&mut face, p, manual.now(), &[(0, BlockState::InFlight)]);
+    }
+    dispatch_face(&mut face, 0);
+    assert!(
+        dispatch_owner(&face, 0, 0).is_some(),
+        "at exactly the reissue window the stale mark is taken over and \
+         re-dispatched (everything else claimed fresh -> piece 0 is the \
+         only dispatchable piece)"
+    );
+    let _keep_alive: Vec<tokio::io::DuplexStream> = remotes;
+
+    for root in roots {
+        root.cancel();
+    }
+}
+
+/// External-reachability (SPEC G6): the engine's public config surface
+/// carries the seams. The assembly function's output defaults to the
+/// real clock / OS entropy (behavior-identical), accepts an injected
+/// manual clock + pinned RNG through its public fields, and
+/// driver-path reads observe the injected values — the peer-row
+/// registration stamp (`PeerState::new` via `peer_state_row`) and the
+/// choke round's unchoke stamp both read the same handle an assembled
+/// engine carries (assembly clones `EngineConfig.clock` into every
+/// face state).
+#[tokio::test]
+async fn public_config_surface_accepts_the_injected_seams() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../taiji-bt/tests/fixtures/hybrid_16k.torrent"),
+    )
+    .unwrap_or_else(|e| panic!("read fixture: {e}"));
+    let meta =
+        taiji_domain::metainfo::Metainfo::parse(&bytes).unwrap_or_else(|e| panic!("parse: {e}"));
+    let mut cfg = crate::config::engine_config(
+        &meta,
+        std::env::temp_dir(),
+        0,
+        [7u8; 20],
+        crate::config::CompletionMode::ReturnOnComplete,
+    )
+    .unwrap_or_else(|e| panic!("assemble: {e}"));
+
+    // Defaults: the real clock (a busy-loop second read advances) and
+    // OS entropy (no pinned seed) — zero behavior difference.
+    let a = cfg.clock.now();
+    let mut b = a;
+    for _ in 0..100_000 {
+        b = cfg.clock.now();
+        if b > a {
+            break;
+        }
+    }
+    assert!(b > a, "the default clock is the real monotonic clock");
+    assert_eq!(cfg.rng.seed(), None, "the default RNG is OS entropy");
+
+    // Public-field injection: a manual clock + a pinned seed.
+    let start = Instant::now();
+    let manual = ManualClock::new(start);
+    cfg.clock = manual.clock();
+    cfg.rng = Rng::from_seed(0xDA7A_5EED);
+    assert_eq!(
+        cfg.clock.now(),
+        start,
+        "the injected handle reads the manual clock"
+    );
+    assert_eq!(cfg.rng.seed(), Some(0xDA7A_5EED));
+
+    // Driver-path observation: the face's clock handle is the same one
+    // assembly would clone from the config — its reads observe
+    // manual-time advances (peer-row stamp + choke-round stamp).
+    let root = tokio_util::sync::CancellationToken::new();
+    let (handle, mut remote) = choke_peer_pair(&root).await;
+    let mut face = adv_face(4);
+    face.clock = cfg.clock.clone();
+    face.peers.push(handle);
+    face.peer_cuids.push(1);
+
+    let stamped = manual.advance(Duration::from_secs(5));
+    assert_eq!(
+        face.peer_state_row(1).registered_at,
+        stamped,
+        "the row constructor stamps from the seam clock"
+    );
+
+    // A seeder choke round lands its unchoke bookkeeping at the manual
+    // clock's current value. Interested is driven by the raw wire
+    // frame (the choke wiring-table convention).
+    use tokio::io::AsyncWriteExt as _;
+    remote
+        .write_all(&[0, 0, 0, 1, 2])
+        .await
+        .unwrap_or_else(|e| panic!("write interested: {e}"));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !face.peers[0].is_interested() {
+        assert!(Instant::now() < deadline, "the interested mirror did not flip");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let choke_at = manual.advance(Duration::from_secs(1));
+    crate::choke::choke_round(&mut face, false);
+    assert_eq!(
+        face.peer_state.get(&1).and_then(|ps| ps.last_unchoke),
+        Some(choke_at),
+        "the choke round's unchoke stamp reads the seam clock"
+    );
+    root.cancel();
+}

@@ -426,8 +426,12 @@ fn verify_face(
         // Short read / missing file = not passed (TorrentReader
         // zero-fills sparse EOF, and an all-zero piece naturally
         // mismatches a non-zero hash; an explicit short read here also
-        // counts as not passed — no gray zone).
-        let ok = match reader.read_at(goff, &mut buf) {
+        // counts as not passed — no gray zone). The read is read-once:
+        // `read_at_volatile` evicts the range from the page cache after
+        // hashing (libtorrent volatile_read semantics) — a full recheck
+        // of a tens-of-GiB torrent must not evict the user's foreground
+        // working set just to compute hashes over it once.
+        let ok = match reader.read_at_volatile(goff, &mut buf) {
             Ok(n) if n == len => match expected {
                 ExpectedPieceHash::V1(h) => Sha1::digest(&buf).as_slice() == h.as_slice(),
                 ExpectedPieceHash::V2(root) => {

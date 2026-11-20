@@ -568,7 +568,8 @@ impl SessionActor {
             // at the default cap of 1. Old/imported rows without the
             // face = None -> the new session defaults (intent that was
             // not recorded is not fabricated — honest degradation).
-            let mut opts = http_task::HttpTaskOpts::default();
+            let mut opts =
+                http_task::HttpTaskOpts::default().with_session_interface(self.global.interface);
             if let Some(face) =
                 http_task::HttpPersistConfig::from_json(&row.config_json).concurrency
             {

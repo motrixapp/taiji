@@ -1647,6 +1647,34 @@ impl PieceSentLedger {
             }
         }
     }
+
+    /// Row-level state-consistency check (the self-audit discipline:
+    /// remotely influenced multi-writer structures re-derive their own
+    /// integrity; swept after every engine round by the test-build
+    /// vehicle `crate::invariant` — nothing of it exists in non-test
+    /// compilation; `debug_assert!` keeps the checks honest should the
+    /// fn ever be promoted to a debug production sweep).
+    ///
+    /// WHY the row width: `expected_blocks` is the same derivation the
+    /// two creation sites use (`piece_bytes[piece].div_ceil(BLOCK_SIZE)
+    /// .max(1)`). A row built from a different grid would mis-place
+    /// block coordinates (begin -> slot index silently reads/writes the
+    /// wrong slot), and a zero-width row would silently drop every
+    /// write (`slot()` indexes nothing) — both are wholesale
+    /// re-derivable from the face's piece table, so they are checked
+    /// here instead of trusting the creation sites.
+    #[cfg(test)]
+    pub(super) fn check_invariant(&self, expected_blocks: usize) {
+        debug_assert!(
+            !self.slots.is_empty(),
+            "blocks_sent row with a zero-width slot grid"
+        );
+        debug_assert_eq!(
+            self.slots.len(),
+            expected_blocks,
+            "blocks_sent row width != the piece's block grid"
+        );
+    }
 }
 
 /// Block-arrival event (the transit forwarding task -> the main loop's
@@ -2380,13 +2408,9 @@ impl FileRecovery {
 
     /// Records a failure (peer-switch memory + the consecutive failure
     /// count; the over-cap fallback clears the set — see
-    /// [`RECOVERY_TRIED_CAP`]).
-    pub(super) fn note_failure(&mut self, cuid: u64) {
-        self.note_failure_at(cuid, Instant::now());
-    }
-
-    /// Clock-injectable form of [`Self::note_failure`] (drives the
-    /// cooldown-table tests; production always uses [`Instant::now`]).
+    /// [`RECOVERY_TRIED_CAP`]). `now` comes from the caller's seam
+    /// clock (the driver passes the face clock; cooldown-table tests
+    /// inject instants directly).
     pub(super) fn note_failure_at(&mut self, cuid: u64, now: Instant) {
         self.attempts = self.attempts.saturating_add(1);
         if self.tried.len() >= RECOVERY_TRIED_CAP {
@@ -2549,6 +2573,7 @@ pub(super) fn handle_recovery_reply(
     file_idx: usize,
     block: usize,
     reply: Result<HashFetch, RecoveryFetchFail>,
+    now: Instant,
 ) {
     let Some(rec) = book.files.get_mut(&file_idx) else {
         return;
@@ -2585,18 +2610,18 @@ pub(super) fn handle_recovery_reply(
             Err(e) => {
                 debug!(target: "taiji::core::engine", face = fi,
                     file_index = file_idx, block, error = ?e, "recovery reply not stageable");
-                rec.note_failure(cuid);
+                rec.note_failure_at(cuid, now);
             }
         },
         Ok(HashFetch::Rejected) => {
             debug!(target: "taiji::core::engine", face = fi, file_index = file_idx,
                 block, "recovery fetch rejected by peer");
-            rec.note_failure(cuid);
+            rec.note_failure_at(cuid, now);
         }
         Err(e) => {
             debug!(target: "taiji::core::engine", face = fi, file_index = file_idx,
                 block, fail = ?e, "recovery fetch failed");
-            rec.note_failure(cuid);
+            rec.note_failure_at(cuid, now);
         }
     }
     if rec.attempts == HASH_FETCH_MAX_ATTEMPTS {
@@ -2678,7 +2703,7 @@ pub(super) fn drive_recovery(
                 // budget exhausted -> wait for a new peer or cooldown
                 // expiry (self-healing: no re-probing tried peers before
                 // expiry, allowed after).
-                let tried_now = active_tried(rec, Instant::now());
+                let tried_now = active_tried(rec, face.clock.now());
                 let mut order = recovery_peer_order(face, lo, hi, &busy, &tried_now);
                 if order.is_empty() && rec.attempts < HASH_FETCH_MAX_ATTEMPTS {
                     order =
@@ -2709,7 +2734,8 @@ pub(super) fn drive_recovery(
 
 /// The recovery reply-event arm body (the EngineLoop glue lives in
 /// run::arms — EngineLoop's visibility domain; this function only makes
-/// bookkeeping decisions).
+/// bookkeeping decisions). The failure-cooldown stamp reads the face's
+/// seam clock (one sample shared with the drive pass).
 pub(super) fn handle_recovery_reply_and_drive(
     fi: usize,
     face: &mut FaceState,
@@ -2719,7 +2745,8 @@ pub(super) fn handle_recovery_reply_and_drive(
     block: usize,
     reply: Result<HashFetch, RecoveryFetchFail>,
 ) {
-    handle_recovery_reply(fi, book, file_idx, block, reply);
+    let now = face.clock.now();
+    handle_recovery_reply(fi, book, file_idx, block, reply, now);
     drive_recovery(face, fi, book, deliver);
 }
 /// Dispatch-reply drain entry: takes the [`FaceState`] receipt / in-flight
@@ -2876,6 +2903,72 @@ pub(super) fn on_block_arrived(face: &mut FaceState, index: u32, begin: u32, now
     // kept so the arrival-arm call face / injectable-clock test shape
     // stays unchanged.
     let _ = now;
+}
+
+/// Request-window book sweep — the face-level companion of
+/// [`PieceSentLedger::check_invariant`] (test-build vehicle, run after
+/// every engine round by `crate::invariant`; nothing of it exists in
+/// non-test compilation). The `blocks_sent` table is the multi-writer
+/// crossroads of the dispatch round, the arrival arm, the reply drain,
+/// the piece-settle clears and the peer-leave owner repair; each check
+/// below re-derives a property those writers must preserve jointly:
+///
+/// - coordinates in range: a row keyed outside the face's piece space
+///   would never be cleared by piece settle and would wedge every
+///   reissue/holder read that trusts `piece < piece_count`;
+/// - row width == the piece's block grid (the same derivation as both
+///   creation sites);
+/// - rows exist only for still-missing pieces: verification clears the
+///   whole row ([`crate::faces::on_piece_verified`]) and the refetch
+///   arm discards rows for done pieces — a surviving row means the
+///   clear path lost a case (its in-flight accounting would keep
+///   supplying a piece that can never verify again);
+/// - slot owners are live `peer_cuids` indexes (or [`NO_OWNER`]):
+///   ownership is the peer_cuids index and the leave arm repairs the
+///   shift via [`PieceSentLedger::reindex_owners`] — an out-of-range
+///   owner is a lost repair, silently mis-attributing every later
+///   hash-failure ban decision;
+/// - with the two-phase switch OFF the `Settling*` states are
+///   documented unreachable (the arrival emission is switch-gated at
+///   the source, transit.rs) — one appearing anyway means a write
+///   bypassed the gate.
+#[cfg(test)]
+pub(super) fn check_blocks_sent_invariant(face: &FaceState) {
+    let two_phase = two_phase_ledger();
+    let block = u64::from(merkle::BLOCK_SIZE);
+    for (&piece, ledger) in face.blocks_sent.iter() {
+        debug_assert!(
+            (piece as usize) < face.piece_count,
+            "blocks_sent row for piece {piece} outside the face's piece space"
+        );
+        let expected = face
+            .piece_bytes
+            .get(piece as usize)
+            .copied()
+            .unwrap_or(block)
+            .div_ceil(block)
+            .max(1) as usize;
+        ledger.check_invariant(expected);
+        debug_assert!(
+            !face.progress.piece_done_global(piece),
+            "blocks_sent row survived verification of piece {piece}"
+        );
+        for (bi, slot) in ledger.slots().iter().enumerate() {
+            if slot.owner != NO_OWNER {
+                debug_assert!(
+                    (slot.owner as usize) < face.peer_cuids.len(),
+                    "piece {piece} block {bi}: owner index {} outside peer_cuids",
+                    slot.owner
+                );
+            }
+            if !two_phase {
+                debug_assert!(
+                    !matches!(slot.state, BlockState::Settling | BlockState::SettlingDup),
+                    "piece {piece} block {bi}: Settling state with the two-phase knob off"
+                );
+            }
+        }
+    }
 }
 
 /// Builds the dispatch spread's "claimed" set (extracted from the dispatch
@@ -3542,7 +3635,7 @@ pub(super) fn dispatch_face_selected_with_stream(
                     // trigger). In-row single write: state + owner (the
                     // peer_cuids index, replacing the block_dispatch global
                     // table) + one piece-level timestamp refresh.
-                    let at = Instant::now();
+                    let at = face.clock.now();
                     let row_blocks = face
                         .piece_bytes
                         .get(piece as usize)
@@ -3628,7 +3721,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // current behavior); the bitmap is rebuilt in place (`reset` keeps
     // capacity).
     let two_phase = two_phase_ledger();
-    let claims_now = Instant::now();
+    let claims_now = face.clock.now();
     scratch.claimed.reset(face.piece_count);
     rebuild_claimed_into(face, claims_now, two_phase, &mut scratch.claimed);
     let claimed = &mut scratch.claimed;
@@ -3738,7 +3831,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // [`PieceSentLedger`] row (a resume-mid-tail seeds at the resume round
     // — bounded over-wait of one deadline, the conservative direction).
     if tail_active && !tail_deadline.is_zero() {
-        let now_tail = Instant::now();
+        let now_tail = face.clock.now();
         face.endgame_deadline.retain(|&p, _| {
             !done.get(p as usize).copied().unwrap_or(true) && face.blocks_sent.contains_key(&p)
         });
@@ -3817,7 +3910,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // completed face has no tail semantics); scoped to rarest_first (the
     // same range as the endgame gate — endgame_rf always implies it).
     if endgame_rf {
-        let now_edge = Instant::now();
+        let now_edge = face.clock.now();
         if face.last_mile_edge.is_none() && missing_pieces > 0 && missing_pieces <= lastmile_n {
             face.last_mile_edge = Some(now_edge);
         }
@@ -3840,7 +3933,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     if endgame_rf && !edge_live {
         face.endgame_live
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        face.endgame_edge = Some(Instant::now());
+        face.endgame_edge = Some(face.clock.now());
         let (tcp_down, utp_down, tcp_conns, utp_conns) = face_transport_supply(face);
         info!(target: "taiji::core::engine", face = fi,
             missing = missing_pieces, in_flight = claimed.len(),
@@ -3849,7 +3942,8 @@ pub(super) fn dispatch_face_selected_with_stream(
     } else if !endgame_rf && edge_live {
         face.endgame_live
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let seg = face.endgame_edge.take().map(|t| t.elapsed());
+        let exit_now = face.clock.now();
+        let seg = face.endgame_edge.take().map(|t| exit_now - t);
         if let Some(seg) = seg {
             face.endgame_cum += seg;
         }
@@ -3957,7 +4051,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     let endgame_pieces: &Vec<u64> = endgame_pieces;
     let round_copies: &mut std::collections::HashMap<u64, u64> = &mut scratch.round_copies;
     if endgame_rf {
-        let now_round = Instant::now();
+        let now_round = face.clock.now();
         for &p in endgame_pieces.iter() {
             // The window switch (on = the piece's adaptive window upper
             // bound, see [`piece_reissue_window_max`]; off = the fixed 2s
@@ -4043,7 +4137,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     // test-driven faces).
     let fast_busy_k = endgame_fast_busy_k();
     if endgame_rf && strict_endgame && !last_mile && fast_busy_k == 0 {
-        let now_inflight = Instant::now();
+        let now_inflight = face.clock.now();
         fill_endgame_peer_inflight(
             face,
             now_inflight,
@@ -4064,7 +4158,7 @@ pub(super) fn dispatch_face_selected_with_stream(
     if endgame_rf && strict_endgame && !last_mile && fast_busy_k >= 1 {
         fill_endgame_peer_busy_pieces(
             face,
-            Instant::now(),
+            face.clock.now(),
             two_phase,
             &mut scratch.endgame_busy_pieces,
         );
@@ -4484,7 +4578,7 @@ fn issue_piece_blocks(face: &mut FaceState, ctx: &mut PieceIssueCtx<'_>, piece: 
     else {
         return 0;
     };
-    let now = Instant::now();
+    let now = face.clock.now();
     // Take the row once; block state / owner / piece-level timestamp all
     // read inline (dissolves the old double lookup of the blocks_sent
     // inner map + the block_dispatch global map; freshness reads the

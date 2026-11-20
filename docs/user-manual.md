@@ -188,7 +188,11 @@ taiji --interface 10.0.0.5 <torrent|magnet> -d <dir>   # or an interface name: -
   before connect, so traffic egresses through the chosen interface (the
   VPN/corporate-LAN case). Binding a v4 address narrows UDP to the v4
   face (a wildcard v6 face would leak egress off the chosen interface);
-  the same family narrowing applies to a v6 bind.
+  the same family narrowing applies to a v6 bind. Inbound peer
+  connections are verified against the bind too: a connection whose
+  local address is not the chosen address is rejected at the door and
+  counted (`taiji_peer_blocked_ingress_total`) — inbound and outbound
+  stay on the chosen interface.
 - Startup-only (like `--listen-port`): applies at process start; the RPC
   option surface has no `interface` key.
 - **Declared narrow residual** (still on the default route, disclosed at
@@ -219,9 +223,20 @@ taiji --taiji-listen-interfaces "10.0.0.5:6881,[2001:db8::a]:6882" <torrent> -d 
   (uTP accepts, DHT and UDP-tracker traffic ride per face). This is
   how a dual-homed host (corporate LAN + VPN) accepts peers on both
   interfaces at once.
+- **Egress dispatch** (uTP + UDP tracker): outbound uTP connections
+  and UDP-tracker announces pick their face per destination — the face
+  whose subnet contains the destination wins (source-address
+  consistency: traffic to the LAN leaves via the LAN face), falling
+  back to the family's first-bound face. With one face per family
+  (the default shape) every pick is that face — no change.
 - **Interaction with `--interface`**: the egress bind's address family
   narrows the face list (a v4 egress keeps only v4 endpoints, and vice
   versa); endpoints of the other family are dropped with a warning.
+  With the egress bind armed, inbound peer connections are verified
+  against it: a connection whose local address is not the egress
+  address is rejected at the door and counted
+  (`taiji_peer_blocked_ingress_total`) — inbound and outbound traffic
+  stay on the chosen interface.
 - **Degradation**: if interface enumeration fails or the expansion
   comes out empty, the engine falls back to the single wildcard listen
   with a warning. A face whose exact port cannot bind degrades that

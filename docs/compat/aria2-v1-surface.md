@@ -38,7 +38,7 @@ Naming-surface rules (one surface at a time, `--rpc-aria2-compat`, dispatch.rs:1
 | `forceRemove` | (gid) | aria2.forceRemove 同名 | 写 |
 | `purgeDownloadResult` | () | aria2.purgeDownloadResult 同名 | 写 |
 | `removeDownloadResult` | (gid) | aria2.removeDownloadResult 同名 | 写 |
-| `changeUri` | (gid, fileIndex: int≥1, delUris: string[], addUris: string[], pos?) | aria2.changeUri 同名 | 写;fileIndex ≥1 校验,措辞照 RpcMethodImpl.cc(methods.rs:628-657) |
+| `changeUri` | (gid, fileIndex: int≥1, delUris: string[], addUris: string[], pos?) | aria2.changeUri 同名 | 写;fileIndex ≥1 校验,措辞照 RpcMethodImpl.cc(methods.rs:628-657);真实台账编辑:torrent=任务级 webseed 台账(http(s) 准入门)、HTTP=源清单(addUri 同面),活跃任务借 changeOption 重启路径生效;回执真实 [deleted, added];与 aria2 per-file 条目的差异已声明(详见 docs/rpc-api.md) |
 | `changePosition` | (gid, pos: int, how: "POS_SET"\|"POS_CUR"\|"POS_END") | aria2.changePosition 同名 | 写;Special 臂;非法 how → "Illegal argument.";gid 与 how 同坏时措辞优先级与上游相反(已声明差异,methods.rs:715-739) |
 | `changeOption` | (gid, options) | aria2.changeOption 同名 | 写 |
 | `getOption` | (gid) | aria2.getOption 同名 | 只读;QueryStatus |
@@ -550,7 +550,7 @@ The following open review items were recorded by the read-only survey that produ
 ### Methods
 
 1. The header comment at taiji-rpc/src/dispatch/methods.rs:6 says "the 35 aria2 methods", which does not match the registry decomposition (33 upstream same-name bare names + addMetalink = 34 bare names, plus forceRecheck as an extension and 3 `system.*` entries) — likely a stale comment; needs a human pass (does not affect the table itself).
-2. addTorrent parameter slot 1 (webseed URIs) is currently dropped explicitly (dispatch/methods.rs:551-556); the code comment declares the merge as pending engine-side wiring. The difference from upstream aria2 (which merges them into the webseed set) is declared in code; the external documentation stance needs human confirmation.
+2. addTorrent parameter slot 1 (webseed URIs) is consumed: unioned into the task's webseed ledger at intake (per-entry http(s) gate, lenient skip — the upstream FileEntry add posture), carried through the internal motrix-webseed-uris option key.
 3. taiji.moveStorage is implemented (same-volume/cross-volume payload migration with a config_json move journal; async "OK" acceptance). taiji.renameFile remains registered but always answers NotSupported; whether any frontend actually calls it was not checked (the motrix-app frontend code was not read).
 4. The survey was read-only; cargo test was not run (a build writes target/ artifacts). The governance test asserting the two registry tables are identical lives at taiji-core/src/session/command.rs:783-810; its pass status is unverified.
 5. "Same name" in the aria2-counterpart column follows the inline comments in taiji-domain/src/methods.rs (several cross-checked against RpcMethodFactory.cc / RpcMethodImpl.cc) and the public aria2 1.37.0 method set; the aria2 sources were not re-checked row by row.

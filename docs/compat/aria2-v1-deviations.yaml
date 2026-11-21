@@ -145,7 +145,7 @@
   kind: known-deviation
   where: "taiji/crates/taiji-core/src/session/actor/commands.rs:3018-3041"
   what: >-
-    changeUri 的文件条目 URI 操作为声明的 no-op:本侧无文件条目 URI 账本(BEP19 webseed 不消费),一切形状恒回 [0,0](上游 BT add 得 [0,N]、HTTP 真实删改计数);gid/fileIndex 域检查与 verbatim 报错文案仍逐字对齐上游臂序。
+    changeUri 为真实现:回执真实 [deleted, added] 计数,编辑落在任务级台账上 —— torrent=任务级 BEP19 webseed 台账(qBittorrent/libtorrent url-list 形态,与上游 per-file 条目的已声明差异;初始 = url-list ∪ addTorrent 参数位1 ∪ magnet ws=),add 门为 http(s)(引擎 webseed 面是 HTTP Range 消费者,上游任意可解析 URI 门为已声明分歧),无去重,pos 钳尾;HTTP=源清单(addUri 同面);活跃任务借 changeOption 重启路径生效(停熄→原队首重激活时引擎重投影/重建源集,上游为原地 kick/惰性撤回在途,已声明);magnet/.torrent URL/媒体维持声明 [0,0](元数据阶段无 file-entry URI 面);gid/fileIndex 域检查与 verbatim 报错文案仍逐字对齐上游臂序。
   refs: >-
     commands.rs:3018-3041("The file-entry URI operation is a declared no-op … always 0 … this pass stays [0,0]");docs/rpc-api-diff.md §1:47(scheme A 收口、gap declaration、跟踪编辑改走 scheme B 扩展);臂序对照 RpcMethodImpl.cc
 

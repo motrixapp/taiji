@@ -5220,7 +5220,7 @@ pub(super) fn build_v2_data_plane(
         // hash_files = None) and `v2_face` (`Addressing::per_file` +
         // hash_files = Some, produced by the same struct literal); every
         // other literal is a test fixture with hash_files = None (the only
-        // Some integration face, bep53_select, also pairs
+        // Some integration face, select_file, also pairs
         // `Addressing::per_file`). The `addressing` and `hash_files`
         // fields are type-independent and the invariant is not bound by
         // the type system — a future caller's violation surfaces here

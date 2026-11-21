@@ -432,7 +432,7 @@ impl IpGuard {
 /// ([`crate::dht::crc32c`]; standard check values anchored) with the same
 /// byte-order semantics: the reference feeds the CRC the in-memory byte
 /// sequence (memcpy shape), and IP octets are network-order bytes.
-pub fn bep40_rank(local: SocketAddr, remote: SocketAddr) -> u32 {
+pub fn peer_priority_rank(local: SocketAddr, remote: SocketAddr) -> u32 {
     // Cross-family: the reference asserts this (see the fn docs) — ranking-neutral fixed value.
     if local.is_ipv4() != remote.is_ipv4() {
         return 0;
@@ -1034,7 +1034,7 @@ mod tests {
     /// same address different ports / identical endpoints —
     /// rank(a,b) == rank(b,a).
     #[test]
-    fn bep40_rank_symmetric() {
+    fn peer_priority_symmetric() {
         let v4a = sa("203.0.113.7:6881");
         let v4b = sa("198.51.100.9:51413");
         let v6a = sa("[2001:db8::10]:6881");
@@ -1048,11 +1048,15 @@ mod tests {
             (v4a, v4a),
             (v6a, v6a),
         ] {
-            assert_eq!(bep40_rank(a, b), bep40_rank(b, a), "symmetry {a} <-> {b}");
+            assert_eq!(
+                peer_priority_rank(a, b),
+                peer_priority_rank(b, a),
+                "symmetry {a} <-> {b}"
+            );
         }
         // Cross-family: ranking-neutral fixed value 0 (identical both ways).
-        assert_eq!(bep40_rank(v4a, v6a), 0);
-        assert_eq!(bep40_rank(v6a, v4a), 0);
+        assert_eq!(peer_priority_rank(v4a, v6a), 0);
+        assert_eq!(peer_priority_rank(v6a, v4a), 0);
     }
 
     /// v4 mask semantics (`torrent_peer.cpp`): memcmp differs within 2B ->
@@ -1064,7 +1068,7 @@ mod tests {
     /// endpoint pairs within the same /16 generally get different ranks
     /// (low-order clustering is not neutralization; the BEP-40 intent).
     #[test]
-    fn bep40_rank_v4_mask_erased_bits_neutral() {
+    fn peer_priority_v4_mask_erased_bits_neutral() {
         let self_ep = sa("203.0.113.1:6881");
         let a = sa("198.51.100.9:1000");
         // Row choice depends only on the first-differing depth between self
@@ -1078,24 +1082,37 @@ mod tests {
             };
             sa(&format!("198.51.{}.{}:1000", m[2] | 0xAA, m[3] | 0xAA))
         };
-        assert_eq!(bep40_rank(self_ep, a), bep40_rank(self_ep, a_flip_erased));
+        assert_eq!(
+            peer_priority_rank(self_ep, a),
+            peer_priority_rank(self_ep, a_flip_erased)
+        );
         // Kept-bit flip (byte 1: 51 -> 52) -> different rank.
         let b = sa("198.52.100.9:1000");
-        assert_ne!(bep40_rank(self_ep, a), bep40_rank(self_ep, b));
+        assert_ne!(
+            peer_priority_rank(self_ep, a),
+            peer_priority_rank(self_ep, b)
+        );
         // Kept-bit flip (even bit of mask byte 2: 0x64 -> 0x74, bit 4) -> differs.
         let c = sa("198.51.116.9:1000");
-        assert_ne!(bep40_rank(self_ep, a), bep40_rank(self_ep, c));
+        assert_ne!(
+            peer_priority_rank(self_ep, a),
+            peer_priority_rank(self_ep, c)
+        );
         // Determinism: same input, same output across calls.
-        assert_eq!(bep40_rank(self_ep, a), bep40_rank(self_ep, a));
+        assert_eq!(
+            peer_priority_rank(self_ep, a),
+            peer_priority_rank(self_ep, a)
+        );
     }
 
-    /// v6 mask semantics (`torrent_peer.cpp`): first differing byte i ->
+    /// v6 mask semantics (spec: BEP40 "Peer Priority"; reference
+    /// `torrent_peer.cpp`): first differing byte i ->
     /// offset = max(i+1, 5); bytes at positions > offset are partially
     /// masked 0x55 on both sides. Property: flipping erased bits (odd
     /// bits) inside the masked region -> identical rank; flipping
     /// kept-region bits (<= offset) -> different rank.
     #[test]
-    fn bep40_rank_v6_mask_offset_semantics() {
+    fn peer_priority_v6_mask_offset_semantics() {
         // self and a first differ at byte 8 (group[4] high byte 0x80 vs
         // 0x00) -> offset = max(9,5) = 9: bytes 0..9 kept, 10..15 masked.
         let self_ep = sa("[2001:db8::1]:6881");
@@ -1109,12 +1126,18 @@ mod tests {
         let mut erased = oct(a);
         erased[10] |= 0xAA;
         let a_erased = SocketAddr::new(IpAddr::V6(Ipv6Addr::from(erased)), 1000);
-        assert_eq!(bep40_rank(self_ep, a), bep40_rank(self_ep, a_erased));
+        assert_eq!(
+            peer_priority_rank(self_ep, a),
+            peer_priority_rank(self_ep, a_erased)
+        );
         // Kept-region flip (byte 9 keeps every bit) -> different rank.
         let mut kept = oct(a);
         kept[9] |= 0xAA;
         let a_kept = SocketAddr::new(IpAddr::V6(Ipv6Addr::from(kept)), 1000);
-        assert_ne!(bep40_rank(self_ep, a), bep40_rank(self_ep, a_kept));
+        assert_ne!(
+            peer_priority_rank(self_ep, a),
+            peer_priority_rank(self_ep, a_kept)
+        );
         // The offset floor of 5 in effect: base and x first differ at byte 3
         // (0c08 vs 0c09) -> offset = max(4,5) = 5 -> bytes 6..15 are the
         // masked region (a byte-7 flip is absorbed).
@@ -1123,6 +1146,9 @@ mod tests {
         let mut x_erased = oct(x);
         x_erased[7] |= 0xAA;
         let x_erased = SocketAddr::new(IpAddr::V6(Ipv6Addr::from(x_erased)), 1000);
-        assert_eq!(bep40_rank(base, x), bep40_rank(base, x_erased));
+        assert_eq!(
+            peer_priority_rank(base, x),
+            peer_priority_rank(base, x_erased)
+        );
     }
 }

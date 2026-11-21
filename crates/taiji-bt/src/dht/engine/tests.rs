@@ -1072,7 +1072,7 @@ async fn recv_packet(out_rx: &mut mpsc::Receiver<OutboundPacket>) -> (SocketAddr
 /// textual basis and would cut off non-compliant bootstrap routes, see
 /// the on_query module docs).
 #[tokio::test]
-async fn bep42_noncompliant_get_peers_serviced_and_routed() {
+async fn noncompliant_get_peers_serviced_and_routed() {
     let (handle, _ev, mut out_rx, in_tx, _join) =
         spawn_channel_engine(DhtFamily::V4, 6881, fast_cfg(), None);
     let from = public_addr(6881);
@@ -1119,7 +1119,7 @@ async fn bep42_noncompliant_get_peers_serviced_and_routed() {
 /// the same-shaped query enters the table ("Any peer on a local network
 /// address is exempt").
 #[tokio::test]
-async fn bep42_exempt_source_is_routed() {
+async fn exempt_source_is_routed() {
     let (handle, _ev, _out, in_tx, _join) =
         spawn_channel_engine(DhtFamily::V4, 6881, fast_cfg(), None);
     inject_query(
@@ -1140,7 +1140,7 @@ async fn bep42_exempt_source_is_routed() {
 /// ("MUST never be used to store information on"); the same-shaped
 /// announce from an exempt address is recorded normally (control).
 #[tokio::test]
-async fn bep42_noncompliant_announce_not_stored() {
+async fn noncompliant_announce_not_stored() {
     let (handle, _ev, mut out_rx, in_tx, _join) =
         spawn_channel_engine(DhtFamily::V4, 6881, fast_cfg(), None);
     let ih = [0x55; 20];
@@ -1240,7 +1240,7 @@ async fn bep42_noncompliant_announce_not_stored() {
 /// anchored together, guarding against landing in the r dict or losing
 /// the port).
 #[tokio::test]
-async fn bep42_ping_reply_carries_top_level_ip_field() {
+async fn ping_reply_carries_top_level_ip_field() {
     let (handle, _ev, mut out_rx, in_tx, _join) =
         spawn_channel_engine(DhtFamily::V4, 6881, fast_cfg(), None);
     let from = public_addr(51414);
@@ -1276,7 +1276,7 @@ async fn bep42_ping_reply_carries_top_level_ip_field() {
 /// id is stable while the address is unchanged; exempt addresses do not
 /// trigger re-derivation (libtorrent node.cpp update_node_id semantics).
 #[tokio::test]
-async fn bep42_set_external_ip_rederives_node_id() {
+async fn set_external_ip_rederives_node_id() {
     let (handle, _ev, _out, _in_tx, _join) =
         spawn_channel_engine(DhtFamily::V4, 6881, fast_cfg(), None);
     let id0 = call("snapshot", handle.snapshot()).await.node_id;
@@ -1315,7 +1315,7 @@ async fn bep42_set_external_ip_rederives_node_id() {
 /// node's token is never used even when obtained (service and lookup
 /// progress are unaffected).
 #[tokio::test]
-async fn bep42_announce_peer_skipped_for_noncompliant_targets() {
+async fn announce_peer_skipped_for_noncompliant_targets() {
     // An invalid-id node (public-looking) and an exempt-address node (any id
     // is valid) enter the table via the restore state — they are exactly the
     // lookup candidates.
@@ -1581,7 +1581,7 @@ async fn announce_peer_invalid_token_replies_203_until_budget_exhausted() {
     // the routing table (service as usual), and fast_cfg's 50ms refresh
     // check would dispatch find_node outbound within the quiet window,
     // disturbing the "silence after excess" assertion (same handling as
-    // bep42_announce_peer_skipped_for_noncompliant_targets).
+    // announce_peer_skipped_for_noncompliant_targets).
     let mut cfg = fast_cfg();
     cfg.refresh_check_interval = Duration::from_secs(3600);
     cfg.peer_announce_check_interval = Duration::from_secs(3600);
@@ -2003,7 +2003,7 @@ async fn get_peers_reply_is_bounded_under_announce_flood() {
         spawn_channel_engine(DhtFamily::V4, 6881, boundedness_cfg(), None);
     let ih = [0x99; 20];
     // A 127/8 exempt source (BEP42 storage exemption, the same convention as
-    // the control in bep42_noncompliant_announce_not_stored) — announce
+    // the control in noncompliant_announce_not_stored) — announce
     // records are not refused by the storage check.
     let bot = v4_addr(9);
     let flood: u16 = 700;
@@ -2213,7 +2213,7 @@ async fn recv_response_bytes_to(
 /// v4/v6 in the table, pack_nodes raised MixedAddressFamilies and the
 /// whole reply was suppressed (receive timeout).
 #[tokio::test]
-async fn bep32_want_governs_get_peers_reply_node_keys() {
+async fn want_governs_get_peers_reply_node_keys() {
     // Table seed: 2 v6 nodes (restore) + the v4 querier (enters via on_query)
     // → the nearest-K set is mixed-family, so want filtering is the sole
     // decider of the reply keys.
@@ -2482,7 +2482,7 @@ async fn outbound_lookup_queries_carry_want_both_families() {
 /// v6 packets, and trying would just dead-wait on a doomed transaction);
 /// the nodes stay in the table for the reply side's want dual-key
 /// advertisement (see
-/// `bep32_want_governs_get_peers_reply_node_keys`). Shape: a v6-only
+/// `want_governs_get_peers_reply_node_keys`). Shape: a v6-only
 /// restore into a v4 engine → forced refresh dispatches a lookup → all
 /// candidates are foreign-family → zero outbound and the task completes
 /// immediately.

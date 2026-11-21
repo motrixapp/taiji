@@ -795,7 +795,7 @@ proptest! {
 /// bt_peer_connection.cpp writes the key only when set). Key order is
 /// ascending byte order (upload_only < v).
 #[test]
-fn bep21_upload_only_encode_table() {
+fn upload_only_encode_table() {
     // (name, upload_only, expected dict bytes).
     let rows: Vec<(&str, bool, &[u8])> = vec![
         // Set: the 11:upload_onlyi1e key is present (BEP21 value is always 1).
@@ -843,7 +843,7 @@ fn bep21_upload_only_encode_table() {
 /// the same truthiness); missing is false; non-Int values are ignored
 /// (BEP10 interop).
 #[test]
-fn bep21_upload_only_decode_table() {
+fn upload_only_decode_table() {
     let rows: Vec<(&str, &[u8], bool)> = vec![
         ("value 1", b"d11:upload_onlyi1ee", true),
         ("nonzero truthy", b"d11:upload_onlyi2ee", true),

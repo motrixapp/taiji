@@ -2262,7 +2262,7 @@ mod tests {
     /// lenient read has the same flavor); a non-string type →
     /// MalformedField.
     #[test]
-    fn bep42_top_level_ip_field_wire_vectors() {
+    fn top_level_ip_field_wire_vectors() {
         let v4_ep = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(124, 31, 75, 21), 39501));
         let v6_ep = SocketAddr::V6(SocketAddrV6::new(lit6("2001:db8::1"), 6881, 0, 0));
         let msg = |ep: Option<SocketAddr>| {

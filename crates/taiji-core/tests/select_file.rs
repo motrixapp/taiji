@@ -22,8 +22,8 @@
 //!    criterion is all pieces; selection narrows it to the masked piece
 //!    count).
 //!
-//! Added v2-only face: `bep53_select_file_v2_only_downloads_only_
-//! selection` — multiple files (file lengths with non-piece-multiple
+//! Added v2-only face: `select_file_v2_only_downloads_only_selection`
+//! — multiple files (file lengths with non-piece-multiple
 //! tails), only the selected file downloads, criteria of the same shape;
 //! the seeder additionally answers BEP 52 hash requests (id 21 -> 22).
 //!
@@ -185,8 +185,9 @@ async fn fake_tracker(seeder: std::net::SocketAddr) -> std::net::SocketAddr {
     addr
 }
 
+/// BEP53 `so=`/select-file face: only the selected file downloads.
 #[tokio::test]
-async fn bep53_select_file_downloads_only_selection() {
+async fn select_file_downloads_only_selection() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_ansi(false)
@@ -554,7 +555,7 @@ async fn spawn_v2_seeder(
 /// tails — f0 = f1 = 20_000B with a 3_616B short last piece, f2 = 10_000B
 /// single piece) selecting only the middle file. End-to-end criteria of
 /// the same shape as the v1 face (cross-check
-/// `bep53_select_file_downloads_only_selection`):
+/// `select_file_downloads_only_selection`):
 /// 1. S receives requests only for the **selected file's segments** (flat
 /// pieces 2, 3) — before the fix a mask flattened on the byte grid
 /// wrongly picked f0's piece 1 and missed f1's piece 3 (the observed
@@ -564,7 +565,7 @@ async fn spawn_v2_seeder(
 /// 3. the completion criterion = the selected piece count (2/5 pieces
 /// completes).
 #[tokio::test]
-async fn bep53_select_file_v2_only_downloads_only_selection() {
+async fn select_file_v2_only_downloads_only_selection() {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_ansi(false)

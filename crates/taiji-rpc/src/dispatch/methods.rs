@@ -574,14 +574,30 @@ pub(crate) async fn execute_session_method(
                     .ok_or_else(|| param_error(0, false))?;
                 let torrent = base64::decode(raw)
                     .ok_or_else(|| RpcError::generic(E_MSG_TORRENT_NOT_BASE64))?;
-                // Param 1 = webseed URIs (kept in the aria2 shape; the
-                // Motrix frontend never sends it — always empty). BEP19
-                // url-list parsing is wired (the webseed set is projected
-                // from the .torrent url-list); merging parameter URIs
-                // into the webseed set is engine-side wiring — until then
-                // they are explicitly dropped and declared.
-                let _ = params.get(1);
-                let options = opt_options(&params, 2)?;
+                // Param 1 = webseed URIs (the aria2 shape): unions the
+                // task's webseed ledger at intake (the bittorrent_helper
+                // url-list ∪ add-URIs rule). Carried through the
+                // internal `motrix-webseed-uris` option key (the
+                // motrix-output-paths discipline — the actor's intake
+                // parses it; http(s) filtering happens there). Non-list
+                // / non-string entries are skipped leniently (the
+                // upstream FileEntry add gate's posture).
+                let mut options = opt_options(&params, 2)?;
+                let webseeds: Vec<String> = match params.get(1) {
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if !webseeds.is_empty() {
+                    match serde_json::to_string(&webseeds) {
+                        Ok(encoded) => {
+                            options.insert("motrix-webseed-uris".to_string(), encoded);
+                        }
+                        Err(_) => return Err(RpcError::generic(E_MSG_ILLEGAL_ARGUMENT)),
+                    }
+                }
                 crate::aria2::option::note_option_intake(&options, "addTorrent");
                 let position = opt_position(&params, 3)?;
                 Ok(SessionCommand::AddTorrent {

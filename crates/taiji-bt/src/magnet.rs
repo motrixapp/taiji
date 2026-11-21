@@ -629,11 +629,12 @@ mod tests {
 
     /// Valid forms: single index / inclusive range / mixed (BEP53 example
     /// `0,2,4,6-8`).
-    /// `ws` webseed parsing (BEP9): http(s) only, order preserved,
+    /// `ws` webseed parsing vectors: http(s) only, order preserved,
     /// deduplicated, bounded; non-http schemes and non-URLs are skipped
     /// leniently (the xs/fl/as metadata-source discipline); absent = none.
+    /// Spec: BEP9 "web seed links" (the `ws=` parameter).
     #[test]
-    fn bep9_ws_webseed_vectors() {
+    fn ws_parse_valid_vectors() {
         let btih = "magnet:?xt=urn:btih:248d0a1cd08284299de78d5c1ed359bb46717d8c";
         // Multiple ws values, order of appearance, http(s) only.
         let m = parse(&format!(

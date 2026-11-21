@@ -1617,8 +1617,9 @@ async fn change_uri_positional_shape_and_counts() {
     .await;
     let gid_b = ok_str(&b);
     // All positional params given: fileIndex=1 is in range for the single
-    // file → BT tasks answer the upstream no-op counts [0, 0] (the
-    // file-entry has no URI ledger; deletes are intercepted).
+    // file → the BT webseed ledger answers real counts (two http(s)
+    // additions admitted, zero deletions — the waiting task takes the
+    // edit without an engine round trip).
     let resp = call_auth(
         &st,
         "changeUri",
@@ -1632,7 +1633,15 @@ async fn change_uri_positional_shape_and_counts() {
     )
     .await;
     assert_eq!(resp.code, 0, "{}", resp.payload["message"]);
-    assert_eq!(resp.payload, json!([0, 0]), "[deleted, added] integer list");
+    assert_eq!(resp.payload, json!([0, 2]), "[deleted, added] integer list");
+    // The added webseeds are the task's URI face (getUris; a waiting
+    // task is all "waiting").
+    let uris = call_auth(&st, "getUris", vec![json!(gid_b.clone())]).await;
+    assert_eq!(uris.code, 0);
+    let arr = as_arr(&uris.payload, "getUris");
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["uri"], "http://x/1");
+    assert_eq!(arr[0]["status"], "waiting");
     // fileIndex out of range (> file-entry count) → verbatim text (RpcMethodImpl.cc).
     let oob = call_auth(
         &st,
@@ -2932,6 +2941,41 @@ async fn file_priority_shape_and_write_gate() {
             "{tag} is a parse-face rejection (before the session), not the auth face"
         );
     }
+}
+
+/// addTorrent param-1 webseed URIs (the aria2 shape): unions into the
+/// task's webseed ledger at intake; non-http(s) entries are skipped
+/// leniently (the upstream per-entry gate posture).
+#[tokio::test]
+async fn add_torrent_webseed_uris_parameter_unions() {
+    let st = state(Some("t"));
+    let dir = std::env::temp_dir().join(format!("bh-p34-wsparam-{}", std::process::id()));
+    let add = call_auth(
+        &st,
+        "addTorrent",
+        vec![
+            json!(b64(&v1_named_torrent("ws-param.bin"))),
+            json!([
+                "http://w1.example/seed",
+                "https://w2.example/seed",
+                "ftp://skipped/"
+            ]),
+            json!({
+                "dir": dir.display().to_string(),
+                "pause": "true",
+            }),
+        ],
+    )
+    .await;
+    assert_eq!(add.code, 0, "addTorrent: {}", add.payload["message"]);
+    let gid = ok_str(&add);
+    let uris = call_auth(&st, "getUris", vec![json!(gid)]).await;
+    assert_eq!(uris.code, 0);
+    let arr = as_arr(&uris.payload, "getUris");
+    assert_eq!(arr.len(), 2, "two http(s) admitted, ftp skipped");
+    assert_eq!(arr[0]["uri"], "http://w1.example/seed");
+    assert_eq!(arr[1]["uri"], "https://w2.example/seed");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

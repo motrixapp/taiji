@@ -210,6 +210,7 @@ impl SessionActor {
         &mut self,
         cmd: SessionCommand,
         reply: oneshot::Sender<Result<CommandReply, SessionError>>,
+        received_at: std::time::Instant,
     ) -> bool {
         use SessionCommand as C;
         match cmd {
@@ -238,7 +239,7 @@ impl SessionActor {
                 // pump (the client reply never waits for activation);
                 // instrumentation changes no behavior.
                 let cmd_t0 = std::time::Instant::now();
-                let result = self.add_uri(uris, options, position).await;
+                let result = self.add_uri(uris, options, position, received_at).await;
                 let add_us = cmd_t0.elapsed().as_micros() as u64;
                 let _ = reply.send(result);
                 self.pump_all().await;
@@ -297,12 +298,42 @@ impl SessionActor {
             C::GetServers { gid } => {
                 let _ = reply.send(self.get_servers(&gid).await);
             }
+            C::PrepareBitTorrent => {
+                self.prepare_discovery();
+                let _ = reply.send(Ok(CommandReply::Accepted));
+            }
             C::NotifyNetworkChange => {
                 taiji_io::dns::SharedDns::shared_default().network_changed();
                 let _ = reply.send(Ok(CommandReply::Accepted));
             }
+            C::GetMagnetResolution { gid } => {
+                let result = self.resolve_gid(&gid).and_then(|gid| {
+                    self.magnet_services
+                        .resolution(gid)
+                        .map(|resolution| {
+                            let mut snapshot = resolution.snapshot();
+                            if snapshot.state != crate::magnet::ResolutionState::Ready {
+                                snapshot.state = match self.queue.find(gid) {
+                                    Some(Location::ReservedPaused) => {
+                                        crate::magnet::ResolutionState::Paused
+                                    }
+                                    Some(Location::Reserved) => {
+                                        crate::magnet::ResolutionState::Queued
+                                    }
+                                    Some(Location::Result) => {
+                                        crate::magnet::ResolutionState::Failed
+                                    }
+                                    _ => snapshot.state,
+                                };
+                            }
+                            CommandReply::MagnetResolution(snapshot)
+                        })
+                        .ok_or_else(|| SessionError::failed("magnet diagnostics are unavailable"))
+                });
+                let _ = reply.send(result);
+            }
             C::GetTorrentMetadata { gid } => {
-                let result = self.get_torrent_metadata(&gid);
+                let result = self.get_torrent_metadata(&gid).await;
                 let _ = reply.send(result);
             }
             C::ConfirmTorrentSelection { gid, options } => {

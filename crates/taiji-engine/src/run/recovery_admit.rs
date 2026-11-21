@@ -675,7 +675,17 @@ pub(super) fn emit_recovery_activation(
     state: &mut EngineLoop,
     hook: &Option<Arc<taiji_domain::hook::HookRunner>>,
 ) {
-    let started = activation_missing_files(&state.recovery);
+    let mut started = activation_missing_files(&state.recovery);
+    if let Some(mask) = state.selected_mask.as_deref() {
+        started.retain(|file| {
+            state.recovery.iter().any(|book| {
+                book.files.get(file).is_some_and(|rec| {
+                    (rec.piece_base..rec.piece_base + rec.staging.pieces())
+                        .any(|piece| mask.get(piece as usize).copied().unwrap_or(false))
+                })
+            })
+        });
+    }
     if started.is_empty() {
         return;
     }
@@ -924,7 +934,7 @@ mod tests {
         // consumer arm → driver loop closes; with no peer it stays Missing
         // and never sends blind).
         let (deliver, _rx) = tokio::sync::mpsc::channel::<RecoveredPieceLayer>(8);
-        drive_recovery(&mut face, 0, &mut book, &deliver);
+        drive_recovery(&mut face, 0, &mut book, &deliver, None);
         assert!(matches!(book.files[&0].state, RecoveryFetchState::Missing));
 
         // Good refetched layer → converges into the store (closing the

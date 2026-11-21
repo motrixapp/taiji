@@ -22,7 +22,9 @@ use std::time::Duration;
 use sha1::{Digest as _, Sha1};
 use taiji_bt::peer_wire::Reserved;
 use taiji_bt::piece_id::Addressing;
-use taiji_core::engine::{DownloadEngine, EngineConfig, FaceConfig, FaceKind, WriterFactory};
+use taiji_core::engine::{
+    DownloadEngine, EngineConfig, FaceConfig, FaceKind, TrackerWireConfig, WriterFactory,
+};
 use taiji_store::disk::DiskWriter;
 use taiji_store::disk_policy::{AllocationMode, DiskPolicy, DiskTier};
 use taiji_store::error::StoreError;
@@ -284,47 +286,64 @@ async fn default_tier_has_no_flush_beat() {
         })),
     );
     let root = tokio_util::sync::CancellationToken::new();
-    let engine = DownloadEngine::spawn(cfg, &root);
-    // Start gate: the pipeline is built (its allocation face exists)
-    // before the zero window is judged.
-    let blob = tmp.join("blob.bin");
-    let gate_deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while !blob.exists() {
-        assert!(
-            std::time::Instant::now() < gate_deadline,
-            "the storage pipeline build must complete (blob.bin not seen within \
-             the 15s window — the build was starved)"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    // The zero window (the original 400ms run window, watched
-    // continuously against the monotone counter).
-    let window_end = std::time::Instant::now() + Duration::from_millis(400);
-    loop {
-        let hits = fsyncs.load(Ordering::SeqCst);
-        assert!(
-            hits == 0,
-            "the default tier must not introduce periodic fsync (zero behavior \
-             change in the running window; {hits} fsyncs observed inside it)"
-        );
-        if std::time::Instant::now() >= window_end {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    // final_flush's acknowledged data barrier belongs to persistent engines.
+    // A nonpersistent engine may return before its storage task finishes, so
+    // it cannot establish the before-join durability property asserted here.
+    let (persist, persist_join) =
+        taiji_store::persist::PersistWriter::spawn(tmp.join("state.sqlite3"))
+            .await
+            .unwrap_or_else(|e| panic!("persist: {e}"));
+    let gid = "d150000000000001";
+    persist
+        .upsert_torrent(
+            taiji_store::persist::TorrentRow {
+                gid: gid.into(),
+                name: "disk-policy".into(),
+                state: "downloading".into(),
+                queue_pos: 0,
+                dir: tmp.display().to_string(),
+                config_json: "{}".into(),
+                kind: "v1".into(),
+                v1_infohash: Some(vec![9; 20]),
+                v2_infohash: None,
+                is_private: false,
+                metadata: None,
+                error_code: None,
+                error_msg: None,
+                created_at: 0,
+                updated_at: 0,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("parent: {e}"));
+    let (handle, engine) = DownloadEngine::spawn_controlled(
+        cfg,
+        TrackerWireConfig {
+            persist: Some((gid.into(), persist.clone())),
+            ..Default::default()
+        },
+        &root,
+        taiji_bt::utp::PeerConnectionType::default(),
+    );
+    // Observe the running loop before measuring its flush policy. A fixed
+    // delay from spawn can otherwise cancel a still-constructing pipeline.
+    tokio::time::timeout(Duration::from_secs(15), handle.query_status())
+        .await
+        .unwrap_or_else(|e| panic!("engine readiness timed out: {e}"))
+        .unwrap_or_else(|e| panic!("engine failed before readiness: {e}"));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        fsyncs.load(Ordering::SeqCst),
+        0,
+        "the default tier must not introduce periodic fsync (zero behavior \
+         change in the running window)"
+    );
     root.cancel();
-    // Join-gated barrier assert: the final flush barrier lands before
-    // the engine task finishes, so wait for the join (not a fixed
-    // timeout) before judging the count.
-    let join_deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while !engine.is_finished() {
-        assert!(
-            std::time::Instant::now() < join_deadline,
-            "engine teardown did not finish within the 30s window (starved)"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let _ = engine.await;
+    tokio::time::timeout(Duration::from_secs(30), engine)
+        .await
+        .unwrap_or_else(|e| panic!("engine shutdown timed out: {e}"))
+        .unwrap_or_else(|e| panic!("engine task failed: {e}"));
     assert_eq!(
         fsyncs.load(Ordering::SeqCst),
         1,
@@ -333,6 +352,18 @@ async fn default_tier_has_no_flush_beat() {
          final_flush waits on the barrier value before landing the terminal \
          progress row)"
     );
+    assert!(
+        persist
+            .load_torrent_progress(gid)
+            .await
+            .unwrap_or_else(|e| panic!("progress: {e}"))
+            .is_some()
+    );
+    drop(persist);
+    tokio::time::timeout(Duration::from_secs(10), persist_join)
+        .await
+        .unwrap_or_else(|e| panic!("persist drain: {e}"))
+        .unwrap_or_else(|e| panic!("persist task: {e}"));
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

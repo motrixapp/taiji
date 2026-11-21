@@ -61,6 +61,7 @@ pub use task_phase::{TaskFamily, TaskPhase, TaskPhaseError};
 // The unified task_cookie faces: the sweep report
 // types ride the public face (the bootstrap alert/log consumers).
 pub use write_cookie::{TaskCookieSweepEntry, TaskCookieSweepReport};
+pub use write_metadata_cache::MetadataCacheIdentity;
 
 mod handle;
 mod job;
@@ -74,6 +75,7 @@ mod write_http;
 mod write_ipguard;
 mod write_kv;
 mod write_media;
+mod write_metadata_cache;
 mod write_progress;
 mod write_recovery;
 mod write_torrent;

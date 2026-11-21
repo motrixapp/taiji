@@ -134,6 +134,10 @@ const DOC: &str = include_str!(concat!(
 const WHITELIST: &[(&str, &str)] = &[
     ("get-version-face", "getVersion"),
     ("http-output-ready-event", "taiji.onHttpOutputReady"),
+    (
+        "torrent-metadata-ready-event",
+        "taiji.onTorrentMetadataReady",
+    ),
     ("method-face-missing", "Method-face missing entries"),
     // Fork-specific task-level cookie RPC surface: accepted with Motrix as
     // the baseline, but committed under canonical `taiji.*` names
@@ -876,11 +880,20 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     let (_, no) = call(oa, "system.listNotifications", &[]).await;
     let (_, nn) = call(na, "system.listNotifications", &[]).await;
     declared("listNotifications", "http-output-ready-event", &no, &nn);
+    declared(
+        "listNotifications",
+        "torrent-metadata-ready-event",
+        &no,
+        &nn,
+    );
     let compat_notifications: Vec<_> = result_of(&nn)
         .as_array()
         .unwrap_or_else(|| panic!("notification list missing"))
         .iter()
-        .filter(|name| **name != json!("taiji.onHttpOutputReady"))
+        .filter(|name| {
+            **name != json!("taiji.onHttpOutputReady")
+                && **name != json!("taiji.onTorrentMetadataReady")
+        })
         .cloned()
         .collect();
     zero_diff(
@@ -890,7 +903,7 @@ async fn live_differential_outside_whitelist_is_zero_diff() {
     );
     assert_eq!(
         result_of(&nn).as_array().map(Vec::len),
-        Some(compat_notifications.len() + 1)
+        Some(compat_notifications.len() + 2)
     );
 
     // Non-committed methods (registered on the fork; taiji answers with the

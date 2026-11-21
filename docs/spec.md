@@ -438,9 +438,11 @@ holds take precedence over both queues. Metadata intent is persisted across
 restart; normal magnet auto-upgrades still use the payload queue.
 
 Fetching shares session-owned DHT and TCP/µTP listeners. Per-swarm metadata
-assembly pipelines 4–8 blocks per peer with bounded duplicate requests,
-reassigns rejected/stalled blocks, and verifies the infohash before accepting
-metadata. PEX transport flags drive early `ut_holepunch`; host NAT mappings
+assembly probes with one block per peer and pipelines up to eight after
+progress. An idle supplier with an observed response time can race an overdue
+final block within the existing duplicate-request budget. The original
+request remains active and the assembled infohash must match before admission.
+PEX transport flags drive early `ut_holepunch`; host NAT mappings
 refer to the active listener binding. Explicit magnet sources race peer
 retrieval; a bounded verified cache reuses info bytes without retaining old
 tracker credentials.

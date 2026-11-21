@@ -146,9 +146,37 @@ This selection barrier survives restart; `unpauseAll` skips it and `unpause`
 rejects it until confirmation. Ordinary `pause-metadata` keeps its existing
 pause semantics when this additional option is absent.
 
-- `taiji.getTorrentMetadata(gid)` returns `{data, awaitingSelection}`. `data`
-  is the original verified `.torrent` envelope encoded as base64. Clients do not
-  need access to the engine's metadata directory.
+- `taiji.onTorrentMetadataReady` is a native WebSocket notification with
+  `params: [{gid}]`. It is emitted after verified magnet info is registered
+  behind the selection barrier. Read `getTorrentManifest` directly; no preceding
+  status/file query or feature negotiation is needed. Ordinary user pauses do
+  not emit this event. Notifications are advisory and not replayed on restart;
+  keep status reconciliation for missed events and reconnects. The name stays
+  native even when the aria2 compatibility namespace is enabled.
+- A live pending-selection task shares its admitted original info model with
+  the manifest reader. Restored tasks and post-selection proof enrichment retain
+  the raw-artifact validation path; output mappings never become original paths.
+- `taiji.getTorrentManifest(gid)` returns `{data, awaitingSelection, manifest}`.
+  The retained `getTorrentMetadata` alias returns the same envelope. `data` is
+  base64 metainfo with the original raw info bytes. `manifest` contains
+  `infoHash`, nullable `v1`/`v2`, `name`, `multiFile`, `isPrivate`,
+  `verificationReady`, and `files` (`index`, path `components`, `length`,
+  `padding`). Indices use the engine's primary file view, including padding;
+  hybrid torrents use the v2 view. Original paths survive output renaming.
+  Pure v2 identity is the full 64-character SHA-256; v1/hybrid use SHA-1.
+  Native status and filtered status lists follow this identity convention;
+  the aria2 compatibility namespace retains its 20-byte wire identity.
+- Verified info is sufficient to display and persist a file-selection manifest.
+  `verificationReady=false` means some v2 piece-layer proofs remain missing;
+  clients must not treat the envelope as a complete exported torrent. After
+  confirmation, files without usable verification anchors recover and verify
+  proofs before payload IO. Hybrid torrents may use their verified v1 hashes
+  while v2 proofs remain unavailable; `verificationReady` still describes the
+  completeness of v2 proof material in the returned artifact.
+  Recovered proofs are revalidated when enriching the returned artifact.
+  Metadata-only or save-metadata requests still wait for complete proofs.
+  Motrix stores the manifest in a checksum-bound sidecar and promotes a complete
+  artifact through a new immutable path before updating its task pointer.
 - `taiji.confirmTorrentSelection(gid, options)` accepts only `dir`,
   `select-file`, and `motrix-output-paths`. `dir` must be absolute;
   `select-file` is required and uses the non-padding, 1-based convention above.
@@ -167,6 +195,40 @@ Hosts should persist the user's confirmation before calling this operation so
 an interrupted request can be replayed after restart. Unselected files are not
 preallocated. A piece shared by selected and unselected files may still require
 bytes outside the selected file for hash verification.
+
+## Magnet discovery preparation and timings
+
+`taiji.prepareBitTorrent()` is an authenticated write method returning `"OK"`
+after accepting background preparation. Calls are coalesced. It prepares the
+shared listener and enabled DHT families without adding a task or announcing an
+infohash. Disabled DHT policy is respected. The acknowledgement does not promise
+bootstrap has completed. Motrix and taiji ship this contract together; no
+feature-name negotiation is required.
+
+`taiji.getMagnetResolution(gid)` is a read-only native method. It returns `attemptId` (16 hex characters), `revision`,
+`elapsedMs`, `state` (`queued`, `resolving`, `ready`, `paused`, or `failed`),
+`cache` (`null`, `memory`, or `persistent`), `infoValidatedUs`, and `milestones`. State is projected
+from the current task queue in the same read as the timing snapshot.
+Milestones are optional millisecond offsets from receipt of the session command
+or from re-admission on a later attempt. The keys are
+`admittedMs`, `firstCandidateMs`, `firstHandshakeMs`, `firstInfoBlockMs`,
+`infoVerifiedMs`, `verificationReadyMs`, `metadataReadyMs`, and
+`selectionCommittedMs`. Missing values mean the event has not been observed;
+cache hits need not have network milestones. `infoValidatedUs` measures the same
+start through successful validation of the raw info identity and file layout,
+in microseconds. It is null until validation succeeds. Cache writes, subsequent
+v2 piece-layer requests, and client notification follow this fetch milestone.
+Times use one monotonic clock;
+do not subtract timestamps from another process. A new attempt gets a new ID.
+The latest 2048 records are retained in memory; unavailable or aged-out records
+return an explicit error. Existing task status and notification envelopes are
+unchanged. Hosts can read the snapshot when the normal pause notification
+announces that a native file-selection task is ready.
+
+Native selection-barrier tasks use the bounded four-task metadata queue, even
+when payload download slots are occupied. Confirmation re-enters the payload
+queue under the existing task ID. Resolution timeouts should start at admission,
+not while waiting for a metadata slot.
 
 ## Network context notification
 

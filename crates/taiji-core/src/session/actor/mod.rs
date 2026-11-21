@@ -1674,6 +1674,9 @@ fn validate_checksum_value(v: &str) -> Result<(), SessionError> {
 }
 
 struct TorrentJob {
+    /// Original info already admitted by a live magnet selection phase.
+    /// Restored jobs use the validated raw-row read path instead.
+    selection_info: Option<Arc<Metainfo>>,
     metainfo: Arc<Metainfo>,
     tiers: Vec<(usize, String)>,
     dir: PathBuf,
@@ -1936,7 +1939,7 @@ enum Rebuilt {
 
 /// SessionActor: queue scheduling and the command entry point.
 pub struct SessionActor {
-    cmd_rx: mpsc::Receiver<SessionEnvelope>,
+    cmd_rx: mpsc::Receiver<(SessionEnvelope, Instant)>,
     events: mpsc::Sender<TaskNotice>,
     event_rx: mpsc::Receiver<TaskNotice>,
     /// The six-event notification bus (broadcast(256); sends never block).
@@ -2113,7 +2116,7 @@ pub struct SessionActor {
 
 /// SessionActor control handle: held by the RPC layer / CLI.
 pub struct SessionHandle {
-    cmd_tx: mpsc::Sender<SessionEnvelope>,
+    cmd_tx: mpsc::Sender<(SessionEnvelope, Instant)>,
     events: broadcast::Sender<SessionEvent>,
     /// Recovery extension event bus (taiji.*; the same topology as the
     /// six-event bus).
@@ -2137,10 +2140,11 @@ impl SessionHandle {
     /// Submit a command and await the receipt. Returns
     /// [`SessionError::SessionClosed`] once the actor has exited.
     pub async fn call(&self, cmd: SessionCommand) -> Result<CommandReply, SessionError> {
+        let received_at = Instant::now();
         let (tx, rx) = oneshot::channel();
         let env = SessionEnvelope { cmd, reply: tx };
         self.cmd_tx
-            .send(env)
+            .send((env, received_at))
             .await
             .map_err(|_| SessionError::SessionClosed)?;
         rx.await.map_err(|_| SessionError::SessionClosed)?
@@ -2255,7 +2259,7 @@ impl SessionActor {
     ) -> (SessionHandle, tokio::task::JoinHandle<()>) {
         // Capacity 64: RPC commands are low-frequency; full = backpressure
         // on the caller.
-        let (cmd_tx, cmd_rx) = mpsc::channel::<SessionEnvelope>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (events, event_rx) = mpsc::channel::<TaskNotice>(EVENT_CHANNEL_CAPACITY);
         // Six-event bus: broadcast sends synchronously without blocking
         // (full = slow subscribers lag).
@@ -2597,9 +2601,9 @@ impl SessionActor {
                            _ = self.token.cancelled() => break,
                            env = self.cmd_rx.recv() => match env {
                                None => break, // senders dropped: SessionHandle released → graceful shutdown
-                               Some(env) => {
+                               Some((env, received_at)) => {
                                    let SessionEnvelope { cmd, reply } = env;
-                                   if self.handle_command(cmd, reply).await {
+                                   if self.handle_command(cmd, reply, received_at).await {
                                        break;
                                    }
                                }
@@ -2840,8 +2844,11 @@ impl SessionActor {
         }
         self.queue
             .set_metadata_only(self.jobs.iter().filter_map(|(gid, job)| {
-                matches!(job, Job::Magnet(magnet) if magnet.options.bt_metadata_only)
-                    .then_some(*gid)
+                // A selection barrier cannot start payload either. Keep its
+                // original options: metadata-only changes the final result.
+                matches!(job, Job::Magnet(magnet) if magnet.options.bt_metadata_only
+                    || magnet.options.pause_metadata || !magnet.options.follow_torrent)
+                .then_some(*gid)
             }));
         // Storage-move promotion: feed the queue hold set,
         // then fire every matured mover (quiesce complete / never
@@ -3035,6 +3042,7 @@ use views::{group_tiers, random_session_id};
 mod tests;
 
 mod commands;
+mod discovery;
 mod http_output_commands;
 mod http_publication;
 /// pub(super): the migration importer's HTTP side

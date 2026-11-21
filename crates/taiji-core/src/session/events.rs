@@ -19,6 +19,8 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 pub enum EventKind {
     /// HTTP bytes are durable; the embedding host can publish or postprocess them.
     HttpReady,
+    /// Verified magnet info is resident behind the native selection barrier.
+    MetadataReady,
     /// Group activation (aria2 `EVENT_ON_DOWNLOAD_START`).
     Start,
     /// Pause, finished back to the queue front
@@ -41,8 +43,9 @@ pub enum EventKind {
 impl EventKind {
     /// The full set (shared by iteration and cross-validation tests;
     /// guards against name-face drift).
-    pub const ALL: [EventKind; 7] = [
+    pub const ALL: [EventKind; 8] = [
         EventKind::HttpReady,
+        EventKind::MetadataReady,
         EventKind::Start,
         EventKind::Pause,
         EventKind::Stop,
@@ -168,12 +171,12 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::sync::broadcast;
 
-    /// Structural anchor: ALL enumerates exactly the seven kinds (the
+    /// Structural anchor: ALL enumerates exactly the eight kinds (the
     /// name-face freeze test moved to the rpc adapter together with the
     /// word tables — this side pins only the kind set).
     #[test]
-    fn event_kind_all_enumerates_the_seven_kinds() {
-        assert_eq!(EventKind::ALL.len(), 7);
+    fn event_kind_all_enumerates_the_eight_kinds() {
+        assert_eq!(EventKind::ALL.len(), 8);
         // Exhaustive match over ALL: adding a variant without extending
         // ALL turns the count red; adding a variant at all breaks this
         // match at compile time.
@@ -181,7 +184,8 @@ mod tests {
         for kind in EventKind::ALL {
             match kind {
                 EventKind::HttpReady => http_ready += 1,
-                EventKind::Start
+                EventKind::MetadataReady
+                | EventKind::Start
                 | EventKind::Pause
                 | EventKind::Stop
                 | EventKind::Complete

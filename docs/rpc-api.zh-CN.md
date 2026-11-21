@@ -124,9 +124,29 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
 `unpauseAll` 跳过它，`unpause` 在确认前拒绝启动。没有该附加选项时，普通
 `pause-metadata` 仍保持原有的暂停语义。
 
-- `taiji.getTorrentMetadata(gid)` 返回 `{data, awaitingSelection}`。
-  `data` 是经过验证的原始 `.torrent` 内容的 base64 编码，客户端无需访问
-  引擎的元数据目录。
+- `taiji.onTorrentMetadataReady` 是原生 WebSocket 通知，参数为 `[{gid}]`。
+  已验证的磁链 info 注册到文件选择屏障后发出；客户端可直接读取
+  `getTorrentManifest`，无须先查状态、文件或探测功能。普通用户暂停不产生此事件。
+  通知是尽力投递，重启后不重放；保留状态同步以处理丢失通知和重连。
+  开启 aria2 兼容命名空间后，此通知仍保留原生名称。
+- 活跃会话内待选择的任务与 manifest 读取共享已完成准入校验的原始 info。
+  恢复任务和确认后的证明补全仍从原始 artifact 验证；输出映射不会成为原始路径。
+- `taiji.getTorrentManifest(gid)` 返回 `{data, awaitingSelection, manifest}`，
+  保留的 `getTorrentMetadata` 别名返回相同结构。`data` 是保留原始 info 字节的
+  base64 metainfo。`manifest` 包含 `infoHash`、可空的 `v1`/`v2`、`name`、
+  `multiFile`、`isPrivate`、`verificationReady`，以及 `files` 数组（`index`、
+  路径分量 `components`、`length`、`padding`）。索引对应引擎主文件视图，包含
+  填充项；混合种子使用 v2 视图。输出重命名不会改变这里的原始路径。
+  纯 v2 身份使用完整的 64 位十六进制 SHA-256，v1/混合种子使用 SHA-1。
+  原生状态与按字段过滤的状态列表遵循同一约定；aria2 兼容命名空间保留 20 字节
+  wire identity。
+- 通过验证的 info 即可显示并持久化文件选择列表。`verificationReady=false`
+  表示仍缺少部分 v2 piece-layer 证明，此时不能视为完整的可导出种子。
+  确认后，缺少可用校验依据的选中文件需先恢复并验证证明。混合种子可通过已验证的
+  v1 hash 下载，`verificationReady` 仍表示返回 artifact 的 v2 证明材料是否完整。
+  返回补全后的 artifact 时会重新验证恢复的证明。仅获取元数据或保存元数据的请求仍等待完整证明。
+  Motrix 用校验和绑定 manifest sidecar，证明齐全后先写入新的不可变文件，
+  再更新任务引用，保证崩溃恢复时旧引用仍然有效。
 - `taiji.confirmTorrentSelection(gid, options)` 仅接受 `dir`、
   `select-file` 和 `motrix-output-paths`。`dir` 必须是绝对路径；
   `select-file` 必填，使用上述不计填充文件、从 1 开始的序号。
@@ -141,6 +161,32 @@ aria2 面 —— 专供外部 aria2 前端直接替换使用与差分交叉验�
 宿主应先保存用户确认，再调用此操作，以便在请求中断后重放。未选文件不会
 被预分配；当选中和未选文件共享同一个分块时，为完成哈希验证，仍可能需要
 下载选中文件以外的部分字节。
+
+## 磁链发现预热与分阶段计时
+
+`taiji.prepareBitTorrent()` 是需要认证的写方法，接受后台准备请求后返回
+`"OK"`，并发请求会合并。它准备共享监听器和已启用的 DHT 地址族，不新增任务，
+也不 announce 任何 infohash；遵守关闭 DHT 的设置。返回成功不表示 DHT 引导
+已经完成。Motrix 与 taiji 同步发布这套契约，无需按功能名称协商。
+
+`taiji.getMagnetResolution(gid)` 是原生只读方法。返回 `attemptId`（16 位十六进制）、`revision`、
+`elapsedMs`、`state`（`queued`、`resolving`、`ready`、`paused` 或 `failed`）、
+`cache`（`null`、`memory` 或 `persistent`）、`infoValidatedUs` 和 `milestones`。状态与阶段快照
+在同一次读取中按当前任务队列计算。
+阶段字段为可选的毫秒偏移，起点是会话收到命令或后续尝试重新准入的时刻。
+字段包括 `admittedMs`、
+`firstCandidateMs`、`firstHandshakeMs`、`firstInfoBlockMs`、`infoVerifiedMs`、
+`verificationReadyMs`、`metadataReadyMs`、`selectionCommittedMs`。缺省表示尚未
+观察到该阶段；缓存命中可以没有网络阶段。`infoValidatedUs` 从同一起点计到
+原始 info 身份和文件结构均通过校验，单位为微秒，校验成功前为 `null`。
+缓存写入、后续 v2 piece layer 请求和客户端通知在此之后。所有时间来自同一单调时钟，不能与
+其他进程的时间戳相减。新尝试使用新 ID。内存保留最近 2048 条记录，不存在或
+已淘汰的记录明确报错。原有任务状态和通知格式保持不变；宿主可在原生文件
+选择任务就绪的暂停通知后读取快照。
+
+原生文件选择屏障任务使用有界的四槽元数据队列，普通下载槽位占满时仍可
+解析。确认后保持同一任务 ID，重新按下载槽位排队。解析超时应从准入开始
+计算，不应消耗在等待元数据槽位期间。
 
 ## 网络上下文通知
 

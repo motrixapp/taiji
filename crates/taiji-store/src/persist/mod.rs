@@ -24,8 +24,8 @@ pub use fork_import::{
 pub use schema::{MIGRATIONS, Migration, SCHEMA_V2_TABLES, SCHEMA_V3_TABLES};
 pub use writer::{
     DhtStateRow, HttpTaskRow, HttpTaskSnapshot, IpfilterRow, MediaArchiveRow, MediaFormatRow,
-    MediaKeyRow, MediaSegmentRow, MediaTaskRow, MediaTrackRow, PeerBanRow, PersistHandle,
-    PersistJob, PersistObserve, PersistOutcome, PersistWriter, RecoveredLayerRow,
+    MediaKeyRow, MediaSegmentRow, MediaTaskRow, MediaTrackRow, MetadataCacheIdentity, PeerBanRow,
+    PersistHandle, PersistJob, PersistObserve, PersistOutcome, PersistWriter, RecoveredLayerRow,
     SharedPersistObserve, TASK_KIND_HTTP, TASK_KIND_MEDIA, TaskCookieRow, TaskCookieSweepEntry,
     TaskCookieSweepReport, TaskFamily, TaskPhase, TaskPhaseError, TorrentFileRow,
     TorrentProgressRow, TorrentRow, TorrentSnapshot, TrackerRow,
@@ -591,7 +591,7 @@ pub fn read_import_target_snapshot(
         };
         imported.insert(key.clone(), value);
     }
-    let occupied_http = if user_version >= schema::LATEST_VERSION {
+    let occupied_http = if user_version >= 4 {
         occupied_http_rows(&conn)?
     } else {
         Vec::new()
@@ -742,13 +742,16 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::persist::schema::{
-        LATEST_VERSION, SCHEMA_V1_TABLES, SCHEMA_V2_TABLES, SCHEMA_V3_TABLES,
+        LATEST_VERSION, SCHEMA_V1_TABLES, SCHEMA_V2_TABLES, SCHEMA_V3_TABLES, SCHEMA_V5_TABLES,
     };
     use rusqlite::params;
 
     /// Total table count across all ledger versions (v1 baseline + per-migration additions).
     fn all_migrated_table_count() -> usize {
-        SCHEMA_V1_TABLES.len() + SCHEMA_V2_TABLES.len() + SCHEMA_V3_TABLES.len()
+        SCHEMA_V1_TABLES.len()
+            + SCHEMA_V2_TABLES.len()
+            + SCHEMA_V3_TABLES.len()
+            + SCHEMA_V5_TABLES.len()
     }
 
     /// Unique tmp database path (pid + nanosecond tag; no tempfile dependency).
@@ -1306,7 +1309,10 @@ mod tests {
         {
             let conn = ok(open_and_migrate_up_to(&path, 3), "reopen");
             assert_eq!(user_version_of(&conn), 3);
-            assert_eq!(tables_of(&conn).len(), all_migrated_table_count());
+            assert_eq!(
+                tables_of(&conn).len(),
+                SCHEMA_V1_TABLES.len() + SCHEMA_V2_TABLES.len() + SCHEMA_V3_TABLES.len()
+            );
             assert_legacy_rows_intact(&conn);
         }
         let _ = std::fs::remove_file(&path);
@@ -1370,7 +1376,10 @@ mod tests {
                 LATEST_VERSION,
                 "the ledger advanced to v4"
             );
-            assert_eq!(LATEST_VERSION, 4, "v4 = the one-shot state-CHECK rebuild");
+            assert!(
+                user_version_of(&conn) >= 4,
+                "v4 state-CHECK rebuild was applied"
+            );
             assert_eq!(
                 tables_of(&conn).len(),
                 all_migrated_table_count(),
@@ -1561,7 +1570,10 @@ mod tests {
         {
             let conn = ok(open_and_migrate_up_to(&path, 3), "migrate v1->v3");
             assert_eq!(user_version_of(&conn), 3);
-            assert_eq!(tables_of(&conn).len(), all_migrated_table_count());
+            assert_eq!(
+                tables_of(&conn).len(),
+                SCHEMA_V1_TABLES.len() + SCHEMA_V2_TABLES.len() + SCHEMA_V3_TABLES.len()
+            );
             let name: String = ok(
                 conn.query_row(
                     "SELECT name FROM torrent WHERE gid = '8000000000000008'",

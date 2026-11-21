@@ -1,4 +1,5 @@
 //! Bounded startup dialing, source diversity, transport learning and retry backoff.
+use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -12,16 +13,23 @@ struct History {
 }
 pub(super) struct Candidates {
     entries: HashMap<(usize, SocketAddr), History>,
-    tokens: f64,
-    replenished: Instant,
+    local_v4: Option<SocketAddr>,
+    local_v6: Option<SocketAddr>,
+    salt: u64,
     last_source: &'static str,
 }
 impl Candidates {
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_local(None, None)
+    }
+
+    pub fn with_local(local_v4: Option<SocketAddr>, local_v6: Option<SocketAddr>) -> Self {
         Self {
             entries: HashMap::new(),
-            tokens: 24.0,
-            replenished: Instant::now(),
+            local_v4,
+            local_v6,
+            salt: rand::random(),
             last_source: "",
         }
     }
@@ -83,16 +91,6 @@ impl Candidates {
         connected: &[SocketAddr],
         now: Instant,
     ) -> Option<(usize, SocketAddr, &'static str)> {
-        self.tokens = (self.tokens
-            + now
-                .saturating_duration_since(self.replenished)
-                .as_secs_f64()
-                * 30.0)
-            .min(24.0);
-        self.replenished = now;
-        if self.tokens < 1.0 {
-            return None;
-        }
         let choice = queue
             .iter()
             .enumerate()
@@ -120,11 +118,26 @@ impl Candidates {
                             0
                         }
                 };
-                Some((score, index))
+                let local = if addr.is_ipv4() {
+                    self.local_v4
+                } else {
+                    self.local_v6
+                };
+                let rank = local.map_or_else(
+                    || {
+                        let mut key = addr.to_string().into_bytes();
+                        key.extend_from_slice(&self.salt.to_be_bytes());
+                        taiji_bt::dht::crc32c(&key)
+                    },
+                    |local| taiji_bt::peer_policy::bep40_rank(local, *addr),
+                );
+                let mut tie_key = addr.to_string().into_bytes();
+                tie_key.extend_from_slice(&self.salt.to_be_bytes());
+                let tie = taiji_bt::dht::crc32c(&tie_key);
+                Some((score, Reverse(rank), Reverse(tie), *addr, *face, index))
             })
             .min()?;
-        self.tokens -= 1.0;
-        let candidate = queue.remove(choice.1)?;
+        let candidate = queue.remove(choice.5)?;
         self.last_source = candidate.2;
         Some(candidate)
     }
@@ -134,7 +147,28 @@ impl Candidates {
 mod tests {
     use super::*;
     #[test]
-    fn startup_burst_is_bounded_and_failed_candidates_do_not_block_fresh_ones() {
+    fn fresh_candidate_priority_is_independent_of_tracker_list_order() {
+        let local: SocketAddr = "127.0.0.1:6881".parse().unwrap_or_else(|e| panic!("{e}"));
+        for remote in [
+            local.ip(),
+            "10.0.0.1".parse().unwrap_or_else(|e| panic!("{e}")),
+        ] {
+            let addresses: Vec<_> = (1..=65)
+                .map(|port| (0, SocketAddr::new(remote, port), "tracker"))
+                .collect();
+            let mut forward: VecDeque<_> = addresses.iter().copied().collect();
+            let mut reverse: VecDeque<_> = addresses.iter().rev().copied().collect();
+            let mut a = Candidates::with_local(Some(local), None);
+            let mut b = Candidates::with_local(Some(local), None);
+            b.salt = a.salt;
+            let now = Instant::now();
+            while !forward.is_empty() {
+                assert_eq!(a.pop(&mut forward, &[], now), b.pop(&mut reverse, &[], now));
+            }
+        }
+    }
+    #[test]
+    fn failed_candidates_do_not_block_fresh_ones() {
         let now = Instant::now();
         let mut book = Candidates::new();
         let a: SocketAddr = "10.0.0.1:1".parse().unwrap_or_else(|e| panic!("{e}"));
@@ -146,19 +180,6 @@ mod tests {
         assert_eq!(
             book.pop(&mut queue, &[], now + Duration::from_secs(2)),
             Some((0, a, "pex"))
-        );
-        let mut book = Candidates::new();
-        let now = Instant::now();
-        let mut queue: VecDeque<_> = (1..100)
-            .map(|port| (0, SocketAddr::new(a.ip(), port), "pex"))
-            .collect();
-        for _ in 0..24 {
-            assert!(book.pop(&mut queue, &[], now).is_some());
-        }
-        assert!(book.pop(&mut queue, &[], now).is_none());
-        assert!(
-            book.pop(&mut queue, &[], now + Duration::from_millis(100))
-                .is_some()
         );
     }
     #[test]

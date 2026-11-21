@@ -258,7 +258,7 @@ async fn list_methods_is_frozen_surface_and_list_notifications_is_six_names() {
         .filter_map(|v| v.as_str())
         .collect();
     assert_eq!(names, RPC_NOTIFICATIONS.to_vec());
-    assert_eq!(names.len(), 7);
+    assert_eq!(names.len(), 8);
     assert!(names.contains(&"taiji.onBtDownloadComplete"));
 
     // Compat state: aria2 face — bare names project to `aria2.<bare>`;
@@ -366,7 +366,10 @@ const PROMISED_TAIJI_EXTENSION_METHODS: &[&str] = &[
     // Multi-level file priority write face (the write gate applies).
     "taiji.setFilePriority",
     "taiji.setStreamingPlayhead",
+    "taiji.prepareBitTorrent",
     "taiji.notifyNetworkChange",
+    "taiji.getMagnetResolution",
+    "taiji.getTorrentManifest",
     "taiji.getTorrentMetadata",
     "taiji.confirmTorrentSelection",
     "taiji.getHttpOutput",
@@ -812,7 +815,7 @@ async fn multicall_success_wraps_result_in_list() {
     assert_eq!(as_arr(&slots[1], "wrapped notifications").len(), 1);
     assert_eq!(
         as_arr(&as_arr(&slots[1], "wrapped")[0], "notifications").len(),
-        7
+        8
     );
 }
 
@@ -3698,7 +3701,11 @@ fn api_surface_single_face_gating_matches_declaration() {
     assert!(
         RPC_NOTIFICATIONS_ARIA2
             .iter()
-            .all(|n| n.starts_with("aria2.on") || *n == "taiji.onHttpOutputReady")
+            .all(|n| n.starts_with("aria2.on")
+                || matches!(
+                    *n,
+                    "taiji.onHttpOutputReady" | "taiji.onTorrentMetadataReady"
+                ))
     );
     let canonical = super::method_face_names(false);
     let compat = super::method_face_names(true);
@@ -4773,11 +4780,15 @@ async fn list_notifications_stays_six_events_with_media_line() {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert_eq!(list.len(), 7, "completion events plus HTTP readiness");
+        assert_eq!(list.len(), 8, "completion events plus native readiness");
         for name in list {
             let name: &str = name;
             assert!(
-                name.starts_with(face) || name == "taiji.onHttpOutputReady",
+                name.starts_with(face)
+                    || matches!(
+                        name,
+                        "taiji.onHttpOutputReady" | "taiji.onTorrentMetadataReady"
+                    ),
                 "{name}"
             );
             assert!(!name.contains("media"), "no media event in the table");
@@ -4923,4 +4934,46 @@ async fn move_storage_rpc_face_ok_and_rejections() {
     .await;
     assert_eq!(gated.code, 1);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn native_v2_status_keeps_full_identity_before_key_filtering() {
+    use taiji_core::session::{BittorrentView, StatusKind, TorrentStatusView};
+    let mut view =
+        TorrentStatusView::minimal(taiji_core::gid::Gid::from_u64(9), StatusKind::Paused, 1, 0);
+    view.info_hash = Some([7; 20]);
+    view.bittorrent = Some(BittorrentView {
+        v1_info_hash: None,
+        v2_info_hash: Some([7; 32]),
+        comment: None,
+        creation_date: None,
+        mode: Some("single"),
+        announce_list: Vec::new(),
+        name: Some("file".into()),
+        meta_version: Some(2),
+        private: Some(false),
+    });
+    assert_eq!(
+        super::view::status_entry_json(&view)["infoHash"],
+        "07".repeat(20)
+    );
+    assert_eq!(
+        super::view::native_status_entry_json(&view)["infoHash"],
+        "07".repeat(32)
+    );
+    let list = super::view::render_status_list_for(
+        vec![view.clone()],
+        None,
+        None,
+        &["infoHash".into()],
+        true,
+    );
+    assert_eq!(list, json!([{"infoHash":"07".repeat(32)}]));
+    if let Some(bt) = &mut view.bittorrent {
+        bt.v1_info_hash = Some([9; 20]);
+    }
+    assert_eq!(
+        super::view::native_status_entry_json(&view)["infoHash"],
+        "09".repeat(20)
+    );
 }

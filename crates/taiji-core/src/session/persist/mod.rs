@@ -73,6 +73,8 @@ impl PersistedMagnetFlags {
             bt_load_saved_metadata: self.load_saved,
             bt_peer_connection_type: connection,
             holepunch,
+            known_private: false,
+            task_trackers: None,
         }
     }
 }

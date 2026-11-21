@@ -569,7 +569,28 @@ DROP TABLE session_kv;",
 );",
         ],
     },
+    Migration {
+        version: 5,
+        sqls: &[
+            "CREATE TABLE metadata_cache (
+  id INTEGER PRIMARY KEY,
+  v1 BLOB CHECK(v1 IS NULL OR length(v1) = 20),
+  v2 BLOB CHECK(v2 IS NULL OR length(v2) = 32),
+  metadata BLOB NOT NULL CHECK(length(metadata) BETWEEN 1 AND 16777216),
+  last_used INTEGER NOT NULL,
+  CHECK(v1 IS NOT NULL OR v2 IS NOT NULL)
+);",
+            "CREATE UNIQUE INDEX metadata_cache_v1 ON metadata_cache(v1) WHERE v1 IS NOT NULL;",
+            "CREATE UNIQUE INDEX metadata_cache_v2 ON metadata_cache(v2) WHERE v2 IS NOT NULL;",
+            "CREATE INDEX metadata_cache_recency ON metadata_cache(last_used);",
+            "CREATE INDEX torrent_metadata_v1 ON torrent(v1_infohash,updated_at DESC) WHERE metadata IS NOT NULL;",
+            "CREATE INDEX torrent_metadata_v2 ON torrent(v2_infohash,updated_at DESC) WHERE metadata IS NOT NULL;",
+        ],
+    },
 ];
+
+/// Content-only cache added without changing existing task ownership.
+pub const SCHEMA_V5_TABLES: &[&str] = &["metadata_cache"];
 
 /// Highest schema version the current code supports.
 pub const LATEST_VERSION: i64 = match MIGRATIONS.last() {
@@ -764,8 +785,8 @@ mod tests {
     /// tightening lives in v4 only.
     #[test]
     fn v4_drops_and_rebuilds_the_full_union_in_fk_order() {
-        let v4 = MIGRATIONS.last().unwrap_or(&MIGRATIONS[0]);
-        assert_eq!(v4.version, 4, "v4 must be the ledger's last entry");
+        let v4 = &MIGRATIONS[3];
+        assert_eq!(v4.version, 4);
         let v4_sql = v4.sqls.join("\n");
         let all_tables: Vec<&str> = SCHEMA_V1_TABLES
             .iter()
@@ -839,7 +860,7 @@ mod tests {
     fn v4_state_check_word_list_matches_the_task_phase_vocabulary() {
         use crate::persist::writer::TaskPhase;
 
-        let v4 = MIGRATIONS.last().unwrap_or(&MIGRATIONS[0]);
+        let v4 = &MIGRATIONS[3];
         assert_eq!(v4.version, 4);
         let v4_sql = v4.sqls.join("\n");
         // The TaskPhase derivation: distinct as_v1_str outputs over ALL

@@ -989,11 +989,16 @@ impl SessionActor {
                 let r = self.move_storage(gid, dir).await;
                 let _ = reply.send(r);
             }
-            C::RenameFile { gid, .. } => {
-                let r: Result<CommandReply, SessionError> =
-                    self.resolve_gid(&gid).and(Err(SessionError::NotSupported {
-                        method: "taiji.renameFile",
-                    }));
+            C::RenameFile {
+                gid,
+                old_path,
+                new_path,
+            } => {
+                // File rename: async acceptance — the validation,
+                // journal, and quiesce initiation land before the
+                // reply; the on-disk rename + commit complete through
+                // TaskNotice::RenameDone (the rename_file module docs).
+                let r = self.rename_file(gid, old_path, new_path).await;
                 let _ = reply.send(r);
             }
             C::BanAddr { target, minutes } => {

@@ -868,6 +868,7 @@ fn get_option_echo_keys_are_fully_declared() {
         // the taiji-only keys).
         enable_http_seeding: Some(false),
         webseeds: Vec::new(),
+        file_renames: Default::default(),
     };
     let mj = MagnetJob {
         magnet_uri: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111".into(),

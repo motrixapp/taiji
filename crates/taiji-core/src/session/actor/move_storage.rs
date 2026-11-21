@@ -88,6 +88,14 @@ impl SessionActor {
                 "storage move already in flight for GID#{gid}"
             )));
         }
+        // A file rename in flight relocates a payload file behind its
+        // own journal — the two mutations must not interleave (the
+        // rename refuses symmetrically while a move is in flight).
+        if self.renaming.contains_key(&gid) {
+            return Err(SessionError::failed(format!(
+                "Cannot move storage for GID#{gid}: file rename in flight"
+            )));
+        }
         // A deferred recheck's teardown (or its post-Ended check-pool
         // entry) reads the payload at the current dir — refuse until it
         // settles (forceRecheck while moving is refused symmetrically
@@ -438,7 +446,15 @@ impl SessionActor {
     /// whose quiesce has completed (`running` no longer holds the gid;
     /// waiting-origin entries were never quiescing).
     pub(super) fn promote_matured_moves(&mut self) {
-        self.queue.set_moving(self.moving.keys().copied());
+        // Moves and renames share the queue hold set: both families
+        // relocate on-disk payload behind a config_json journal, and
+        // the admission gates must hold for either in flight.
+        self.queue.set_moving(
+            self.moving
+                .keys()
+                .copied()
+                .chain(self.renaming.keys().copied()),
+        );
         let matured: Vec<Gid> = self
             .moving
             .iter()

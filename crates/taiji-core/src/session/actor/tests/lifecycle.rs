@@ -178,8 +178,9 @@ async fn unimplemented_commands_still_answer_not_supported() {
     // argument first goes through expandUnique (the aria2 str2Gid
     // pre-step order) — an unknown GID answers not found first; a
     // known GID enters the move face (covered separately by the
-    // move_storage tests). renameFile keeps the always-not_supported
-    // capability face with the same gid-first order.
+    // move_storage tests). renameFile is the same shape: gid-first
+    // resolution, then the real rename face (covered separately by
+    // the rename_file tests).
     match call(
         &handle,
         SessionCommand::MoveStorage {
@@ -207,10 +208,10 @@ async fn unimplemented_commands_still_answer_not_supported() {
     )
     .await
     {
-        Err(SessionError::NotSupported { method: m }) => {
-            assert!(RPC_METHODS.contains(&m), "{m} must be on the surface");
+        Err(SessionError::Failed { message }) => {
+            assert!(message.contains("no file matches path 'a'"), "{message}");
         }
-        other => panic!("renameFile must answer NotSupported, got {other:?}"),
+        other => panic!("renameFile must resolve the path against the live view, got {other:?}"),
     }
     handle.shutdown().await;
     let joined = tokio::time::timeout(Duration::from_secs(1), join).await;

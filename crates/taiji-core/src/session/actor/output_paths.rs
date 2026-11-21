@@ -1,7 +1,7 @@
 //! Host-authorized relative BT output paths. Content identities and raw
 //! metainfo bytes remain unchanged; only the disk layout paths are mapped.
 use super::*;
-use std::path::Component;
+use std::path::{Component, Path};
 
 pub(super) fn parse(
     options: &BTreeMap<String, String>,
@@ -15,6 +15,19 @@ pub(super) fn parse(
     validate(&paths, files, false)?;
     Ok(paths)
 }
+/// Single-path safety face (the per-entry rule inside
+/// [`validate`]): a non-empty relative path built of Normal
+/// components only, with no `\`, `:`, or NUL — the wire coordinate
+/// system's invariants. Shared with the renameFile face (its
+/// client-supplied old/new paths pass the same gate).
+pub(crate) fn is_safe_rel(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && !path.to_string_lossy().contains(['\\', ':', '\0'])
+}
+
 fn validate(
     paths: &BTreeMap<usize, PathBuf>,
     files: usize,
@@ -22,14 +35,7 @@ fn validate(
 ) -> Result<(), SessionError> {
     let mut seen = std::collections::BTreeSet::new();
     for (&index, path) in paths {
-        if index >= files
-            || path.as_os_str().is_empty()
-            || path
-                .components()
-                .any(|part| !matches!(part, Component::Normal(_)))
-            || path.to_string_lossy().contains(['\\', ':', '\0'])
-            || (collisions && !seen.insert(path.clone()))
-        {
+        if index >= files || !is_safe_rel(path) || (collisions && !seen.insert(path.clone())) {
             return Err(SessionError::failed("unsafe torrent output mapping"));
         }
     }

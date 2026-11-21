@@ -181,6 +181,10 @@ impl SessionActor {
             // The add face carries no edited ledger (the url-list
             // derivation applies until a changeUri edit).
             webseeds: None,
+            // The add face carries no rename (established via
+            // taiji.renameFile / the recovery chain).
+            file_renames: Default::default(),
+            rename_pending: None,
         }
     }
 
@@ -188,12 +192,14 @@ impl SessionActor {
     /// seed_time is stored in minutes, matching the option unit).
     pub(super) fn job_config(&self, gid: &Gid) -> PersistedTaskConfig {
         let mut config = self.job_config_of_job(gid);
-        // moveStorage journal overlay: the journal's single
+        // moveStorage / renameFile journal overlay: a journal's single
         // truth is the row mirror — every job_config rewrite preserves
         // it (the same read-back shape as selection_pending/output_paths,
         // centralized here instead of per-arm).
         if let Some((row, _)) = self.rows.get(&gid.to_string()) {
-            config.move_pending = PersistedTaskConfig::from_json(&row.config_json).move_pending;
+            let persisted = PersistedTaskConfig::from_json(&row.config_json);
+            config.move_pending = persisted.move_pending;
+            config.rename_pending = persisted.rename_pending;
         }
         config
     }
@@ -253,6 +259,10 @@ impl SessionActor {
                 // bytes, so existing payloads do not drift).
                 bt_stop_timeout_secs: tj.seed.stop_timeout.as_secs(),
                 move_pending: None,
+                // The RPC renameFile face persists with the task
+                // mirror (empty = no rename, zero drift).
+                file_renames: tj.file_renames.clone(),
+                rename_pending: None,
             },
             Some(Job::Magnet(mj)) => PersistedTaskConfig {
                 selection_pending: self.rows.get(&gid.to_string()).is_some_and(|(row, _)| {
@@ -312,6 +322,10 @@ impl SessionActor {
                 // No torrent face yet (the upgraded TorrentJob mirrors
                 // the ledger after the upgrade).
                 webseeds: None,
+                // No rename face before the metadata upgrade (the
+                // upgraded TorrentJob mirrors it afterwards).
+                file_renames: Default::default(),
+                rename_pending: None,
             },
             Some(Job::TorrentUrl {
                 url,
@@ -364,6 +378,10 @@ impl SessionActor {
                 // No torrent face yet (the upgraded TorrentJob mirrors
                 // the ledger after the upgrade).
                 webseeds: None,
+                // No rename face before the metadata upgrade (the
+                // upgraded TorrentJob mirrors it afterwards).
+                file_renames: Default::default(),
+                rename_pending: None,
             },
             // HTTP task rows live in the http_task table (config_json
             // carried separately) and have no torrent-row payload; this

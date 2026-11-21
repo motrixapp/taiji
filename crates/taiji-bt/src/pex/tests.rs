@@ -867,7 +867,7 @@ proptest! {
 /// Encode vectors: combined flag bytes (bit0 encrypted / bit1 upload_only;
 /// BEP11; aria2 UTPexExtensionMessage.cc's 0x02/0x00 planes are a subset).
 #[test]
-fn bep21_flags_encode_table() {
+fn flags_encode_table() {
     // (name, encrypted, upload_only, expected flags byte).
     let rows: Vec<(&str, PrefersEncryption, UploadOnly, u8)> = vec![
         ("neither", PrefersEncryption::No, UploadOnly::No, 0x00),
@@ -918,11 +918,11 @@ fn bep21_flags_encode_table() {
     assert_eq!(&bytes[bytes.len() - 2], &0x03);
 }
 
-/// Decode vectors: flags paired per unit + leniency matrix (missing = 0;
-/// short strings pair on the short side; added.f / added6.f pair
-/// independently for v4/v6).
+/// Decode vectors (spec: BEP21 extension flags): flags paired per unit
+/// with a leniency matrix (missing = 0; short strings pair on the
+/// short side; added.f / added6.f pair independently for v4/v6).
 #[test]
-fn bep21_flags_decode_table() {
+fn flags_decode_table() {
     // Two v4 units + two flag bytes: (encrypted, upload_only) combinations
     // read bit by bit.
     let payload = b"d5:added12:\x01\x02\x03\x04\x1a\xe1\x05\x06\x07\x08\x1a\xe2\
@@ -991,10 +991,10 @@ fn bep21_flags_decode_table() {
     );
 }
 
-/// Codec roundtrip: both flag bits survive (all encrypted/upload_only
-/// combinations).
+/// Codec roundtrip (spec: BEP21 extension flags): both flag bits
+/// survive (all encrypted/upload_only combinations).
 #[test]
-fn bep21_flags_roundtrip_all_combinations() {
+fn flags_roundtrip_all_combinations() {
     let t0 = Instant::now();
     for enc in [PrefersEncryption::No, PrefersEncryption::Yes] {
         for uo in [UploadOnly::No, UploadOnly::Yes] {

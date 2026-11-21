@@ -659,8 +659,9 @@ mod tests {
         assert!(m.ws.is_empty());
     }
 
+    /// `so=` file-selection parsing vectors (spec: BEP53 — valid forms).
     #[test]
-    fn bep53_so_valid_vectors() {
+    fn so_parse_valid_vectors() {
         let btih = "magnet:?xt=urn:btih:248d0a1cd08284299de78d5c1ed359bb46717d8c";
         // (name, so= value, expected expanded sequence).
         let rows: Vec<(&str, &str, Vec<u32>)> = vec![
@@ -687,10 +688,10 @@ mod tests {
         assert_eq!(m.so, Some(vec![0]));
     }
 
-    /// Invalid forms: all **explicitly rejected** (design: silent skipping
-    /// is forbidden).
+    /// Invalid forms (spec: BEP53 `so=` syntax): all **explicitly
+    /// rejected** (design: silent skipping is forbidden).
     #[test]
-    fn bep53_so_invalid_vectors() {
+    fn so_parse_invalid_vectors() {
         let btih = "magnet:?xt=urn:btih:248d0a1cd08284299de78d5c1ed359bb46717d8c";
         let rows: Vec<(&str, &str)> = vec![
             ("empty value", ""),
@@ -723,14 +724,16 @@ mod tests {
         }
     }
 
-    /// Expansion cap ([`MAX_SO_ENTRIES`]): a range pushing the sequence
+    /// Expansion cap ([`MAX_SO_ENTRIES`]; the `so=` syntax is spec
+    /// BEP53, the cap itself is a taiji-local DoS bound): a range
+    /// pushing the sequence
     /// past the cap is rejected before allocating — a 20-char
     /// `so=0-4294967295` would otherwise eagerly expand to ~16 GiB
     /// (magnet is semi-trusted input). Covers the single-range case, the
     /// cumulative across-ranges case, and the ordering contract that the
     /// descending-range error still wins over the cap.
     #[test]
-    fn bep53_so_over_cap_range_rejected() {
+    fn so_parse_over_cap_range_rejected() {
         // Single range one entry over the cap (0..=cap is cap+1 entries).
         let over = format!("0-{MAX_SO_ENTRIES}");
         let Err(err) = parse_so(&over) else {
@@ -764,11 +767,12 @@ mod tests {
         assert!(matches!(parse(&uri), Err(MagnetError::InvalidSo(_))));
     }
 
-    /// Expansion cap boundary: exactly [`MAX_SO_ENTRIES`] entries passes
+    /// Expansion cap boundary (spec BEP53 `so=` syntax; the cap is a
+    /// taiji-local bound): exactly [`MAX_SO_ENTRIES`] entries passes
     /// (the check is strictly `>`); the sequence is fully expanded and
     /// strictly ascending.
     #[test]
-    fn bep53_so_cap_boundary_exact_passes() {
+    fn so_parse_cap_boundary_exact_passes() {
         assert_eq!(MAX_SO_ENTRIES, 1 << 20, "cap value pinned");
         let top = u32::try_from(MAX_SO_ENTRIES - 1).unwrap_or_else(|e| panic!("{e}"));
         let so = parse_so(&format!("0-{top}")).unwrap_or_else(|e| panic!("{e}"));

@@ -24,7 +24,7 @@ use tracing::{debug, info};
 
 use taiji_bt::dht::is_exempt_ip;
 use taiji_bt::peer::PeerHandle as _;
-use taiji_bt::peer_policy::bep40_rank;
+use taiji_bt::peer_policy::peer_priority_rank;
 use taiji_bt::utp::Transport;
 
 use super::state::{DialCtx, DialSource, EngineLoop, spawn_peer_dial};
@@ -964,7 +964,7 @@ pub(super) fn drain_dial_candidates(
         let local = is_exempt_ip(addr.ip());
         let v6_preferred = v6_available && addr.is_ipv6();
         let last_connected = state.dht_dial_dedup.last_admitted(&addr);
-        let rank = self_v4.map_or(0, |s| bep40_rank(s, addr));
+        let rank = self_v4.map_or(0, |s| peer_priority_rank(s, addr));
         rows.push((
             CandidateRow {
                 fails,

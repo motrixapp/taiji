@@ -3,7 +3,7 @@
 //! end).
 //!
 //! Self-built fixture (a 1-piece v1 torrent, assembled in-process — same
-//! shape as bep53_select). The engine points at an unreachable tracker
+//! shape as select_file). The engine points at an unreachable tracker
 //! (no peers, zero dispatch traffic) — this module only exercises the
 //! command surface:
 //!

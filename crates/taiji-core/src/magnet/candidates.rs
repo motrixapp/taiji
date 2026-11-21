@@ -129,7 +129,7 @@ impl Candidates {
                         key.extend_from_slice(&self.salt.to_be_bytes());
                         taiji_bt::dht::crc32c(&key)
                     },
-                    |local| taiji_bt::peer_policy::bep40_rank(local, *addr),
+                    |local| taiji_bt::peer_policy::peer_priority_rank(local, *addr),
                 );
                 let mut tie_key = addr.to_string().into_bytes();
                 tie_key.extend_from_slice(&self.salt.to_be_bytes());

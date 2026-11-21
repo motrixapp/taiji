@@ -159,7 +159,7 @@ Reference: libtorrent RC_2_1 @53acefea9.
 5. higher source_rank (tracker > lsd > dht > pex,
    `src/request_blocks.cpp`);
 6. higher BEP-40 symmetric rank (`src/torrent_peer.cpp`;
-   `taiji_bt::peer_policy::bep40_rank`).
+   `taiji_bt::peer_policy::peer_priority_rank`).
 
 Candidate collection = O(300) round-robin-start sampling + top-N, not a
 full sort (`src/peer_list.cpp`: `iterations = min(m_peers.size(), 300)`

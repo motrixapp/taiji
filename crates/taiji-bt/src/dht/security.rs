@@ -336,7 +336,7 @@ mod tests {
     /// IP + rand + the spec's middle random bytes → the full node ID (the
     /// generation face is anchored).
     #[test]
-    fn bep42_test_vectors_reproduced() {
+    fn spec_vectors_reproduced() {
         // (IP, rand, spec node ID) — the middle 16B + id[2]'s low 3 bits are the spec's randomness.
         let vectors: &[([u8; 4], u8, [u8; 20])] = &[
             (

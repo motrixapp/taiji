@@ -63,6 +63,12 @@ pub struct Magnet {
     /// zero-indexed"). The first `so` parameter wins (first value among
     /// same-name parameters, same rule as `dn`).
     pub so: Option<Vec<u32>>,
+    /// `ws` webseed URLs (BEP9 web seed links; the BEP19 url-list
+    /// counterpart on the magnet face). HTTP(S) only, order of
+    /// appearance, bounded and deduplicated (the `xs/fl/as` metadata
+    /// source face's discipline — the engine's webseed consumer is an
+    /// HTTP Range client).
+    pub ws: Vec<String>,
 }
 
 /// Parse a magnet URI (BEP9).
@@ -158,6 +164,28 @@ pub fn parse(input: &str) -> Result<Magnet, MagnetError> {
         }
         None => None,
     };
+    // `ws` webseed URLs (BEP9): the `xs/fl/as` metadata-source face's
+    // discipline — UTF-8 + len-capped + reqwest-parsed, HTTP(S) only,
+    // bounded (the engine's webseed attach caps the set anyway) and
+    // deduplicated, order of appearance.
+    let mut ws = Vec::new();
+    for raw in params.get(b"ws".as_slice()).into_iter().flatten() {
+        let Ok(text) = std::str::from_utf8(raw) else {
+            continue;
+        };
+        if text.len() > 4096 {
+            continue;
+        }
+        let Ok(url) = reqwest::Url::parse(text) else {
+            continue;
+        };
+        if matches!(url.scheme(), "http" | "https")
+            && ws.len() < 16
+            && !ws.iter().any(|seen| seen == text)
+        {
+            ws.push(text.to_string());
+        }
+    }
 
     Ok(Magnet {
         btih,
@@ -169,6 +197,7 @@ pub fn parse(input: &str) -> Result<Magnet, MagnetError> {
         xpe,
         xpe_peers,
         so,
+        ws,
     })
 }
 
@@ -600,6 +629,35 @@ mod tests {
 
     /// Valid forms: single index / inclusive range / mixed (BEP53 example
     /// `0,2,4,6-8`).
+    /// `ws` webseed parsing (BEP9): http(s) only, order preserved,
+    /// deduplicated, bounded; non-http schemes and non-URLs are skipped
+    /// leniently (the xs/fl/as metadata-source discipline); absent = none.
+    #[test]
+    fn bep9_ws_webseed_vectors() {
+        let btih = "magnet:?xt=urn:btih:248d0a1cd08284299de78d5c1ed359bb46717d8c";
+        // Multiple ws values, order of appearance, http(s) only.
+        let m = parse(&format!(
+            "{btih}&ws=https://w1.example/seed&ws=http://w2.example/seed&ws=ftp://skipped/"
+        ))
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            m.ws,
+            vec![
+                "https://w1.example/seed".to_string(),
+                "http://w2.example/seed".to_string(),
+            ]
+        );
+        // Dedup + a non-URL skipped leniently.
+        let m = parse(&format!(
+            "{btih}&ws=http://w.example/seed&ws=http://w.example/seed&ws=not-a-url"
+        ))
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.ws, vec!["http://w.example/seed".to_string()]);
+        // No ws = empty.
+        let m = parse(btih).unwrap_or_else(|e| panic!("{e}"));
+        assert!(m.ws.is_empty());
+    }
+
     #[test]
     fn bep53_so_valid_vectors() {
         let btih = "magnet:?xt=urn:btih:248d0a1cd08284299de78d5c1ed359bb46717d8c";

@@ -373,6 +373,7 @@ fn config(
         dht_entry_point_override: None,
         dht_enabled: false,
         webseeding_enabled: false,
+        webseeds: Vec::new(),
         lsd: None,
         seed: Default::default(),
         seed_after_complete: false,

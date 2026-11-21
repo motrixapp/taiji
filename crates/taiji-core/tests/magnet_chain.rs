@@ -640,6 +640,7 @@ fn test_config(
         egress: None,
         listen_interfaces: Vec::new(),
         webseeding_enabled: true,
+        webseeds: Vec::new(),
     }
 }
 

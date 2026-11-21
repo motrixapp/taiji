@@ -49,11 +49,12 @@ async fn get_global_option_never_echoes_rpc_secret() {
     }
 }
 
-/// changeUri: upstream file-entry semantics restored — a BT task is a no-op
-/// with counts [0,0] and announceList untouched (the tracker-hijack-delete
-/// regression); an out-of-range fileIndex = the upstream verbatim copy; a
-/// result-domain GID = the upstream verbatim "Cannot remove URIs from
-/// GID#%s"; HTTP tasks take the same no-op shape.
+/// changeUri: real ledger semantics — the BT face edits the task-level
+/// webseed ledger (real counts, the tracker table stays untouched — the
+/// tracker-hijack regression), an out-of-range fileIndex = the upstream
+/// verbatim copy, a result-domain GID = the upstream verbatim "Cannot
+/// remove URIs from GID#%s", and the HTTP face edits the source list
+/// with real counts.
 #[tokio::test]
 async fn change_uri_upstream_file_entry_semantics() {
     let global = GlobalOptions {
@@ -86,9 +87,9 @@ async fn change_uri_upstream_file_entry_semantics() {
     };
     assert_eq!(baseline, vec![vec![dead_tracker()]]);
 
-    // BT task: del hits the existing tracker + add two -> a [0,0] no-op
-    // (file entries keep no URI ledger — upstream removeUri never matches;
-    // FileEntry.cc).
+    // BT task: del of a tracker URL never matches the webseed ledger
+    // (0 deletions — the ledger holds BEP19 URLs, not trackers), add of
+    // two http URLs counts [0, 2] (the intake gate admits http(s)).
     match call(
         &handle,
         SessionCommand::ChangeUri {
@@ -102,9 +103,22 @@ async fn change_uri_upstream_file_entry_semantics() {
     .await
     {
         Ok(CommandReply::UriChange { deleted, added }) => {
-            assert_eq!((deleted, added), (0, 0));
+            assert_eq!((deleted, added), (0, 2));
         }
         other => panic!("expected UriChange, got {other:?}"),
+    }
+    // The added webseeds are the task's URI face (getUris; a
+    // never-activated task = all waiting).
+    match call(&handle, SessionCommand::GetUris { gid: b.to_string() }).await {
+        Ok(CommandReply::Uris(entries)) => {
+            let urls: Vec<&str> = entries.iter().map(|e| e.uri.as_str()).collect();
+            assert_eq!(urls, vec!["http://x/1", "http://x/2"], "ledger echo");
+            assert!(
+                entries.iter().all(|e| e.status == UriStatus::Waiting),
+                "never-activated = all waiting"
+            );
+        }
+        other => panic!("expected Uris, got {other:?}"),
     }
 
     // Regression: announceList is untouched by changeUri (zero tier mutation).
@@ -146,9 +160,10 @@ async fn change_uri_upstream_file_entry_semantics() {
         other => panic!("expected out-of-range error, got {other:?}"),
     }
 
-    // HTTP task: the same no-op shape (one file entry; the live source
-    // ledger lives in the driver — no source-change seam at the engine
-    // face).
+    // HTTP task: the source list edit (one file entry). del hits the
+    // existing source + add mirrors -> [1, 2] (ftp is a legal addUri
+    // source face); a non-download URI is refused by the admission
+    // gate (not counted).
     let http = gid_of(
         &call(
             &handle,
@@ -166,16 +181,38 @@ async fn change_uri_upstream_file_entry_semantics() {
             gid: http.to_string(),
             file_index: 1,
             del_uris: vec!["http://127.0.0.1:1/f.bin".into()],
-            add_uris: vec![],
+            add_uris: vec![
+                "http://127.0.0.1:1/g.bin".into(),
+                "ftp://mirror.example/g.bin".into(),
+                "not-a-download-uri".into(),
+            ],
             pos: None,
         },
     )
     .await
     {
         Ok(CommandReply::UriChange { deleted, added }) => {
-            assert_eq!((deleted, added), (0, 0));
+            assert_eq!((deleted, added), (1, 2));
         }
         other => panic!("expected UriChange, got {other:?}"),
+    }
+    match call(
+        &handle,
+        SessionCommand::GetUris {
+            gid: http.to_string(),
+        },
+    )
+    .await
+    {
+        Ok(CommandReply::Uris(entries)) => {
+            let urls: Vec<&str> = entries.iter().map(|e| e.uri.as_str()).collect();
+            assert_eq!(
+                urls,
+                vec!["http://127.0.0.1:1/g.bin", "ftp://mirror.example/g.bin"],
+                "source edit echo"
+            );
+        }
+        other => panic!("expected Uris, got {other:?}"),
     }
 
     // Result-domain GID (forceRemove on an active task lands it in the
@@ -830,6 +867,7 @@ fn get_option_echo_keys_are_fully_declared() {
         // default None does not echo — the declaration audit below covers
         // the taiji-only keys).
         enable_http_seeding: Some(false),
+        webseeds: Vec::new(),
     };
     let mj = MagnetJob {
         magnet_uri: "magnet:?xt=urn:btih:1111111111111111111111111111111111111111".into(),
@@ -857,6 +895,7 @@ fn get_option_echo_keys_are_fully_declared() {
         upgraded: false,
         bt_disable_dht: None,
         enable_http_seeding: None,
+        webseeds: Vec::new(),
     };
     let hj = HttpJob {
         uris: vec!["http://a/x".into()],
@@ -2396,6 +2435,7 @@ fn build_engine_config_resolves_disk_tier_override() {
             taiji_bt::mse::CryptoPolicy::optional(),
             tier.map(str::to_string),
             true,
+            Vec::new(),
             taiji_bt::tracker::TrackerOptions::default(),
         )
         .unwrap_or_else(|e| panic!("{e}"))

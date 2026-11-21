@@ -221,6 +221,17 @@ pub(crate) struct PersistedTaskConfig {
     /// bytes (zero drift for existing payloads).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub move_pending: Option<MovePending>,
+    /// Task-level BEP19 webseed URL ledger (the `changeUri` edit face).
+    /// **None = never edited** — the active set derives from the
+    /// metainfo `url-list` (plus the addTorrent webseed-URI parameter
+    /// unioned at intake); Some = the authoritative ledger after a
+    /// `changeUri` add/remove (the whole set persists verbatim, the
+    /// same authority shape as `tiers`). The engine projection is
+    /// `TorrentJob.webseeds` → `EngineConfig.webseeds` (gated by the
+    /// `enable-http-seeding` switch). None writes no bytes (zero drift
+    /// for existing payloads).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webseeds: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -306,6 +317,8 @@ impl Default for PersistedTaskConfig {
             bt_stop_timeout_secs: 0,
             // Default None = no storage move in flight.
             move_pending: None,
+            // Default None = the url-list derivation (never edited).
+            webseeds: None,
         }
     }
 }
@@ -640,6 +653,7 @@ mod tests {
             enable_http_seeding: None,
             bt_stop_timeout_secs: 0,
             move_pending: None,
+            webseeds: None,
         };
         let json = cfg.to_json();
         assert_eq!(PersistedTaskConfig::from_json(&json), cfg);

@@ -298,6 +298,11 @@ pub struct MagnetTaskConfig {
     /// this field is the upgrade chain's counterpart). The url-list
     /// values stay in the metainfo, so toggling is lossless.
     pub webseeding_enabled: bool,
+    /// magnet `ws` webseed set (BEP9): unions the upgraded metainfo
+    /// url-list at the engine projection point (the intake derivation's
+    /// upgrade-chain counterpart; the post-upgrade TorrentJob ledger
+    /// carries the same union).
+    pub webseeds: Vec<String>,
     /// LSD lease (None = no LSD discovery; bt-lsd defaults false).
     pub lsd: Option<LsdLease>,
     /// Seeding policy of the upgraded engine (passes through
@@ -2038,7 +2043,9 @@ async fn finalize(
     // The webseeding switch passes to the upgraded engine (BEP19; the
     // torrent activation path overwrites at the same point in
     // build_engine_config — per-task `enable-http-seeding` off = clear
-    // the webseed set, a BT-only shape).
+    // the webseed set, a BT-only shape). The magnet `ws` set unions the
+    // url-list projection first (the intake derivation).
+    engine_cfg.webseeds = crate::session::union_webseeds(&engine_cfg.webseeds, &cfg.webseeds);
     if !cfg.webseeding_enabled {
         engine_cfg.webseeds.clear();
     }
@@ -2354,6 +2361,7 @@ mod tests {
             // Webseeding defaults on for tests (the BEP19 face is not
             // exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,
@@ -2444,6 +2452,7 @@ mod tests {
             // Webseeding defaults on for tests (the BEP19 face is not
             // exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,
@@ -2699,6 +2708,7 @@ mod tests {
             dht_entry_points: vec![],
             dht_enabled: false,
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,
@@ -2863,6 +2873,7 @@ mod tests {
             // Webseeding defaults on for tests (the BEP19 face is not
             // exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,
@@ -3070,6 +3081,7 @@ mod tests {
             // Webseeding defaults on for tests (the BEP19 face is not
             // exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,
@@ -3243,6 +3255,7 @@ mod tests {
             // Webseeding defaults on for tests (the BEP19 face is not
             // exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,
@@ -3363,6 +3376,7 @@ mod tests {
             // Webseeding defaults on for tests (the BEP19 face is not
             // exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,
@@ -3518,6 +3532,7 @@ mod tests {
             // Webseeding defaults on for tests (the BEP19 face is not
             // exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,

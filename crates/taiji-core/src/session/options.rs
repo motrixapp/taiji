@@ -3324,6 +3324,105 @@ pub fn add_trackers(
     (ordered.into_iter().enumerate().collect(), added)
 }
 
+/// Intake derivation of the task-level webseed ledger: the metainfo
+/// `url-list` first, then any intake-side additions (the addTorrent
+/// webseed-URI parameter / the magnet `ws` set), order-preserving
+/// dedup (the reference `bittorrent_helper.cc` unions and dedups the
+/// same two sources; this side keeps the url-list order stable
+/// instead of sorting — the user-visible list order is the ledger's
+/// own).
+pub fn union_webseeds(url_list: &[String], extra: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    url_list
+        .iter()
+        .chain(extra)
+        .filter(|u| seen.insert((*u).clone()))
+        .cloned()
+        .collect()
+}
+
+/// The addTorrent webseed-URI parameter face (the internal
+/// `motrix-webseed-uris` option key; the motrix-output-paths
+/// discipline — a JSON string array serialized into the options map by
+/// the dispatch layer). Missing/empty = no intake additions; a corrupt
+/// value rejects the add (the same posture as output_paths::parse);
+/// individual non-http(s) entries are skipped leniently (the upstream
+/// FileEntry add gate counts only what its pipeline can consume —
+/// here the HTTP Range consumer).
+pub fn webseed_uris_from_options(
+    options: &BTreeMap<String, String>,
+) -> Result<Vec<String>, crate::session::SessionError> {
+    let Some(raw) = options.get("motrix-webseed-uris") else {
+        return Ok(Vec::new());
+    };
+    let uris: Vec<String> = serde_json::from_str(raw)
+        .map_err(|_| crate::session::SessionError::failed("invalid webseed uri parameter"))?;
+    Ok(uris.into_iter().filter(|u| is_webseed_url(u)).collect())
+}
+
+/// Webseed URL admission (the changeUri add gate and the intake
+/// parameter gate): http(s) with a non-empty authority — the engine's
+/// webseed face is an HTTP Range consumer, so any other scheme has no
+/// consumer and is not counted (aria2's uri_split gate accepts any
+/// parseable URI and lets the HTTP pipeline sort it out; this side
+/// gates earlier, declared in the deviations ledger).
+pub fn is_webseed_url(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    !host.is_empty() && !host.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// URI ledger transform for `changeUri` (a pure function; the aria2
+/// `FileEntry::removeUri`/`insertUri`/`addUri` semantics on a flat
+/// ordered ledger — this side's task-level faces: the BT webseed
+/// ledger and the HTTP source list):
+/// - each of `del` is **exact-matched** and removes one entry per hit
+///   (a repeated URI removes one copy per del entry — the upstream
+///   one-per-call rule);
+/// - each of `add` passes the family-specific admission gate
+///   (`admit`; a rejected URI is not added and not counted — the
+///   upstream uri_split gate), **no dedup** (upstream allows repeat
+///   additions), inserted at `pos` clamped to the ledger tail
+///   (`insertUri`'s min-clamp, never an error), the cursor advancing
+///   only on success;
+///
+/// Returns (new ledger, deleted, added). An unchanged ledger (0, 0
+/// receipts) leaves the input order intact.
+pub fn edit_uri_ledger(
+    ledger: &[String],
+    del: &[String],
+    add: &[String],
+    pos: Option<usize>,
+    admit: impl Fn(&str) -> bool,
+) -> (Vec<String>, u64, u64) {
+    let mut out: Vec<String> = ledger.to_vec();
+    let mut deleted: u64 = 0;
+    for uri in del {
+        if let Some(at) = out.iter().position(|u| u == uri) {
+            out.remove(at);
+            deleted += 1;
+        }
+    }
+    let mut added: u64 = 0;
+    let mut at = pos.unwrap_or(out.len()).min(out.len());
+    for uri in add {
+        if !admit(uri) {
+            continue;
+        }
+        at = at.min(out.len());
+        out.insert(at, uri.clone());
+        added += 1;
+        at += 1;
+    }
+    (out, deleted, added)
+}
+
 /// Tracker table transform for `taiji.removeTracker` (a pure function):
 /// each of `urls` is exact-matched and **all** hit entries are removed
 /// (the current table invariant of one URL per layer means removing a

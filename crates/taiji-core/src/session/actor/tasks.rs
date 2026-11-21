@@ -110,6 +110,10 @@ impl SessionActor {
                 // set (the build_engine_config override point, same rule as
                 // the bare CLI run).
                 let webseeding_enabled = tj.enable_http_seeding.unwrap_or(true);
+                // Task webseed ledger snapshot (url-list ∪ intake extras ∪
+                // changeUri edits; taken before the `jobs` borrow ends —
+                // injected into EngineConfig.webseeds at activation).
+                let task_webseeds = tj.webseeds.clone();
                 // Rate-limit topology: global bucket (session-shared
                 // instance) + this module's bucket (0 = unlimited).
                 let limiter = self
@@ -216,6 +220,7 @@ impl SessionActor {
                         crypto,
                         disk_tier,
                         webseeding_enabled,
+                        task_webseeds,
                         tracker_options,
                     )
                 })
@@ -644,6 +649,9 @@ impl SessionActor {
                     // clear the webseed set. The torrent activation path
                     // overrides at the same point in build_engine_config).
                     webseeding_enabled: mj.enable_http_seeding.unwrap_or(true),
+                    // magnet `ws` set (unions the upgraded metainfo
+                    // url-list at the engine projection point).
+                    webseeds: mj.webseeds.clone(),
                     lsd: lsd_lease,
                     // The metadata phase announces on the global
                     // --listen-port (previously always 0 = ephemeral port
@@ -1763,8 +1771,9 @@ impl SessionActor {
         let cfg = self.job_config(&gid);
         let total_len = meta.meta.total_len();
         let tiers = tiers_from_metainfo(&meta);
+        let meta_url_list = meta.url_list.clone();
         let attrs_top = torrent_top_attrs(&row.metadata.clone().unwrap_or_default());
-        let (dest, seed, down, up, hooks, selected_files, flag_dht, flag_webseed) = (
+        let (dest, seed, down, up, hooks, selected_files, flag_dht, flag_webseed, ws) = (
             mj.dest.clone(),
             mj.seed.clone(),
             mj.max_download_limit,
@@ -1773,6 +1782,7 @@ impl SessionActor {
             effective_magnet_selection(mj),
             mj.bt_disable_dht,
             mj.enable_http_seeding,
+            mj.webseeds.clone(),
         );
         self.jobs.insert(
             gid,
@@ -1794,6 +1804,9 @@ impl SessionActor {
                 disk_tier: cfg.disk_tier.clone(),
                 bt_disable_dht: flag_dht,
                 enable_http_seeding: flag_webseed,
+                // Webseed ledger: the magnet `ws` set unions the upgraded
+                // metainfo url-list (the intake derivation).
+                webseeds: union_webseeds(&meta_url_list, &ws),
             })),
         );
         info!(target: "taiji::core::session", gid = %gid,
@@ -1828,7 +1841,7 @@ impl SessionActor {
             self.pump_all().await;
             return;
         }
-        let (dir, seed, down, up, hooks, selected_files, flag_disable_dht, flag_http_seeding) =
+        let (dir, seed, down, up, hooks, selected_files, flag_disable_dht, flag_http_seeding, ws) =
             match self.jobs.get(&gid) {
                 Some(Job::Magnet(mj)) => (
                     mj.dest.clone(),
@@ -1846,6 +1859,8 @@ impl SessionActor {
                     mj.bt_disable_dht,
                     // The webseeding switch rides the upgrade (BEP19).
                     mj.enable_http_seeding,
+                    // The magnet `ws` webseed set rides the upgrade.
+                    mj.webseeds.clone(),
                 ),
                 // Late / missing payload (defensive): global hook set +
                 // default dir.
@@ -1858,6 +1873,7 @@ impl SessionActor {
                     None,
                     None,
                     None,
+                    Vec::new(),
                 ),
             };
         self.running.remove(&gid);
@@ -1906,6 +1922,9 @@ impl SessionActor {
                 bt_disable_dht: flag_disable_dht,
                 // The webseeding switch rides the residency (BEP19).
                 enable_http_seeding: flag_http_seeding,
+                // Webseed ledger: the magnet `ws` set unions the upgraded
+                // metainfo url-list (the intake derivation).
+                webseeds: union_webseeds(&meta.url_list, &ws),
             })),
         );
         self.queue
@@ -2144,6 +2163,7 @@ impl SessionActor {
         }
         let total_len = meta.meta.total_len();
         let tiers = tiers_from_metainfo(&meta);
+        let url_list = meta.url_list.clone();
         let meta = Arc::new(meta);
         // The upgrade product is a real task → the torrent row upgrades to
         // full form (raw bytes into the metadata BLOB, the file row set,
@@ -2193,6 +2213,9 @@ impl SessionActor {
                 bt_disable_dht: flag_disable_dht,
                 // The webseeding switch rides the upgrade (BEP19).
                 enable_http_seeding: flag_http_seeding,
+                // Webseed ledger: the upgraded metainfo url-list (a URL
+                // upgrade carries no magnet ws set).
+                webseeds: url_list,
             })),
         );
         let Some(token) = self.running.get(&gid).map(|t| t.token.clone()) else {
@@ -2562,6 +2585,9 @@ impl SessionActor {
                     // Webseeding switch (BEP19; None = default on, consumed
                     // by the upgrade chain).
                     enable_http_seeding: patch.enable_http_seeding,
+                    // magnet `ws` webseed set (BEP9; re-parsed from the
+                    // URI — the magnet_uri is the single source).
+                    webseeds: parsed.ws.clone(),
                 })),
             );
             self.enqueue(gid, patch.pause, position);
@@ -3006,6 +3032,12 @@ impl SessionActor {
         // backfills TorrentJob.selected_files via lifecycle::bootstrap).
         cfg.selected_files = selected_files.clone();
         cfg.output_paths = output_paths;
+        // Intake webseed union: the metainfo url-list plus the
+        // addTorrent webseed-URI parameter (the internal
+        // `motrix-webseed-uris` option key, the motrix-output-paths
+        // discipline — the dispatch layer serializes the RPC
+        // parameter there; http(s) only, the engine's Range face).
+        let webseeds = union_webseeds(&meta.url_list, &webseed_uris_from_options(&options)?);
         let meta = Arc::new(meta);
         let mut row = super::super::persist::torrent_row(
             &gid.to_string(),
@@ -3055,6 +3087,8 @@ impl SessionActor {
                 bt_disable_dht: patch.bt_disable_dht,
                 // Webseeding switch (BEP19; None = default on).
                 enable_http_seeding: patch.enable_http_seeding,
+                // Intake webseed ledger (url-list ∪ the RPC parameter).
+                webseeds,
             })),
         );
         // Explicit integrity checks apply to paused intake as well: Motrix
@@ -4636,6 +4670,7 @@ pub(super) fn build_engine_config(
     crypto: taiji_bt::mse::CryptoPolicy,
     disk_tier: Option<String>,
     webseeding_enabled: bool,
+    task_webseeds: Vec<String>,
     tracker_options: taiji_bt::tracker::TrackerOptions,
 ) -> Result<crate::engine::EngineConfig, crate::metainfo::MetainfoError> {
     let mut cfg = crate::engine::engine_config(
@@ -4652,11 +4687,15 @@ pub(super) fn build_engine_config(
     // consumed when the engine's tracker actor spawns (defaults = aria2's
     // values, zero behavior delta).
     cfg.tracker_options = tracker_options;
-    // BEP19 webseeding switch (--enable-http-seeding / the per-task option
-    // key, default true): false = clear the url-list projection's webseed
-    // set (a BT-only shape; the metainfo url_list original is not lost —
-    // toggling is lossless). The bare CLI run (main.rs run_download)
-    // overrides with the same rule.
+    // Task webseed ledger projection (url-list ∪ intake extras ∪
+    // changeUri edits — the authoritative set; overrides engine_config's
+    // plain url-list projection). The BEP19 webseeding switch
+    // (--enable-http-seeding / the per-task option key, default true):
+    // false = clear the set (a BT-only shape; neither the metainfo
+    // url_list original nor the ledger is lost — toggling is lossless).
+    // The bare CLI run (main.rs run_download) overrides with the same
+    // rule.
+    cfg.webseeds = task_webseeds;
     if !webseeding_enabled {
         cfg.webseeds.clear();
     }

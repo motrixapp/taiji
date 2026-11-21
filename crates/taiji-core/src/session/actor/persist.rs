@@ -178,6 +178,9 @@ impl SessionActor {
             // `enable-http-seeding` option face).
             enable_http_seeding: patch.enable_http_seeding,
             move_pending: None,
+            // The add face carries no edited ledger (the url-list
+            // derivation applies until a changeUri edit).
+            webseeds: None,
         }
     }
 
@@ -207,6 +210,14 @@ impl SessionActor {
                     .get(&gid.to_string())
                     .map(|(row, _)| PersistedTaskConfig::from_json(&row.config_json).output_paths)
                     .unwrap_or_default(),
+                // Webseed ledger: read back from the row mirror (the
+                // output_paths discipline — Some = the authoritative
+                // post-edit ledger, None = the url-list derivation;
+                // the changeUri edit point is the only writer).
+                webseeds: self
+                    .rows
+                    .get(&gid.to_string())
+                    .and_then(|(row, _)| PersistedTaskConfig::from_json(&row.config_json).webseeds),
                 dir: tj.dir.display().to_string(),
                 seed_ratio: tj.seed.seed_ratio,
                 seed_time_min: tj.seed.seed_time.as_secs_f64() / 60.0,
@@ -298,6 +309,9 @@ impl SessionActor {
                 // as the torrent branch).
                 bt_stop_timeout_secs: mj.seed.stop_timeout.as_secs(),
                 move_pending: None,
+                // No torrent face yet (the upgraded TorrentJob mirrors
+                // the ledger after the upgrade).
+                webseeds: None,
             },
             Some(Job::TorrentUrl {
                 url,
@@ -347,6 +361,9 @@ impl SessionActor {
                 // job_config after activation).
                 bt_stop_timeout_secs: 0,
                 move_pending: None,
+                // No torrent face yet (the upgraded TorrentJob mirrors
+                // the ledger after the upgrade).
+                webseeds: None,
             },
             // HTTP task rows live in the http_task table (config_json
             // carried separately) and have no torrent-row payload; this

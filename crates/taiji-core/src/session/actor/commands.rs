@@ -2320,9 +2320,14 @@ impl SessionActor {
                         .collect(),
                 ))
             }
-            // .torrent direct-add tasks have no webseed URI face (BEP19
-            // P2) -> empty.
-            Some(Job::Torrent(_)) => Ok(CommandReply::Uris(Vec::new())),
+            // .torrent direct-add tasks: the URI face = the task-level
+            // webseed ledger (url-list ∪ addTorrent webseed URIs ∪
+            // changeUri edits). The spend split follows the HTTP face
+            // (activated = the engine attached the set = "used").
+            Some(Job::Torrent(tj)) => Ok(CommandReply::Uris(views::webseed_uri_views(
+                tj,
+                self.running.contains_key(&gid),
+            ))),
             // Media task: the entry URL is the URI face (one item;
             // "used" once activated).
             Some(Job::Media(mj)) => {
@@ -3319,8 +3324,10 @@ impl SessionActor {
     /// changeUri (upstream semantics restored; the tracker-hijack use
     /// is gone). Arm order direct-translates aria2 ChangeUriRpcMethod
     /// (RpcMethodImpl.cc): gid locate (resolve_gid up front, str2Gid
-    /// family) -> fileIndex domain check -> file-entry URI operations
-    /// -> a `[deleted, added]` count reply.
+    /// family) -> fileIndex domain check -> URI ledger operations
+    /// -> a `[deleted, added]` count reply (real counts — the ledger
+    /// transform is [`super::options::edit_uri_ledger`], the aria2
+    /// FileEntry remove/insert/add semantics on a flat ordered list).
     ///
     /// fileIndex is checked against the job shape's file-entry count
     /// (the client-visible file face, same source as the tellStatus
@@ -3339,18 +3346,31 @@ impl SessionActor {
     /// upstream `findGroup` covers only active ∪ reserved — = verbatim
     /// "Cannot remove URIs from GID#%s".
     ///
-    /// The file-entry URI operation is a declared no-op: there is no
-    /// file-entry URI ledger (BT file views carry empty `uris`; BEP19
-    /// webseed does not consume them — declared on the addTorrent
-    /// face), so every shape returns the upstream no-op count
-    /// `[0, 0]`. The declared gaps (rpc-api-diff.md §1): BT/magnet —
-    /// upstream addUri enqueues and counts any parseable URI
-    /// (FileEntry.cc `uri_split`, consumed by the webseed face) while
-    /// local enqueued URIs have no consumer, so always 0; HTTP —
-    /// upstream edits the true source ledger (removeUri deletes on hit
-    /// and withdraws in-flight requests, FileEntry.cc) while the local
-    /// live source ledger is the drive's sources and `EngineCommand`
-    /// has no source-change seam, so this pass stays [0,0].
+    /// Editable faces (a declared difference from upstream's per-file
+    /// entries — this side edits **task-level** ledgers, the
+    /// qBittorrent/libtorrent url-list shape):
+    /// - Torrent = the task webseed ledger (BEP19; intake = url-list ∪
+    ///   addTorrent webseed URIs). del = exact-match one-per-entry;
+    ///   add = http(s)-admission (the engine's webseed face is an HTTP
+    ///   Range consumer — upstream's any-parseable-uri gate is
+    ///   declared divergent), no dedup, pos clamped to the tail.
+    ///   Waiting/paused/seeding/checking tasks: ledger + config_json
+    ///   persist (effective at the next activation). Active tasks:
+    ///   additionally ride the changeOption restart path (quiesce →
+    ///   requeue at the front → the engine re-projects the new set at
+    ///   reactivation — upstream's in-place webseed kick vs this
+    ///   side's restart application, declared). An emptied ledger is
+    ///   legal (pure peer download).
+    /// - Http = the source list (`HttpJob.uris`; the addUri multi-
+    ///   source manifest). Same transform with the addUri admission
+    ///   face (`is_download_uri`). Active tasks ride the same restart
+    ///   path (the driver's source set is fixed at spawn — upstream
+    ///   withdraws in-flight requests lazily, this side tears down and
+    ///   reactivates, declared); the row's `url`/`mirrors_json`
+    ///   follow the new list (restart recovery reads them).
+    /// - Magnet / TorrentUrl / Media = the declared no-op `[0, 0]`
+    ///   (a metadata-phase task has no file-entry URI face; the
+    ///   magnet URI itself is not editable).
     pub(super) async fn change_uri(
         &mut self,
         gid: Gid,
@@ -3359,10 +3379,6 @@ impl SessionActor {
         add_uris: Vec<String>,
         pos: Option<usize>,
     ) -> Result<CommandReply, SessionError> {
-        // URI/position parameters are not consumed in this pass (the
-        // gap is declared above; the direct translation keeps the
-        // shape).
-        let _ = (del_uris, add_uris, pos);
         let file_count = match self.jobs.get(&gid) {
             Some(Job::Torrent(tj)) => tj.metainfo.meta.files.len() as u64,
             // Media tasks are single-product (the file-entry face has
@@ -3377,6 +3393,94 @@ impl SessionActor {
         if file_count < file_index {
             return Err(SessionError::failed("fileIndex is out of range"));
         }
+
+        // BT face: the task webseed ledger.
+        if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
+            let (ledger, deleted, added) =
+                edit_uri_ledger(&tj.webseeds, &del_uris, &add_uris, pos, is_webseed_url);
+            if deleted == 0 && added == 0 {
+                return Ok(CommandReply::UriChange { deleted, added });
+            }
+            let new_ledger = ledger.clone();
+            tj.webseeds = ledger;
+            // Persist the authoritative ledger into the row mirror
+            // first (job_config reads the face back from there), then
+            // refresh config_json.
+            let key = gid.to_string();
+            if let Some((row, _)) = self.rows.get_mut(&key) {
+                let mut cfg = PersistedTaskConfig::from_json(&row.config_json);
+                cfg.webseeds = Some(new_ledger);
+                row.config_json = cfg.to_json();
+            }
+            self.persist_refresh_config(gid).await;
+            // Active tasks re-project through the changeOption restart
+            // face (pause → teardown → requeue at the front → the
+            // activation chain rebuilds the engine with the new
+            // webseed set). Other residences apply at their next
+            // activation; seeding/checking need no interruption (a
+            // complete task has no webseed fetches in flight).
+            if self.queue.contains_active(gid) && self.queue.request_pause(gid) {
+                if let Some(rec) = self.queue.active_record_mut(gid) {
+                    rec.restart_requested = true;
+                }
+                if let Some(t) = self.running.get(&gid) {
+                    t.token.cancel();
+                }
+                self.pump_all().await;
+            }
+            return Ok(CommandReply::UriChange { deleted, added });
+        }
+
+        // HTTP face: the source list.
+        if let Some(Job::Http(hj)) = self.jobs.get_mut(&gid) {
+            let (uris, deleted, added) =
+                edit_uri_ledger(&hj.uris, &del_uris, &add_uris, pos, is_download_uri);
+            if deleted == 0 && added == 0 {
+                return Ok(CommandReply::UriChange { deleted, added });
+            }
+            hj.uris = uris;
+            // Row follow: `url` = the new first source, mirrors_json =
+            // the new manifest (restart recovery reads them through
+            // uris_from_mirrors); the restore/mirror rows keep in step
+            // with the same values.
+            let url = hj.uris.first().cloned().unwrap_or_default();
+            let mirrors = http_task::mirrors_json_of(&hj.uris);
+            if let Some(row) = hj.restore.as_mut() {
+                row.url = url.clone();
+                row.mirrors_json = mirrors.clone();
+            }
+            if let Some(mirror) = hj.mirror.as_ref() {
+                let mut row = crate::lock(mirror).clone();
+                row.url = url.clone();
+                row.mirrors_json = mirrors.clone();
+                *crate::lock(mirror) = row;
+            }
+            if let Some(Job::Http(hj)) = self.jobs.get(&gid) {
+                if let Some(row) = hj.restore.clone() {
+                    self.persist_http_row(&row).await;
+                }
+                if let Some(mirror) = hj.mirror.as_ref() {
+                    let row = crate::lock(mirror).clone();
+                    self.persist_http_row(&row).await;
+                }
+            }
+            // Active tasks re-source through the changeOption restart
+            // face (the driver's source set is fixed at spawn).
+            if self.queue.contains_active(gid) && self.queue.request_pause(gid) {
+                if let Some(rec) = self.queue.active_record_mut(gid) {
+                    rec.restart_requested = true;
+                }
+                if let Some(t) = self.running.get(&gid) {
+                    t.token.cancel();
+                }
+                self.pump_all().await;
+            }
+            return Ok(CommandReply::UriChange { deleted, added });
+        }
+
+        // Magnet / .torrent URL / media: no editable file-entry URI
+        // face (the declared no-op — the metadata phase's single
+        // entry carries the URI itself, not a per-file source list).
         Ok(CommandReply::UriChange {
             deleted: 0,
             added: 0,

@@ -291,6 +291,14 @@ impl SessionActor {
                             // = default on — the recovery chain
                             // passes it through unchanged).
                             enable_http_seeding: cfg.enable_http_seeding,
+                            // Webseed ledger restored: the edited
+                            // config_json face when present (Some =
+                            // the authoritative changeUri ledger),
+                            // else the metainfo url-list derivation.
+                            webseeds: cfg
+                                .webseeds
+                                .clone()
+                                .unwrap_or_else(|| meta.url_list.clone()),
                         })),
                     );
                     // 'seeding'-state restart routing (the seed pool,
@@ -359,17 +367,22 @@ impl SessionActor {
                     }
                 }
                 Rebuilt::Magnet(magnet_uri) => {
-                    // announceList source = magnet `tr` rebuild (same
-                    // shape as add_uri's tr_tiers; a parse failure
-                    // degrades to an empty table).
-                    let tr_tiers: Vec<(usize, String)> = taiji_bt::magnet::parse(&magnet_uri)
-                        .map(|m| {
-                            m.tr.iter()
-                                .enumerate()
-                                .map(|(i, t)| (i, String::from_utf8_lossy(t).into_owned()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    // announceList source = magnet `tr` rebuild + the
+                    // `ws` webseed set (same shape as add_uri's
+                    // tr_tiers; a parse failure degrades to an empty
+                    // table / no webseeds).
+                    let (tr_tiers, magnet_ws): (Vec<(usize, String)>, Vec<String>) =
+                        taiji_bt::magnet::parse(&magnet_uri)
+                            .map(|m| {
+                                (
+                                    m.tr.iter()
+                                        .enumerate()
+                                        .map(|(i, t)| (i, String::from_utf8_lossy(t).into_owned()))
+                                        .collect(),
+                                    m.ws,
+                                )
+                            })
+                            .unwrap_or_default();
                     self.magnet_services.queue_resolution(gid);
                     self.jobs.insert(
                         gid,
@@ -450,6 +463,11 @@ impl SessionActor {
                             // = default on — the recovery chain passes
                             // it through unchanged).
                             enable_http_seeding: cfg.enable_http_seeding,
+                            // magnet `ws` set re-parsed from the URI
+                            // (the magnet_uri is the single source; a
+                            // degenerate parse = no webseeds, the
+                            // metadata state re-runs anyway).
+                            webseeds: magnet_ws,
                         })),
                     );
                     reserved.push((row.queue_pos, gid, paused));

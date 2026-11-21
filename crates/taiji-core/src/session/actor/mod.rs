@@ -3091,6 +3091,7 @@ mod commands;
 mod discovery;
 mod http_output_commands;
 mod http_publication;
+mod http_source_rebind;
 /// pub(super): the migration importer's HTTP side
 /// (session::persist::import_http) reuses [`http_task::mirrors_json_of`]
 /// and [`http_task::HttpPersistConfig`] — the single source of the

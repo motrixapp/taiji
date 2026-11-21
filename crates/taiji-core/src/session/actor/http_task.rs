@@ -350,6 +350,9 @@ pub(in crate::session) struct HttpPersistConfig {
     pub retain_request_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_resume_context: Option<crate::session::persist::import_http::RetainedHttpContext>,
+    /// Explicit changeUri authorization, bound to the exact source ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_rebind: Option<String>,
     /// Incomplete suffix (persisted at creation; a default change never cuts an
     /// in-flight download).
     #[serde(default = "default_suffix")]
@@ -483,6 +486,7 @@ impl Default for HttpPersistConfig {
     fn default() -> Self {
         HttpPersistConfig {
             http_resume_context: None,
+            source_rebind: None,
             host_finalize: false,
             publication: None,
             retain_request_context: false,
@@ -2637,7 +2641,9 @@ async fn drive_segmented(
         last_modified: fresh_validator.last_modified.clone(),
         encoding_ok: fresh_validator.encoding_ok,
     };
-    if let Some(context) = HttpPersistConfig::from_json(&row.config_json).http_resume_context {
+    let mut request_cfg = HttpPersistConfig::from_json(&row.config_json);
+    let rebind = super::http_source_rebind::validated(&row, &request_cfg, &run.uris, &fresh_facts);
+    if let Some(context) = &request_cfg.http_resume_context {
         use crate::session::persist::import_http::request_uri_hash;
         let source_hash = request_uri_hash(&row.url);
         let resource_hash = request_uri_hash(authoritative.final_url.as_str());
@@ -2646,8 +2652,8 @@ async fn drive_segmented(
         } else {
             &fresh_facts.last_modified
         };
-        if context.source_hash != source_hash
-            || context.resource_hash != resource_hash
+        if (!rebind
+            && (context.source_hash != source_hash || context.resource_hash != resource_hash))
             || PathBuf::from(&row.dir).join(&row.out).as_path()
                 != std::path::Path::new(&context.output_path)
             || fresh_facts.total_len != Some(context.total_length as u64)
@@ -2663,7 +2669,18 @@ async fn drive_segmented(
             .await;
         }
     }
-    let mut request_cfg = HttpPersistConfig::from_json(&row.config_json);
+    if rebind {
+        if let Some(context) = request_cfg.http_resume_context.as_mut() {
+            use crate::session::persist::import_http::request_uri_hash;
+            context.source_hash = request_uri_hash(&row.url);
+            context.resource_hash = request_uri_hash(authoritative.final_url.as_str());
+            let mut current = crate::lock(mirror);
+            let mut cfg = HttpPersistConfig::from_json(&current.config_json);
+            cfg.http_resume_context = request_cfg.http_resume_context.clone();
+            current.config_json = cfg.to_json();
+            row.config_json.clone_from(&current.config_json);
+        }
+    }
     if request_cfg.retain_request_context
         && request_cfg.http_resume_context.is_none()
         && row.total_done == 0
@@ -2689,13 +2706,17 @@ async fn drive_segmented(
                     validator: value.clone(),
                     total_length: total as i64,
                 });
-                row.config_json = request_cfg.to_json();
-                crate::lock(mirror).config_json = row.config_json.clone();
+                let mut current = crate::lock(mirror);
+                let mut cfg = HttpPersistConfig::from_json(&current.config_json);
+                cfg.http_resume_context = request_cfg.http_resume_context.clone();
+                current.config_json = cfg.to_json();
+                row.config_json.clone_from(&current.config_json);
             }
         }
     }
     let fresh_digest = validator_digest(&fresh_facts).ok();
     let resume_ok = imported_resume
+        || rebind
         || row
             .validator_digest
             .as_deref()
@@ -5380,6 +5401,8 @@ fn sync_mirror_progress(mirror: &StdMutex<HttpTaskRow>, row: &mut HttpTaskRow) {
     m.probe_json = row.probe_json.clone();
     m.validator_digest = row.validator_digest.clone();
     row.config_json = m.config_json.clone();
+    row.url.clone_from(&m.url);
+    row.mirrors_json.clone_from(&m.mirrors_json);
 }
 
 /// Cancel close-out: a pause origin -> the row state paused (a restart
@@ -6696,6 +6719,7 @@ mod tests {
     fn http_persist_config_round_trip() {
         let cfg = HttpPersistConfig {
             http_resume_context: None,
+            source_rebind: None,
             host_finalize: false,
             publication: None,
             retain_request_context: false,

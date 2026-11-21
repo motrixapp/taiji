@@ -115,14 +115,14 @@ fn file_views_project_selection_surface_with_pad_not_counted() {
         ],
     };
     let sel_of = |selection: Option<&[u32]>| -> Vec<bool> {
-        file_views(&meta, None, selection, None)
+        file_views(&meta, None, selection, None, Vec::new())
             .iter()
             .map(|f| f.selected)
             .collect()
     };
     // The index field = 1-based order over all files (pads included;
     // existing convention unchanged).
-    let index: Vec<u64> = file_views(&meta, None, None, None)
+    let index: Vec<u64> = file_views(&meta, None, None, None, Vec::new())
         .iter()
         .map(|f| f.index)
         .collect();

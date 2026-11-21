@@ -95,6 +95,7 @@ include!("persist.rs");
 include!("bans.rs");
 include!("http.rs");
 include!("move_storage.rs");
+include!("change_uri.rs");
 include!("batch.rs");
 include!("rate.rs");
 include!("seed.rs");

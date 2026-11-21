@@ -115,7 +115,7 @@ pub use options::{
     SessionOptions, crypto_level_str, global_option_echo, merge_global_trackers,
     option_name_declared, option_name_has_declaration, parse_crypto_level,
     parse_peer_connection_type, parse_select_file, parse_size, peer_connection_type_str,
-    split_bt_tracker, windows_unsafe_basename,
+    split_bt_tracker, union_webseeds, windows_unsafe_basename,
 };
 /// Targeted recheck export (the standalone `--check-integrity`
 /// consumption face — the taiji CLI rescans the disk before spawn and

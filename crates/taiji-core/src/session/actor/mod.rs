@@ -66,9 +66,10 @@ use super::limits::SpeedLimits;
 use super::metrics::SessionMetrics;
 use super::options::{
     OptionDecl, OptionFace, TaskOptionPatch, add_trackers, apply_global_patch, checked_seed_ratio,
-    format_minutes, format_seed_ratio, global_option_echo, merge_global_trackers,
-    parse_select_file, parse_task_options, remove_trackers, resolve_select_file_for_meta,
-    seed_duration_from_minutes, split_bt_tracker, windows_unsafe_basename,
+    edit_uri_ledger, format_minutes, format_seed_ratio, global_option_echo, is_webseed_url,
+    merge_global_trackers, parse_select_file, parse_task_options, remove_trackers,
+    resolve_select_file_for_meta, seed_duration_from_minutes, split_bt_tracker, union_webseeds,
+    webseed_uris_from_options, windows_unsafe_basename,
 };
 use super::persist::{
     PersistedTaskConfig, SessionExportEntry, derive_name, file_rows, serialize_export,
@@ -1738,6 +1739,15 @@ struct TorrentJob {
     /// `webseeds.clear`; changeOption rides restart semantics (an engine
     /// hot push belongs to the webseeding engine integration face).
     enable_http_seeding: Option<bool>,
+    /// Task-level BEP19 webseed ledger (the RPC `changeUri` edit face;
+    /// the qBittorrent/libtorrent task-level url-list shape, not aria2's
+    /// per-file entries). Initialized at intake = the metainfo
+    /// `url-list` ∪ the addTorrent webseed-URI parameter (order-
+    /// preserving dedup); authoritative once edited. Mirrors into
+    /// `PersistedTaskConfig::webseeds` and projects into
+    /// `EngineConfig.webseeds` at activation (gated by the
+    /// `enable-http-seeding` switch).
+    webseeds: Vec<String>,
 }
 
 struct MagnetJob {
@@ -1747,6 +1757,10 @@ struct MagnetJob {
     seed: SeedPolicy,
     btih: Option<[u8; 20]>,
     btmh: Option<[u8; 32]>,
+    /// magnet `ws` webseed URLs (BEP9; http(s) only, one entry per ws
+    /// — the `tr` tiers' sibling). Carried to the upgraded torrent
+    /// job's webseed ledger at the metadata upgrade point.
+    webseeds: Vec<String>,
     /// magnet `tr` (one tier per tr; the bittorrent dict announceList data
     /// source).
     tiers: Vec<(usize, String)>,

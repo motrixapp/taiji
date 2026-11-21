@@ -511,6 +511,7 @@ mod tests {
             // Test face: webseeding on by default (the BEP19 face is
             // not exercised here).
             webseeding_enabled: true,
+            webseeds: Vec::new(),
             lsd: None,
             seed: SeedPolicy::default(),
             seed_after_complete: false,

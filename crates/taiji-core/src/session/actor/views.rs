@@ -52,6 +52,7 @@ impl SessionActor {
                     None,
                     tj.selected_files.as_deref(),
                     tj.file_priorities.as_deref(),
+                    webseed_uri_views(tj, self.running.contains_key(&gid)),
                 );
                 view.bittorrent = Some(torrent_bittorrent_view(tj));
                 view.info_hash = info_hash_20(&meta.meta.identity);
@@ -434,6 +435,7 @@ impl SessionActor {
                 per_file.as_deref(),
                 tj.selected_files.as_deref(),
                 tj.file_priorities.as_deref(),
+                webseed_uri_views(tj, true),
             );
             // Missing-layer projection: the engine snapshot's recovery
             // file states are patched into the entries (the 0-based
@@ -588,6 +590,7 @@ impl SessionActor {
                     Some(&per),
                     tj.selected_files.as_deref(),
                     tj.file_priorities.as_deref(),
+                    webseed_uri_views(tj, true),
                 );
                 if tj.selected_files.is_some() {
                     e.total_length = full
@@ -789,6 +792,7 @@ pub(super) fn file_views(
     completed: Option<&[u64]>,
     selection: Option<&[u32]>,
     priorities: Option<&[(u32, i8)]>,
+    uris: Vec<UriEntryView>,
 ) -> Vec<FileEntryView> {
     // Sparse priority table lookup (entries not listed = 0, normal):
     // tables over 8 entries become a HashMap (removes the files x
@@ -833,9 +837,12 @@ pub(super) fn file_views(
                 },
                 length: f.length,
                 completed_length: completed.and_then(|c| c.get(i)).copied().unwrap_or(0),
-                // A BT task's FileEntry URIs have no HTTP semantics ->
-                // always empty.
-                uris: Vec::new(),
+                // A BT task's FileEntry URIs = the task-level webseed
+                // ledger (a declared difference from aria2's per-file
+                // entries: this side echoes the same task-level list on
+                // every file, the qBittorrent/libtorrent url-list
+                // shape).
+                uris: uris.clone(),
                 pieces_root: f.pieces_root,
                 piece_size: meta.piece_length,
                 padding: f.padding,
@@ -855,6 +862,27 @@ pub(super) fn group_tiers(tiers: &[(usize, String)]) -> Vec<Vec<String>> {
         map.entry(*t).or_default().push(u.clone());
     }
     map.into_values().collect()
+}
+
+/// The torrent task's URI face: the task-level webseed ledger as
+/// {uri, status} entries. The spend split follows the same rule as
+/// the HTTP source face: an activated task (engine resident) has its
+/// webseed set attached (all "used"); a never-activated task is all
+/// "waiting" (aria2's spentUris/uris projection on a flat ledger —
+/// the engine attaches the whole set at assembly, there is no
+/// per-URL laziness to expose).
+pub(super) fn webseed_uri_views(tj: &TorrentJob, activated: bool) -> Vec<UriEntryView> {
+    tj.webseeds
+        .iter()
+        .map(|u| UriEntryView {
+            uri: u.clone(),
+            status: if activated {
+                UriStatus::Used
+            } else {
+                UriStatus::Waiting
+            },
+        })
+        .collect()
 }
 
 /// The bittorrent sub-dictionary payload of a torrent task (the full

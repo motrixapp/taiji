@@ -1335,13 +1335,18 @@ and value-domain validation at the session command surface.
 
 ### changeUri (upstream file-entry semantics)
 
-BT tasks are no-ops with counts [0,0] and announceList untouched (file
-entries keep no URI ledger — upstream removeUri never matches,
-FileEntry.cc); an out-of-range fileIndex and a result-domain GID fail with
-the upstream verbatim messages (RpcMethodImpl.cc; findGroup excludes
-terminal states); HTTP tasks take the same no-op shape (the live source
-ledger lives in the driver, with no source-change seam at the engine
-face).
+BT edits the task-level HTTP(S) webseed ledger; HTTP/FTP edits the ordered
+source ledger. The receipt counts actual deletions and additions. Paused and
+waiting tasks persist the edit; active transfers quiesce and reactivate with
+the new ledger. Metadata-only magnet, torrent-URL and media tasks remain no-ops.
+
+An explicit HTTP source edit authorizes URL rebinding only for that exact
+persisted ledger. A retained checkpoint must still have matching total length,
+identity encoding and content validators, and a valid saved validator digest.
+The URL path may change, but output identity remains fixed. Successful probing
+refreshes the retained URL binding; a changed or unverifiable resource fails
+without modifying retained bytes. Snapshot writes preserve the actor-owned
+source ledger and configuration during active transfer teardown.
 
 ### Tracker editing (taiji.addTracker / removeTracker)
 

@@ -232,6 +232,29 @@ pub(crate) struct PersistedTaskConfig {
     /// for existing payloads).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webseeds: Option<Vec<String>>,
+    /// RPC `taiji.renameFile` mirror: files index -> the renamed wire
+    /// path (the same coordinate system as [`Self::output_paths`] —
+    /// wire-relative, i.e. without the multi-file root prefix unless a
+    /// prior output mapping flattened the task). Applied on top of the
+    /// parsed metadata at rebuild time (`rebuild_from_row` replays it
+    /// after `output_paths::apply`); the runtime `Metainfo` carries the
+    /// applied view. The raw metadata BLOB and both infohashes never
+    /// change — a rename is a host-side layout fact only. Empty = no
+    /// rename ever applied (zero drift for existing payloads).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub file_renames: std::collections::BTreeMap<usize, std::path::PathBuf>,
+    /// `taiji.renameFile` intent journal (the [`MovePending`]
+    /// discipline for a single-file path change): recorded in the
+    /// task row's `config_json` **in the same row upsert, strictly
+    /// before any on-disk rename action**; cleared in the commit
+    /// upsert (the row's `file_renames` gains the entry). Recovery
+    /// after a kill at any point = redo the rename idempotently
+    /// (`from_disk` absent and `to_disk` present = already done), then
+    /// rewrite the row with the mapping recorded and the journal
+    /// cleared. Not derived from the Job — read back from the row
+    /// mirror (the single journal truth). None writes no bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_pending: Option<RenamePending>,
 }
 
 fn default_true() -> bool {
@@ -277,6 +300,26 @@ pub(crate) struct MovePending {
     pub to_dir: String,
 }
 
+/// `taiji.renameFile` intent journal payload: one file's on-disk move
+/// (`from_disk` -> `to_disk`, both absolute) plus the wire face the
+/// commit records in [`PersistedTaskConfig::file_renames`]. See the
+/// field docs there for the ordering/recovery discipline.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RenamePending {
+    /// Renamed file's index in `Metainfo.meta.files` (storage order,
+    /// pad entries included — the same index space `file_renames` and
+    /// the row's `torrent_file.file_index` use).
+    pub index: usize,
+    /// The post-rename wire path (the `file_renames` value the commit
+    /// records; relative — the same coordinate system as the current
+    /// `files[index].path`).
+    pub new_path: std::path::PathBuf,
+    /// Absolute on-disk source path (the pre-rename payload location).
+    pub from_disk: String,
+    /// Absolute on-disk target path (the post-rename payload location).
+    pub to_disk: String,
+}
+
 fn is_true(v: &bool) -> bool {
     *v
 }
@@ -319,6 +362,10 @@ impl Default for PersistedTaskConfig {
             move_pending: None,
             // Default None = the url-list derivation (never edited).
             webseeds: None,
+            // Default empty = no rename ever applied.
+            file_renames: Default::default(),
+            // Default None = no file rename in flight.
+            rename_pending: None,
         }
     }
 }
@@ -654,6 +701,8 @@ mod tests {
             bt_stop_timeout_secs: 0,
             move_pending: None,
             webseeds: None,
+            file_renames: Default::default(),
+            rename_pending: None,
         };
         let json = cfg.to_json();
         assert_eq!(PersistedTaskConfig::from_json(&json), cfg);

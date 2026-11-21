@@ -1807,6 +1807,8 @@ impl SessionActor {
                 // Webseed ledger: the magnet `ws` set unions the upgraded
                 // metainfo url-list (the intake derivation).
                 webseeds: union_webseeds(&meta_url_list, &ws),
+                // Fresh torrent job: no rename ever applied.
+                file_renames: Default::default(),
             })),
         );
         info!(target: "taiji::core::session", gid = %gid,
@@ -1925,6 +1927,8 @@ impl SessionActor {
                 // Webseed ledger: the magnet `ws` set unions the upgraded
                 // metainfo url-list (the intake derivation).
                 webseeds: union_webseeds(&meta.url_list, &ws),
+                // Fresh torrent job: no rename ever applied.
+                file_renames: Default::default(),
             })),
         );
         self.queue
@@ -2216,6 +2220,8 @@ impl SessionActor {
                 // Webseed ledger: the upgraded metainfo url-list (a URL
                 // upgrade carries no magnet ws set).
                 webseeds: url_list,
+                // Fresh torrent job: no rename ever applied.
+                file_renames: Default::default(),
             })),
         );
         let Some(token) = self.running.get(&gid).map(|t| t.token.clone()) else {
@@ -3089,6 +3095,8 @@ impl SessionActor {
                 enable_http_seeding: patch.enable_http_seeding,
                 // Intake webseed ledger (url-list ∪ the RPC parameter).
                 webseeds,
+                // Fresh torrent job: no rename ever applied.
+                file_renames: Default::default(),
             })),
         );
         // Explicit integrity checks apply to paused intake as well: Motrix
@@ -3429,6 +3437,15 @@ impl SessionActor {
                 "forceRecheck: storage move in flight for GID#{gid}"
             )));
         }
+        // File-rename race guard, same shape: a recheck hashes the
+        // payload at the current path while the renamer relocates the
+        // file — refuse until the rename commits (renameFile refuses
+        // symmetrically while a recheck teardown is in flight).
+        if self.renaming.contains_key(&gid) {
+            return Err(SessionError::failed(format!(
+                "forceRecheck: file rename in flight for GID#{gid}"
+            )));
+        }
         // The family face rejects non-torrent jobs before Location
         // dispatch — the synthesis locations are
         // structurally unreachable here (media tasks have no recheck
@@ -3598,6 +3615,10 @@ impl SessionActor {
         // move's own reactivation intent (no auto seed re-entry / the
         // restart requeue stays paused by this flag's record).
         if let Some(state) = self.moving.get_mut(&gid) {
+            state.user_paused = true;
+        }
+        // The same override face for an in-flight file rename.
+        if let Some(state) = self.renaming.get_mut(&gid) {
             state.user_paused = true;
         }
         match self.queue.find(gid) {

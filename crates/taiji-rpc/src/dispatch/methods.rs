@@ -813,12 +813,12 @@ pub(crate) async fn execute_session_method(
             "taiji.moveStorage" | "taiji.renameFile" => {
                 // moveStorage = the storage-migration extension (:
                 // real capability — journal + async payload move; the
-                // actor's move_storage module). renameFile stays an
-                // explicit not_supported face (the actor answers after
-                // GID pre-resolution); without its arm the method fell
-                // into an unreachable! panic (no response) — the
-                // listMethods promise face diverging from the callable
-                // face.
+                // actor's move_storage module). renameFile = the file
+                // rename extension (real capability — the actor's
+                // rename_file module: validate + journal + async
+                // on-disk rename under the moveStorage discipline;
+                // libtorrent rename_file semantics: identity- and
+                // progress-preserving).
                 let gid = gid_param(&params, 0)?;
                 if method == "taiji.moveStorage" {
                     let Some(Value::String(dir)) = params.get(1) else {

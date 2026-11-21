@@ -214,7 +214,7 @@ tellStatus 轮询语义），会话数据库与任务行和 RPC 面完全同构 
 | `taiji.createTorrent` | 制作种子（files/outputDir/pieceLength/format/private/announce） |
 | `taiji.addTracker` / `taiji.removeTracker` | BT 任务 tracker 动态编辑（见下一节） |
 | `taiji.moveStorage` | 存储迁移：`moveStorage(gid, dir)` 将任务的盘上载荷迁往 `dir`（同卷原子 rename；跨卷临时名拷贝+fsync+unlink）。任务族：torrent 载荷（多文件 name 子树/单文件）、HTTP `.part`、magnet 与 .torrent URL 任务（纯换 dir）；媒体任务保留 not_supported 能力面。受理态：waiting/paused（立即迁移）、active（借 changeOption 重启路径自动停熄，迁后原队首重激活）、seeding（seed 停熄，提交后重回做种）；checking/合成/结果态拒绝。异步受理：迁移日志（config_json，与行 upsert 同事务、严格先于盘上动作）落库且停熄启动即回 `"OK"`；完成态经 `tellStatus` 的 `dir` 观测。崩溃安全：载荷源在提交前永不销毁——任意时点被 kill 均在下次启动幂等重做（日志收口）；运行期失败的迁移保留日志（重启重试），任务在原目录继续。空/空白 `dir` = `Illegal argument.`；目标嵌套于当前目录、移动中重复调用均拒绝 |
-| `taiji.renameFile` | 文件重命名——已注册未实现（GID 解析后回 not_supported） |
+| `taiji.renameFile` | 文件重命名：`renameFile(gid, oldPath, newPath)` 重命名 torrent 任务的单个文件（叶子名或载荷根内跨子目录的相对路径；亦接受 `getFiles` 回传的 `dir` 拼接绝对路径面）。libtorrent `rename_file` 语义在本引擎执行模型上的落地：保 identity（原始 metadata BLOB 与两个 infohash 永不移动——仅运行时 wire 视图与盘上路径改变）、保进度（无重校验、piece 位图无损）。受理态：waiting/paused（先落日志再做受防护的盘上 rename）、active（借 changeOption 重启路径停熄，rename 后原队首重激活）、seeding（seed 停熄，提交后重回做种）；checking/合成/结果态拒绝，pad 文件、路径逃逸（`..`/目录外绝对路径）、占用/交叠目标、已存在目标文件同样拒绝。异步受理：rename 日志（config_json `rename_pending`，与行 upsert 同事务、严格先于盘上动作）落库即回 `"OK"`；完成态经 `getFiles`/`tellStatus` `files[].path` 观测。崩溃安全：盘上 rename 幂等（`from` 缺、`to` 在 = 已落定）——任意时点被 kill 均在下次启动重做（日志收口），持久 `file_renames` 映射重放到重建的 metainfo；运行期失败保留日志，任务在原路径继续。根目录改名不在范围（wire 视图不呈现多文件根） |
 | `taiji.banAddr` / `unbanAddr` / `listBans` | peer 封禁面 |
 | `taiji.setSchedulerPolicy` / `getSchedulerPolicy` | 调度策略 |
 | `taiji.setStreamingPlayhead` | 流式 piece 选择播放头 |

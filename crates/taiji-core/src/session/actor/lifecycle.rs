@@ -162,7 +162,24 @@ impl SessionActor {
             }
             match self.rebuild_from_row(&gid, &row, &cfg).await {
                 Rebuilt::Torrent(boxed) => {
-                    let (metainfo, tiers) = *boxed;
+                    let (mut metainfo, tiers) = *boxed;
+                    // renameFile crash close-out: a journal in the row
+                    // = a file rename interrupted at any point; redo
+                    // it idempotently and commit the corrected view
+                    // BEFORE the move close-out and the Job/queue
+                    // rebuild continue on it (the move's payload-root
+                    // derivation reads `metainfo.name`, unaffected by
+                    // the file-path rewrite, so either order settles
+                    // the same; this order keeps the meta uniquely
+                    // borrowed).
+                    self.close_out_torrent_rename(
+                        &gid_hex,
+                        &mut row,
+                        &snap.files,
+                        &mut cfg,
+                        &mut metainfo,
+                    )
+                    .await;
                     let meta = Arc::new(metainfo);
                     let total_len = meta.meta.total_len();
                     // moveStorage crash close-out: a journal
@@ -299,6 +316,12 @@ impl SessionActor {
                                 .webseeds
                                 .clone()
                                 .unwrap_or_else(|| meta.url_list.clone()),
+                            // RPC renameFile face restored from
+                            // config_json (the metainfo view above
+                            // already carries the applied paths — this
+                            // is the durable mirror for later renames
+                            // and config rewrites).
+                            file_renames: cfg.file_renames.clone(),
                         })),
                     );
                     // 'seeding'-state restart routing (the seed pool,
@@ -653,6 +676,14 @@ impl SessionActor {
             match parsed {
                 Ok(Ok(mut meta)) => {
                     if let Err(error) = super::output_paths::apply(&mut meta, &cfg.output_paths) {
+                        return Rebuilt::Unrecoverable(error.to_string());
+                    }
+                    // RPC renameFile replay: wire-path overrides on top
+                    // of the output mapping (identity untouched — the
+                    // raw BLOB and both infohashes never move).
+                    if let Err(error) =
+                        super::rename_file::apply_renames(&mut meta, &cfg.file_renames)
+                    {
                         return Rebuilt::Unrecoverable(error.to_string());
                     }
                     let tiers = if cfg.tiers.is_empty() {

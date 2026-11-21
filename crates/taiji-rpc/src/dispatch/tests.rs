@@ -2978,6 +2978,120 @@ async fn add_torrent_webseed_uris_parameter_unions() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// taiji.renameFile: write gate, the (gid, oldPath, newPath) param
+/// face (missing / non-string parameters are aria2 checkRequiredParam
+/// rejections), and the end-to-end rename → getFiles echo over a
+/// paused single-file task.
+#[tokio::test]
+async fn rename_file_shape_write_gate_and_e2e() {
+    let open = state(None);
+    // Write gate: fails closed without a secret.
+    let gated = call(
+        &open,
+        "taiji.renameFile",
+        vec![json!("8000000000000001"), json!("a.bin"), json!("b.bin")],
+    )
+    .await;
+    assert_eq!(gated.code, 1);
+    assert_eq!(
+        gated.payload["message"], "unauthenticated write requires --rpc-secret",
+        "the write face: fails closed without a secret"
+    );
+
+    let authed = state(Some("rn01"));
+    // Well-formed shape -> the session gid-not-found face.
+    let nf = call_auth(
+        &authed,
+        "taiji.renameFile",
+        vec![json!("8000000000000001"), json!("a.bin"), json!("b.bin")],
+    )
+    .await;
+    assert_eq!(nf.code, 1);
+    assert_eq!(
+        nf.payload["message"], "GID 8000000000000001 is not found",
+        "a well-formed call lands on the session gid-not-found error face"
+    );
+    // Param face: missing / non-string oldPath and newPath.
+    for (params, tag) in [
+        (vec![json!("8000000000000001")], "oldPath missing"),
+        (
+            vec![json!("8000000000000001"), json!(7)],
+            "oldPath not a string",
+        ),
+        (
+            vec![json!("8000000000000001"), json!("a.bin")],
+            "newPath missing",
+        ),
+        (
+            vec![json!("8000000000000001"), json!("a.bin"), json!([1])],
+            "newPath not a string",
+        ),
+    ] {
+        let mut full = vec![json!("token:rn01")];
+        full.extend(params);
+        let r = call(&authed, "taiji.renameFile", full).await;
+        assert_eq!(r.code, 1, "{tag} rejected");
+        assert!(
+            r.payload["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("is required but missing")),
+            "{tag}: {}",
+            r.payload["message"]
+        );
+    }
+
+    // End-to-end: add a paused single-file task, rename its file, and
+    // read the echo back through getFiles.
+    let dir = std::env::temp_dir().join(format!("bh-p34-rn-rpc-{}", std::process::id()));
+    let add = call_auth(
+        &authed,
+        "addTorrent",
+        vec![
+            json!(b64(&v1_named_torrent("rpc-rename-me.bin"))),
+            json!([]),
+            json!({
+                "dir": dir.display().to_string(),
+                "pause": "true",
+            }),
+        ],
+    )
+    .await;
+    assert_eq!(add.code, 0, "addTorrent: {}", add.payload["message"]);
+    let gid = ok_str(&add);
+    // The rename face answers OK; the echo follows asynchronously
+    // (journal + fenced rename + commit — the async-acceptance
+    // semantics of the taiji.* extension).
+    let rn = call_auth(
+        &authed,
+        "taiji.renameFile",
+        vec![
+            json!(gid),
+            json!("rpc-rename-me.bin"),
+            json!("rpc-renamed.bin"),
+        ],
+    )
+    .await;
+    assert_eq!(rn.code, 0, "renameFile: {}", rn.payload["message"]);
+    assert_eq!(rn.payload, "OK");
+    let mut echoed = false;
+    for _ in 0..100 {
+        let files = call_auth(&authed, "getFiles", vec![json!(gid)]).await;
+        assert_eq!(files.code, 0);
+        let arr = as_arr(&files.payload, "getFiles");
+        if arr.len() == 1
+            && arr[0]["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("rpc-renamed.bin"))
+        {
+            echoed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(echoed, "getFiles must echo the renamed path");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn taiji_streaming_playhead_e2e() {
     let st = state(Some("t"));

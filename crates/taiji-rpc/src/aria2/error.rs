@@ -809,7 +809,7 @@ mod tests {
                 message: "GID 2089c4b0 not found".into(),
             }),
             map_session_error(&SessionError::NotSupported {
-                method: "renameFile",
+                method: "taiji.moveStorage",
             }),
             map_session_error(&SessionError::SessionClosed),
             RpcError::unexpected_reply("tellStatus", &"weird"),

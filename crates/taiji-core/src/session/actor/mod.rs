@@ -1748,6 +1748,13 @@ struct TorrentJob {
     /// `EngineConfig.webseeds` at activation (gated by the
     /// `enable-http-seeding` switch).
     webseeds: Vec<String>,
+    /// RPC `taiji.renameFile` mirror (files index -> renamed wire path;
+    /// the same coordinate system as [`TorrentJob::metainfo`]'s current
+    /// view). The `metainfo` above already carries the applied paths —
+    /// this map is the durable fact `job_config` projects into
+    /// `PersistedTaskConfig::file_renames` and the rename commit
+    /// updates alongside the metainfo swap. Empty = no rename applied.
+    file_renames: std::collections::BTreeMap<usize, std::path::PathBuf>,
 }
 
 struct MagnetJob {
@@ -1914,6 +1921,18 @@ enum TaskNotice {
         gid: Gid,
         result: Box<Result<taiji_io::fsmove::MoveOutcome, String>>,
     },
+    /// On-disk file rename complete (the spawn_blocking completion
+    /// receipt of the `taiji.renameFile` promotion step; the MoveDone
+    /// discipline for a single file's path change). `Ok` = the payload
+    /// rename settled (or was never on disk — a metadata-only commit),
+    /// the actor commits the metainfo view + row rewrite + journal
+    /// clear and releases the hold; `Err` = the rename failed (the
+    /// hold releases, the journal stays — the next bootstrap retries
+    /// idempotently, the task continues with the old path intact).
+    RenameDone {
+        gid: Gid,
+        result: Box<Result<(), String>>,
+    },
 }
 
 impl TaskNotice {
@@ -1928,7 +1947,8 @@ impl TaskNotice {
             | TaskNotice::StatusDirty { gid }
             | TaskNotice::SeedingStarted { gid }
             | TaskNotice::SynthesisGate { gid }
-            | TaskNotice::MoveDone { gid, .. } => *gid,
+            | TaskNotice::MoveDone { gid, .. }
+            | TaskNotice::RenameDone { gid, .. } => *gid,
         }
         // (Media outcomes ride TaskNotice::Ended — no separate arm.)
     }
@@ -1979,6 +1999,12 @@ pub struct SessionActor {
     /// `QueueMan::set_moving`; the promotion step fires the payload
     /// mover once the quiesce teardown completes).
     moving: HashMap<Gid, move_storage::MoveState>,
+    /// `taiji.renameFile` in-flight table: the runtime face of the
+    /// row's `rename_pending` journal (gates fillup through
+    /// `QueueMan::set_renaming`; the promotion step fires the on-disk
+    /// rename once the quiesce teardown completes — the moveStorage
+    /// discipline applied to a single file's path).
+    renaming: HashMap<Gid, rename_file::RenameState>,
     running: HashMap<Gid, RunningTask>,
     /// Persistence injection (None = nothing persisted; existing tests /
     /// CLI direct-run shapes unchanged). Task registration / lifecycle row
@@ -2338,6 +2364,7 @@ impl SessionActor {
             queue: QueueMan::new(),
             jobs: HashMap::new(),
             moving: HashMap::new(),
+            renaming: HashMap::new(),
             running: HashMap::new(),
             global,
             limits,
@@ -2721,6 +2748,9 @@ impl SessionActor {
                                        TaskNotice::MoveDone { gid, result } => {
                                            self.finish_move(gid, *result).await;
                                        }
+                                       TaskNotice::RenameDone { gid, result } => {
+                                           self.finish_rename(gid, *result).await;
+                                       }
                                        TaskNotice::SynthesisGate { gid } => {
             // Synthesis-pool transfer:
             // active → proc_wait, download slot released
@@ -2864,11 +2894,13 @@ impl SessionActor {
                     || magnet.options.pause_metadata || !magnet.options.follow_torrent)
                 .then_some(*gid)
             }));
-        // Storage-move promotion: feed the queue hold set,
-        // then fire every matured mover (quiesce complete / never
-        // quiescing). In-flight members stay held — activation would
-        // race the mover's source payload.
+        // Storage-mutation promotion: feed the queue hold set (moves
+        // and file renames share it — both relocate on-disk payload
+        // under a journal), then fire every matured mover/renamer
+        // (quiesce complete / never quiescing). In-flight members stay
+        // held — activation would race the mutating payload.
         self.promote_matured_moves();
+        self.promote_matured_renames();
         // (1) check promotion: admit until the budget is full or the
         // FIFO drains. Each admission pops the entry; the meta lookup
         // precedes the registry move (a parked entry whose payload
@@ -3074,6 +3106,11 @@ mod media_task;
 mod move_storage;
 pub(crate) mod output_paths;
 mod persist;
+/// `taiji.renameFile` orchestration (the libtorrent `rename_file`
+/// semantics on this engine's execution model: identity-preserving,
+/// progress-preserving; the moveStorage journal + quiesce discipline
+/// applied to a single file's path).
+mod rename_file;
 /// Periodic task summary log (the `--summary-interval` feed; pub(crate)
 /// so the `taiji http` / bare-run doc face can reference the summary
 /// format from the same source — a format golden test lives in the

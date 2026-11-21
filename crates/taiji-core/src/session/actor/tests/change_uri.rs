@@ -368,3 +368,153 @@ async fn change_uri_bt_active_edit_reactivates() {
     )
     .unwrap_or_else(|e| panic!("{e:?}"));
 }
+
+/// A retained checkpoint survives an explicit URL/path edit and process restart;
+/// a different content validator still refuses to alter the retained file.
+#[tokio::test]
+async fn change_uri_retained_http_checkpoint_rebinds_only_matching_content() {
+    use crate::session::http::{ValidatorFacts, validator_digest};
+    use crate::session::persist::import_http::{RetainedHttpContext, request_uri_hash};
+    const BS: usize = 4 * 1024 * 1024;
+    for changed in [false, true] {
+        let dir = temp_dir("cu-retained");
+        let db = dir.join("taiji.sqlite3");
+        let body = vec![37; BS + 1024 * 1024];
+        let mut retained = body.clone();
+        retained[BS..].fill(0);
+        let part = part_path_of(&dir, "payload.bin");
+        ok(tokio::fs::write(&part, &retained).await, "seed part");
+        let origin = spawn_mock_origin(Arc::new(body.clone()), true, true, false).await;
+        let old = "http://127.0.0.1:1/old";
+        let new = origin.url("new");
+        let gid = Gid::from_u64(0x8000000000000925);
+        let facts = ValidatorFacts {
+            final_url_path: "/old".into(),
+            total_len: Some(body.len() as u64),
+            etag: None,
+            last_modified: Some(
+                if changed {
+                    "Mon, 31 Aug 2026 12:00:00 GMT"
+                } else {
+                    LAST_MODIFIED_MOCK
+                }
+                .into(),
+            ),
+            encoding_ok: true,
+        };
+        let mut row = seeded_http_row(&gid.to_string(), old, &dir, "payload.bin");
+        row.state = "paused".into();
+        row.block_size = BS as i64;
+        row.block_count = Some(2);
+        row.block_bitmap = Some(vec![1]);
+        row.total_done = BS as i64;
+        row.probe_json = Some(ok(serde_json::to_string(&facts), "facts"));
+        row.validator_digest = Some(ok(validator_digest(&facts), "digest"));
+        row.config_json = HttpPersistConfig {
+            retain_request_context: true,
+            http_resume_context: Some(RetainedHttpContext {
+                source_hash: request_uri_hash(old),
+                resource_hash: request_uri_hash(old),
+                output_path: dir.join("payload.bin").display().to_string(),
+                validator_kind: "last-modified".into(),
+                validator: facts.last_modified.clone().unwrap_or_default(),
+                total_length: body.len() as i64,
+            }),
+            ..Default::default()
+        }
+        .to_json();
+        let (persist, writer) = ok(TestPersistWriter::spawn(db.clone()).await, "writer");
+        ok(persist.upsert_http_task(row).await, "seed checkpoint");
+        let global = GlobalOptions {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        let (handle, join) = SessionActor::spawn_with_persist(
+            SessionOptions {
+                global: global.clone(),
+            },
+            Some(persist),
+        );
+        ok(
+            call(
+                &handle,
+                SessionCommand::ChangeUri {
+                    gid: gid.to_string(),
+                    file_index: 1,
+                    del_uris: vec![old.into()],
+                    add_uris: vec![new.clone()],
+                    pos: Some(0),
+                },
+            )
+            .await,
+            "edit source",
+        );
+        handle.shutdown().await;
+        ok(join.await, "actor exit");
+        ok(writer.await, "writer exit");
+        let (persist, writer) = ok(TestPersistWriter::spawn(db.clone()).await, "restart writer");
+        let (handle, join) =
+            SessionActor::spawn_with_persist(SessionOptions { global }, Some(persist));
+        ok(
+            call(
+                &handle,
+                SessionCommand::Unpause {
+                    gid: gid.to_string(),
+                },
+            )
+            .await,
+            "unpause",
+        );
+        let expected = if changed {
+            StatusKind::Error
+        } else {
+            StatusKind::Complete
+        };
+        wait_until(async || {
+            status_list(
+                &call(
+                    &handle,
+                    SessionCommand::TellStopped {
+                        offset: 0,
+                        num: u32::MAX,
+                        keys: vec![],
+                    },
+                )
+                .await,
+            )
+            .iter()
+            .any(|view| view.gid == gid && view.status == expected)
+        })
+        .await;
+        if changed {
+            assert_eq!(ok(tokio::fs::read(&part).await, "retained bytes"), retained);
+            assert!(
+                origin
+                    .ranges
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .all(|range| *range == (0, 0))
+            );
+        } else {
+            assert_eq!(
+                ok(
+                    tokio::fs::read(dir.join("payload.bin")).await,
+                    "completed bytes"
+                ),
+                body
+            );
+            let ranges = origin.ranges.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(ranges.iter().any(|(start, _)| *start == BS as u64));
+            assert!(
+                ranges
+                    .iter()
+                    .all(|(start, end)| (*start, *end) == (0, 0) || *start >= BS as u64)
+            );
+        }
+        handle.shutdown().await;
+        ok(join.await, "actor exit");
+        ok(writer.await, "writer exit");
+        ok(tokio::fs::remove_dir_all(&dir).await, "cleanup");
+    }
+}

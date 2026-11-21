@@ -3453,12 +3453,13 @@ impl SessionActor {
             if let Some(row) = hj.restore.as_mut() {
                 row.url = url.clone();
                 row.mirrors_json = mirrors.clone();
+                super::http_source_rebind::authorize(row, &hj.uris);
             }
             if let Some(mirror) = hj.mirror.as_ref() {
-                let mut row = crate::lock(mirror).clone();
+                let mut row = crate::lock(mirror);
                 row.url = url.clone();
                 row.mirrors_json = mirrors.clone();
-                *crate::lock(mirror) = row;
+                super::http_source_rebind::authorize(&mut row, &hj.uris);
             }
             if let Some(Job::Http(hj)) = self.jobs.get(&gid) {
                 if let Some(row) = hj.restore.clone() {

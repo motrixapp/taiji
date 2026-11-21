@@ -20,6 +20,7 @@
 
 pub mod actor;
 pub mod announce_list;
+pub mod budget;
 pub mod dns;
 pub mod http;
 pub mod scrape;

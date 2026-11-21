@@ -204,6 +204,7 @@ impl SessionActor {
                     self.jobs.insert(
                         gid,
                         Job::Torrent(Box::new(TorrentJob {
+                            selection_info: None,
                             metainfo: Arc::clone(&meta),
                             tiers,
                             dir,
@@ -369,6 +370,7 @@ impl SessionActor {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    self.magnet_services.queue_resolution(gid);
                     self.jobs.insert(
                         gid,
                         Job::Magnet(Box::new(MagnetJob {

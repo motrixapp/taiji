@@ -863,6 +863,7 @@ pub(super) fn torrent_bittorrent_view(tj: &TorrentJob) -> BittorrentView {
     let meta = &tj.metainfo;
     let (comment, creation_date, name) = tj.attrs_top.clone();
     BittorrentView {
+        v1_info_hash: meta.meta.identity.v1,
         comment,
         creation_date,
         // single = info has a length (single file); multi-file /

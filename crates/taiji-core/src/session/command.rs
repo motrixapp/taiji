@@ -283,6 +283,12 @@ pub enum SessionCommand {
     /// Read original verified metainfo without exposing engine filesystem paths.
     /// Retire cached and pending name resolution after host network changes.
     NotifyNetworkChange,
+    /// Start shared discovery asynchronously without adding a torrent.
+    PrepareBitTorrent,
+    /// Per-attempt monotonic magnet diagnostics (bounded recent history).
+    GetMagnetResolution {
+        gid: String,
+    },
     GetTorrentMetadata {
         gid: String,
     },
@@ -548,9 +554,11 @@ pub enum CommandReply {
     /// never appears — the RpcMethodImpl.cc rule).
     Options(BTreeMap<String, String>),
     HttpOutput(Box<super::view::HttpOutputView>),
+    MagnetResolution(crate::magnet::ResolutionSnapshot),
     TorrentMetadata {
         data: Vec<u8>,
         awaiting_selection: bool,
+        manifest: Box<taiji_domain::torrent_manifest::TorrentManifest>,
     },
     /// getSessionInfo: a random session id hex (RpcMethodImpl.cc;
     /// util::toHex(sessionId), 16 random bytes → 32 hex chars).
@@ -755,7 +763,10 @@ mod tests {
         ("taiji.getSchedulerPolicy", true),
         ("taiji.setFilePriority", false),
         ("taiji.setStreamingPlayhead", false),
+        ("taiji.prepareBitTorrent", false),
         ("taiji.notifyNetworkChange", false),
+        ("taiji.getMagnetResolution", true),
+        ("taiji.getTorrentManifest", true),
         ("taiji.getTorrentMetadata", true),
         ("taiji.confirmTorrentSelection", false),
         ("taiji.getHttpOutput", true),

@@ -363,6 +363,7 @@ struct TrackerSlot {
     /// duplicate announces to one tracker, `can_announce`
     /// `src/announce_entry.cpp`).
     updating: bool,
+    announce_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// Consecutive failure count (`fails` in `announce_entry.hpp`; reset
     /// on success, `src/torrent.cpp`).
     fails: u32,
@@ -433,6 +434,7 @@ impl TierState {
 /// docs/design/tracker.md). [`Self::run`] exits once every command handle
 /// is dropped.
 pub struct TrackerActor {
+    budget: Option<super::budget::AnnounceParticipant>,
     cfg: TrackerActorConfig,
     view: Arc<dyn SwarmView>,
     /// Tier event state table (tier order = the tier_groups sort order;
@@ -555,6 +557,7 @@ fn build_tables(
                     token: *token_seq,
                     next_due: None,
                     updating: false,
+                    announce_permit: None,
                     fails: 0,
                     min_interval: TrackerActor::default_interval(),
                     interval: TrackerActor::default_interval(),
@@ -631,6 +634,7 @@ impl TrackerActor {
         let dns = SharedDns::shared_default();
         let dns_generation = dns.generation();
         Ok(TrackerActor {
+            budget: None,
             tiers,
             slots,
             user_interval: cfg.options.bt_tracker_interval,
@@ -709,6 +713,7 @@ impl TrackerActor {
     }
 
     fn cancel_slot(&mut self, i: usize) {
+        self.slots[i].announce_permit = None;
         self.udp.cancel_owner(self.slots[i].token);
         self.slots[i].udp_attempt = None;
         if let Some(task) = self.slots[i].pending_task.take() {
@@ -721,6 +726,7 @@ impl TrackerActor {
             flight.task.abort();
         }
         for slot in &mut self.slots {
+            slot.announce_permit = None;
             slot.udp_attempt = None;
             slot.updating = false;
             slot.udp_addr = None;
@@ -2036,16 +2042,59 @@ impl TrackerActor {
         // Termination: each issue path either sets updating or pushes
         // next_due past now (see the slot_due note), so a tick always
         // drains.
+        // A newly active task can reclaim stalled borrowed slots; cancellation
+        // releases transport work before a new announce receives its permit.
+        if self.budget.is_some() && !self.cfg.private {
+            let stale: Vec<_> = self
+                .slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| {
+                    slot.updating
+                        && slot.attempt_at.is_some_and(|started| {
+                            now.saturating_duration_since(started) >= Duration::from_secs(1)
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            for index in stale {
+                if !self
+                    .budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.should_yield(self.in_flight()))
+                {
+                    break;
+                }
+                self.finish_failure(
+                    index,
+                    "capacity",
+                    "stalled borrowed announce yielded to queued discovery".into(),
+                    now,
+                );
+            }
+        }
         let cap = if self.cfg.private {
             1
         } else {
-            ANNOUNCE_MAX_IN_FLIGHT
+            self.budget
+                .as_ref()
+                .map_or(ANNOUNCE_MAX_IN_FLIGHT, |budget| budget.capacity())
         };
         while self.in_flight() < cap {
             let Some(i) = self.next_candidate(now) else {
                 break;
             };
+            if let Some(budget) = &self.budget {
+                let Some(permit) = budget.try_acquire(self.in_flight()) else {
+                    break;
+                };
+                self.slots[i].announce_permit = Some(permit);
+            }
             self.issue_announce(i, now).await;
+        }
+        let waiting = self.next_candidate(now).is_some();
+        if let Some(budget) = &mut self.budget {
+            budget.set_waiting(waiting);
         }
         // Flush this wave immediately, including literal/cache-hit requests
         // created after the first maintenance pass.
@@ -2212,6 +2261,23 @@ pub fn spawn_tracker_actor_with_dns(
 ) -> Result<mpsc::Sender<TrackerCommand>, TrackerError> {
     let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
     let actor = TrackerActor::new(cfg, view, cmd_rx, event_tx, transport)?.with_dns(dns)?;
+    tokio::spawn(actor.run());
+    Ok(cmd_tx)
+}
+
+/// Metadata discoveries share a session budget while ordinary callers keep
+/// their established per-actor policy.
+pub fn spawn_tracker_actor_with_budget(
+    cfg: TrackerActorConfig,
+    view: Arc<dyn SwarmView>,
+    event_tx: mpsc::Sender<TrackerActorEvent>,
+    transport: UdpTransport,
+    dns: Arc<SharedDns>,
+    budget: Arc<super::budget::AnnounceBudget>,
+) -> Result<mpsc::Sender<TrackerCommand>, TrackerError> {
+    let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+    let mut actor = TrackerActor::new(cfg, view, cmd_rx, event_tx, transport)?.with_dns(dns)?;
+    actor.budget = Some(budget.register());
     tokio::spawn(actor.run());
     Ok(cmd_tx)
 }

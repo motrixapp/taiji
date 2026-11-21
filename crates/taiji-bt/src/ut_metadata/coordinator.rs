@@ -11,12 +11,14 @@ use sha2::Sha256;
 use super::{DataOutcome, FetchError, METADATA_PIECE_SIZE, MetadataAssembler, MetadataError};
 use crate::peer::ExpectedInfoHash;
 
-const WINDOW: usize = 4;
+const WINDOW: usize = 1;
+const SMALL_METADATA_BLOCKS: usize = 4;
 const MAX_WINDOW: usize = 8;
 const MAX_PEERS: usize = 128;
 const MAX_SIZES: usize = 4;
 const LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEDGE_DELAY: Duration = Duration::from_secs(2);
+const MIN_TAIL_HEDGE_AGE: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub struct SharedMetadataSpec {
@@ -25,6 +27,8 @@ pub struct SharedMetadataSpec {
 }
 
 pub struct MetadataCoordinator {
+    changes: tokio::sync::watch::Sender<u64>,
+    first_block: std::sync::OnceLock<Instant>,
     expected: ExpectedInfoHash,
     state: Mutex<State>,
 }
@@ -44,6 +48,7 @@ struct Member {
     received: u64,
     cooldown: Option<Instant>,
     rejected: HashSet<usize>,
+    latency: Option<Duration>,
 }
 struct Group {
     assembler: MetadataAssembler,
@@ -52,6 +57,7 @@ struct Group {
     epoch: u64,
     isolate: bool,
     owner: Option<u64>,
+    hedges: usize,
 }
 #[derive(Clone, Copy)]
 struct Lease {
@@ -63,12 +69,15 @@ struct Lease {
 pub struct SharedMetadataPeer {
     coordinator: Arc<MetadataCoordinator>,
     peer: u64,
+    changes: tokio::sync::watch::Receiver<u64>,
 }
 
 impl MetadataCoordinator {
     pub fn new(expected: ExpectedInfoHash) -> Self {
         Self {
+            changes: tokio::sync::watch::channel(0).0,
             expected,
+            first_block: std::sync::OnceLock::new(),
             state: Mutex::new(State::default()),
         }
     }
@@ -102,11 +111,14 @@ impl MetadataCoordinator {
                 received: 0,
                 cooldown: None,
                 rejected: HashSet::new(),
+                latency: None,
             },
         );
+        self.changed();
         Ok(SharedMetadataPeer {
             coordinator: self.clone(),
             peer,
+            changes: self.changes.subscribe(),
         })
     }
     fn group(state: &mut State, size: usize) -> Result<&mut Group, MetadataError> {
@@ -143,6 +155,7 @@ impl MetadataCoordinator {
                     epoch: 0,
                     isolate: false,
                     owner: None,
+                    hedges: 0,
                 },
             );
         }
@@ -157,15 +170,27 @@ impl MetadataCoordinator {
             ExpectedInfoHash::V2(expected) => <[u8; 32]>::from(Sha256::digest(bytes)) == expected,
         }
     }
+    /// Monotonic reception time of the first accepted metadata block.
+    pub fn first_block_at(&self) -> Option<Instant> {
+        self.first_block.get().copied()
+    }
+
     pub fn peer_progress(&self, peer: u64) -> u64 {
         self.lock().peers.get(&peer).map_or(0, |p| p.received)
     }
     pub fn completed(&self) -> Option<Bytes> {
         self.lock().completed.clone()
     }
+    fn changed(&self) {
+        self.changes
+            .send_modify(|revision| *revision = revision.wrapping_add(1));
+    }
 }
 
 impl SharedMetadataPeer {
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.clone()
+    }
     pub fn size(&self) -> Option<usize> {
         self.coordinator
             .lock()
@@ -189,6 +214,7 @@ impl SharedMetadataPeer {
         (size - bytes_missing, size)
     }
     pub fn requests(&mut self, now: Instant) -> Result<Vec<usize>, FetchError> {
+        self.changes.borrow_and_update();
         let mut state = self.coordinator.lock();
         if state.completed.is_some() {
             return Ok(Vec::new());
@@ -218,19 +244,30 @@ impl SharedMetadataPeer {
             member.probe = Some(now);
             return Ok(vec![0]);
         };
-        let window = if member.received >= (WINDOW * METADATA_PIECE_SIZE) as u64 {
-            MAX_WINDOW
-        } else {
-            WINDOW
-        };
+        let progressed = member.received > 0;
+        let latency = member.latency;
+        let hedge_delay = member.latency.map_or(HEDGE_DELAY, |latency| {
+            latency
+                .saturating_mul(4)
+                .clamp(Duration::from_millis(200), HEDGE_DELAY)
+        });
         let rejected = member.rejected.clone();
+        let active = state
+            .peers
+            .values()
+            .filter(|member| {
+                member.size == Some(size) && !member.cooldown.is_some_and(|until| now < until)
+            })
+            .count()
+            .max(1);
         let epoch = state.groups.get(&size).ok_or(FetchError::Rejected)?.epoch;
         state
             .peers
             .get_mut(&self.peer)
             .ok_or(FetchError::Rejected)?
             .epoch = epoch;
-        let group = state.groups.get_mut(&size).ok_or(FetchError::Rejected)?;
+        let State { groups, peers, .. } = &mut *state;
+        let group = groups.get_mut(&size).ok_or(FetchError::Rejected)?;
         if group.isolate {
             if !rejected.is_empty() {
                 return Ok(Vec::new());
@@ -240,6 +277,17 @@ impl SharedMetadataPeer {
                 return Ok(Vec::new());
             }
         }
+        // Bootstrap peers with one block, then share remaining work across
+        // active suppliers. A lone useful supplier may fill the whole window.
+        let missing = group.assembler.missing_indices();
+        let remaining_blocks = missing.len();
+        let window = if !progressed {
+            WINDOW
+        } else if group.isolate || active == 1 {
+            MAX_WINDOW
+        } else {
+            remaining_blocks.div_ceil(active).clamp(1, MAX_WINDOW)
+        };
         for leases in &mut group.leases {
             leases.retain(|lease| now.saturating_duration_since(lease.sent) < LEASE_TIMEOUT);
         }
@@ -250,7 +298,6 @@ impl SharedMetadataPeer {
             .filter(|lease| lease.peer == self.peer)
             .count();
         let mut remaining = window.saturating_sub(outstanding);
-        let missing = group.assembler.missing_indices();
         let mut requests = Vec::new();
         // Every unrequested block gets an owner before any duplicate is sent.
         for hedge in [false, true] {
@@ -265,12 +312,19 @@ impl SharedMetadataPeer {
                 let eligible = if hedge {
                     leases.len() == 1
                         && leases[0].peer != self.peer
-                        && (group.assembler.num_pieces() <= WINDOW
-                            || now.saturating_duration_since(leases[0].sent) >= HEDGE_DELAY)
+                        && group.hedges < (group.assembler.num_pieces() / 4).max(2)
+                        && (group.assembler.num_pieces() <= SMALL_METADATA_BLOCKS
+                            || now.saturating_duration_since(leases[0].sent) >= hedge_delay
+                            || (!group.isolate
+                                && remaining_blocks == 1
+                                && tail_is_overdue(now, leases[0], latency, peers)))
                 } else {
                     leases.is_empty()
                 };
                 if eligible {
+                    if hedge {
+                        group.hedges += 1;
+                    }
                     leases.push(Lease {
                         peer: self.peer,
                         sent: now,
@@ -284,6 +338,7 @@ impl SharedMetadataPeer {
     }
     pub fn reject(&mut self, index: usize, now: Instant) {
         let mut state = self.coordinator.lock();
+        self.coordinator.changed();
         let Some(size) = state.peers.get(&self.peer).and_then(|member| member.size) else {
             if index == 0 {
                 if let Some(member) = state.peers.get_mut(&self.peer) {
@@ -310,7 +365,7 @@ impl SharedMetadataPeer {
         }
         if let Some(member) = state.peers.get_mut(&self.peer) {
             member.rejected.insert(index);
-            if member.received == 0 && member.rejected.len() >= WINDOW {
+            if member.received == 0 && member.rejected.len() >= SMALL_METADATA_BLOCKS {
                 member.cooldown = Some(now + Duration::from_secs(10));
             }
         }
@@ -318,6 +373,7 @@ impl SharedMetadataPeer {
 
     pub fn observe_size(&mut self, size: usize) -> Result<(), MetadataError> {
         let mut state = self.coordinator.lock();
+        self.coordinator.changed();
         let previous = state.peers.get(&self.peer).and_then(|member| member.size);
         if let Some(previous) = previous {
             return if previous == size {
@@ -392,16 +448,20 @@ impl SharedMetadataPeer {
             }
             .into());
         };
-        if !leases.iter().any(|lease| lease.peer == self.peer) {
+        let Some(lease) = leases.iter().find(|lease| lease.peer == self.peer) else {
             return Ok(DataOutcome::Untracked);
-        }
+        };
+        let latency = now.saturating_duration_since(lease.sent);
         group.assembler.insert(index, data)?;
+        self.coordinator.changed();
+        self.coordinator.first_block.get_or_init(|| now);
         group.leases[index].clear();
         group.sources.insert(source);
         let remaining = group.assembler.missing_indices().len();
         if remaining > 0 {
             if let Some(peer) = state.peers.get_mut(&self.peer) {
                 peer.received += data.len() as u64;
+                peer.latency = Some(latency);
             }
             return Ok(DataOutcome::Stored { remaining });
         }
@@ -423,6 +483,7 @@ impl SharedMetadataPeer {
             group.epoch = group.epoch.wrapping_add(1);
             group.isolate = true;
             group.owner = None;
+            group.hedges = 0;
             if let Some(source) = proven_bad {
                 if state.banned.len() < MAX_PEERS {
                     state.banned.insert(source);
@@ -441,6 +502,30 @@ impl SharedMetadataPeer {
     }
 }
 
+/// When the entire assembly is waiting on one block, let an idle supplier
+/// with a measured response time race the current owner. Keep the owner's
+/// lease live and stay within the same duplicate-request budget.
+fn tail_is_overdue(
+    now: Instant,
+    lease: Lease,
+    alternative_latency: Option<Duration>,
+    peers: &HashMap<u64, Member>,
+) -> bool {
+    let Some(alternative) = alternative_latency.filter(|sample| !sample.is_zero()) else {
+        return false;
+    };
+    let age = now.saturating_duration_since(lease.sent);
+    let margin = alternative.saturating_mul(2);
+    if age < margin.max(MIN_TAIL_HEDGE_AGE) {
+        return false;
+    }
+    peers
+        .get(&lease.peer)
+        .and_then(|owner| owner.latency)
+        .filter(|sample| !sample.is_zero())
+        .is_none_or(|owner| age >= owner.saturating_mul(2) || owner >= age.saturating_add(margin))
+}
+
 impl Drop for SharedMetadataPeer {
     fn drop(&mut self) {
         let mut state = self.coordinator.lock();
@@ -457,6 +542,7 @@ impl Drop for SharedMetadataPeer {
                 group.leases.iter_mut().for_each(Vec::clear);
             }
         }
+        self.coordinator.changed();
     }
 }
 
@@ -489,6 +575,153 @@ mod tests {
             .collect()
     }
     #[test]
+    fn late_supplier_keeps_small_metadata_within_one_service_round() {
+        let data = vec![29; METADATA_PIECE_SIZE * 2];
+        let start = Instant::now();
+        let solo = pool(&data);
+        let mut only = solo
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let initial = only.requests(start).unwrap_or_default();
+        feed(
+            &mut only,
+            &data,
+            &initial,
+            start + Duration::from_millis(50),
+        );
+        let solo_ms = if solo.completed().is_some() {
+            50
+        } else {
+            let next = only
+                .requests(start + Duration::from_millis(50))
+                .unwrap_or_default();
+            feed(&mut only, &data, &next, start + Duration::from_millis(100));
+            assert!(solo.completed().is_some());
+            100
+        };
+        let shared = pool(&data);
+        let first = shared
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut peers = vec![first];
+        let mut available = [0u64, 1];
+        let mut events = Vec::new();
+        for index in peers[0].requests(start).unwrap_or_default() {
+            available[0] += 50;
+            events.push((available[0], 0usize, index));
+        }
+        peers.push(
+            shared
+                .attach(2, [2; 20], Some(data.len()))
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        for index in peers[1]
+            .requests(start + Duration::from_millis(1))
+            .unwrap_or_default()
+        {
+            available[1] += 50;
+            events.push((available[1], 1usize, index));
+        }
+        let completed_ms = loop {
+            assert!(!events.is_empty(), "suppliers must continue progressing");
+            events.sort_unstable();
+            let (ms, peer, block) = events.remove(0);
+            assert!(ms <= 1000, "bounded service budget");
+            feed(
+                &mut peers[peer],
+                &data,
+                &[block],
+                start + Duration::from_millis(ms),
+            );
+            if shared.completed().is_some() {
+                break ms;
+            }
+            for (index, peer) in peers.iter_mut().enumerate() {
+                for block in peer
+                    .requests(start + Duration::from_millis(ms))
+                    .unwrap_or_default()
+                {
+                    available[index] = available[index].max(ms) + 50;
+                    events.push((available[index], index, block));
+                }
+            }
+        };
+        eprintln!(
+            "single-supplier parallel replies: {solo_ms} ms; staggered serial suppliers: {completed_ms} ms"
+        );
+        assert!(
+            completed_ms <= 51,
+            "a late supplier must not spend its first round duplicating reserved work: {completed_ms} ms"
+        );
+    }
+
+    #[test]
+    fn four_suppliers_finish_nine_blocks_in_three_service_rounds() {
+        let data = vec![23; METADATA_PIECE_SIZE * 9];
+        let pool = pool(&data);
+        let mut peers: Vec<_> = (0..4)
+            .map(|index| {
+                pool.attach(index, [index as u8; 20], Some(data.len()))
+                    .unwrap_or_else(|e| panic!("{e}"))
+            })
+            .collect();
+        let start = Instant::now();
+        let mut queues: Vec<Vec<usize>> = peers
+            .iter_mut()
+            .map(|peer| peer.requests(start).unwrap_or_default())
+            .collect();
+        assert!(queues.iter().all(|queue| queue.len() == 1));
+        let mut served = HashSet::new();
+        for round in 1..=3 {
+            let now = start + Duration::from_millis(round * 50);
+            for (peer, queue) in peers.iter_mut().zip(&mut queues) {
+                if !queue.is_empty() {
+                    let index = queue.remove(0);
+                    assert!(
+                        served.insert(index),
+                        "healthy suppliers must not duplicate blocks"
+                    );
+                    feed(peer, &data, &[index], now);
+                }
+            }
+            for (peer, queue) in peers.iter_mut().zip(&mut queues) {
+                queue.extend(peer.requests(now).unwrap_or_default());
+            }
+        }
+        assert_eq!(pool.completed().as_deref(), Some(data.as_slice()));
+        assert_eq!(served.len(), 9);
+    }
+
+    #[tokio::test]
+    async fn disconnect_notifies_an_idle_supplier_without_waiting_for_a_tick() {
+        let data = vec![23; METADATA_PIECE_SIZE * 9];
+        let pool = pool(&data);
+        let mut a = pool
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut b = pool
+            .attach(2, [2; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let now = Instant::now();
+        let abandoned = a.requests(now).unwrap_or_default();
+        b.requests(now).unwrap_or_default();
+        let mut changed = b.changes();
+        drop(a);
+        tokio::time::timeout(Duration::from_millis(100), changed.changed())
+            .await
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        // Free b's first lease and verify that the abandoned block is reusable.
+        let own = pool.lock().groups[&data.len()]
+            .leases
+            .iter()
+            .position(|leases| leases.iter().any(|l| l.peer == 2))
+            .unwrap_or_else(|| panic!("lease"));
+        feed(&mut b, &data, &[own], now);
+        assert!(b.requests(now).unwrap_or_default().contains(&abandoned[0]));
+    }
+
+    #[test]
     fn peers_split_work_and_disconnect_preserves_blocks() {
         let data = vec![19; METADATA_PIECE_SIZE * 9];
         let pool = pool(&data);
@@ -503,7 +736,9 @@ mod tests {
         let br = b.requests(now).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(ar.len(), WINDOW);
         assert!(br.iter().all(|p| !ar.contains(p)));
-        feed(&mut a, &data, &ar[..2], now);
+        feed(&mut a, &data, &ar, now);
+        let abandoned = a.requests(now).unwrap_or_default();
+        assert!(!abandoned.is_empty());
         drop(a);
         feed(&mut b, &data, &br, now);
         while pool.completed().is_none() {
@@ -534,6 +769,99 @@ mod tests {
         feed(&mut b, &data, &[0], now + HEDGE_DELAY);
         assert!(pool.completed().is_some());
     }
+
+    #[test]
+    fn proven_supplier_races_a_silent_final_lease_without_revoking_it() {
+        let data = vec![42; METADATA_PIECE_SIZE * 6];
+        let pool = pool(&data);
+        let now = Instant::now();
+        let mut slow = pool
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut fast = pool
+            .attach(2, [2; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(slow.requests(now).unwrap_or_default(), vec![0]);
+        for round in 0..3 {
+            let sent = now + Duration::from_millis(round * 15);
+            let requests = fast.requests(sent).unwrap_or_default();
+            assert!(!requests.contains(&0));
+            feed(
+                &mut fast,
+                &data,
+                &requests,
+                sent + Duration::from_millis(15),
+            );
+        }
+        assert!(
+            fast.requests(now + Duration::from_millis(49))
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert_eq!(
+            fast.requests(now + MIN_TAIL_HEDGE_AGE).unwrap_or_default(),
+            vec![0]
+        );
+        let mut third = pool
+            .attach(3, [3; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            third
+                .requests(now + MIN_TAIL_HEDGE_AGE)
+                .unwrap_or_default()
+                .is_empty()
+        );
+        feed(&mut slow, &data, &[0], now + Duration::from_millis(55));
+        assert_eq!(pool.completed().as_deref(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn tail_race_respects_a_supplier_with_a_recent_response_estimate() {
+        let data = vec![13; METADATA_PIECE_SIZE * 6];
+        let pool = pool(&data);
+        let _slow = pool
+            .attach(1, [1; 20], Some(data.len()))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let now = Instant::now();
+        let lease = Lease { peer: 1, sent: now };
+        let mut state = pool.lock();
+        let latency = Some(Duration::from_millis(25));
+        state
+            .peers
+            .get_mut(&1)
+            .unwrap_or_else(|| panic!("owner"))
+            .latency = Some(Duration::from_millis(60));
+        assert!(!tail_is_overdue(
+            now + Duration::from_millis(55),
+            lease,
+            latency,
+            &state.peers
+        ));
+        assert!(tail_is_overdue(
+            now + Duration::from_millis(121),
+            lease,
+            latency,
+            &state.peers
+        ));
+        state
+            .peers
+            .get_mut(&1)
+            .unwrap_or_else(|| panic!("owner"))
+            .latency = Some(Duration::from_millis(180));
+        assert!(tail_is_overdue(
+            now + Duration::from_millis(90),
+            lease,
+            latency,
+            &state.peers
+        ));
+        assert!(!tail_is_overdue(
+            now + Duration::from_millis(90),
+            lease,
+            None,
+            &state.peers
+        ));
+    }
+
     #[test]
     fn unknown_size_probes_and_wrong_size_does_not_poison_honest_peer() {
         let data = vec![7; 100];
@@ -634,10 +962,16 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}"));
         let chunks = bad.requests(now).unwrap_or_default();
         feed(&mut bad, &vec![8; data.len()], &chunks, now);
-        let chunk = bad.requests(now).unwrap_or_default()[0];
+        let chunks = bad.requests(now).unwrap_or_default();
+        let mut rejected = false;
+        for chunk in chunks {
+            rejected |= bad
+                .data(chunk, data.len(), &vec![8; METADATA_PIECE_SIZE], now)
+                .is_err();
+        }
         assert!(
-            bad.data(chunk, data.len(), &vec![8; METADATA_PIECE_SIZE], now)
-                .is_err()
+            rejected,
+            "a completed corrupt info dictionary must be rejected"
         );
         drop(bad);
         assert!(pool.attach(3, [1; 20], Some(data.len())).is_err());

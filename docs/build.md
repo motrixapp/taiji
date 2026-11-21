@@ -30,6 +30,58 @@ run the store/filetree subset. Fuzzing: `cargo fuzz` (see `fuzz/`; targets
 cover bencode / filetree / peer frame / magnet / µTP / MSE / UDP demux /
 NAT-PMP / IGD XML).
 
+## Magnet latency comparison
+
+`scripts/bench_magnet.py` runs synthetic tracker and metadata-peer fixtures with
+fresh profiles. Optional references are libtorrent's Python binding and
+`transmission-daemon`; neither is a runtime dependency of taiji. Install the
+Python binding in an isolated environment, build taiji in release mode, then run:
+
+```sh
+python scripts/bench_magnet.py --taiji target/release/taiji \
+  --samples 30 --peer-host <local-LAN-IPv4> --output /tmp/magnet-comparison
+```
+
+The peer address must be local to the test machine. Transmission rejects tracker
+peers on loopback, so use its LAN interface for cross-client runs; RPC and tracker
+servers remain on loopback. The synthetic peer speaks plaintext TCP. Transmission
+is configured to tolerate plaintext and libtorrent's uTP is disabled for this
+fixture; encryption and transport interoperability need their separate tests.
+Default fixtures use no public swarm or user client profile. No service is
+installed or started by the script.
+
+Scenarios include healthy discovery, 64 silent handshakes plus a healthy peer,
+24 silent HTTP trackers before a healthy tracker, and delayed metadata blocks.
+`--baseline` adds an earlier taiji binary. `--clients` selects references;
+`--scenarios` selects fixtures. Runs are interleaved using a recorded seed.
+`--scenarios v2-32k,v2-513 --clients taiji,baseline,libtorrent` also checks
+info-first file lists when no piece-layer proofs are offered. Export/recovery
+correctness is covered separately by the native integration tests.
+Candidate order defaults to a reproducible shuffle (`--peer-order seeded`);
+`first`, `middle`, and `last` provide explicit placement probes. Every row records
+the healthy positions and duplicate metadata bytes. Before a comparison,
+libtorrent must reach a healthy tracker behind 24 silent trackers on the wire.
+Both `announce_to_all_tiers` and `announce_to_all_trackers` are enabled because
+libtorrent 2.1.1's setting-name table swaps these boolean entries; a settings
+readback alone does not validate behavior. Magnet trackers occupy distinct tiers.
+Latency ends after the file manifest is retrieved and identity checked, before
+optional diagnostic RPC calls. The same deadline applies to all clients.
+Output retains all timeouts/errors, raw per-run counters, native stage timings,
+and success-only latency percentiles. A libtorrent session is a protocol-engine
+reference, not a measurement of qBittorrent's complete UI. Existing results are
+never overwritten; use a new output directory for every run.
+
+An explicit `--torrent <known.torrent> --scenarios public-trackers,public-dht`
+opts into public metadata-only comparisons. Only the derived magnet is submitted;
+the local metainfo is never supplied to a reference client. The DHT-only case
+removes tracker hints. `--warmup 30` gives each client 30 seconds of idle discovery
+preparation, excluded from reported resolution time. taiji waits for file
+selection and libtorrent uses upload mode. Transmission is excluded from public
+runs because its RPC cannot enforce unwanted files before metadata arrives;
+its synthetic fixture supplies no payload and remains a valid comparison.
+Public tests enable the reference clients' normal DHT and uTP paths. Keep their
+results separate from deterministic fixtures and report failed attempts as well.
+
 ## Release
 
 - crates.io: never published — the workspace is `publish = false`; the engine
@@ -41,3 +93,43 @@ NAT-PMP / IGD XML).
   unsigned archives into a draft release. The separate `sign-macos` workflow
   signs and notarizes both macOS binaries before publication. Windows binaries
   are unsigned. See [the packaging contract](../packaging/README.md).
+
+### WebSocket and alert comparison
+
+`scripts/bench_magnet_ws.py` uses a persistent authenticated WebSocket for native
+engines and libtorrent's `metadata_received_alert` via nonblocking `set_alert_fd`.
+Install `websockets==15.0.1` alongside the optional libtorrent binding. Example:
+
+```sh
+python scripts/bench_magnet_ws.py --taiji target/release/taiji \
+  --baseline /tmp/previous-taiji --samples 30 --output /tmp/magnet-ws
+```
+
+The default `--mode notify` races readiness notifications with a bounded 10 ms
+status reconciliation fallback, allowing older baselines to participate. Use
+`--mode poll --poll-ms 1 --clients baseline,taiji` to compare delivery using the
+same polling interval. Record `ready_via` and RPC call counts; keep this series
+separate from the earlier short-connection HTTP results. Both clients still
+validate identity and retrieve the file list before the clock stops. Both clients receive the same 50 ms idle preparation before timing (`--prepare-ms`);
+native clients request `prepareBitTorrent` just as Motrix does. This does not preload
+metadata. Only local synthetic fixtures are allowed. libtorrent stop-announce waits are disabled only
+during fixture cleanup, after the measured interval. No payload is requested.
+
+### Engine fetching benchmark
+
+`scripts/bench_magnet_fetch.py` compares two taiji binaries with the same
+`infoValidatedUs` instrumentation. It records readiness, identity and file
+count checks, but reports the engine's monotonic time through info validation.
+Use a baseline with timing instrumentation and the original scheduling policy.
+
+```sh
+python scripts/bench_magnet_fetch.py --baseline /tmp/baseline-taiji \
+  --candidate target/release/taiji --samples 30 --seed 44 --output /tmp/magnet-fetch
+```
+
+The benchmark reuses the tracker and peer endpoints for each pair and randomizes
+engine order. Each case uses a fresh profile on loopback. TCP is explicit and
+DHT is disabled. By default `prepareBitTorrent` gets 50 ms before each case,
+with an empty metadata cache. Use `--prepare-ms 0` to include discovery startup
+or `--cache memory --scenarios healthy,v2-file-tree` for warm metadata.
+Raw attempts and peer traffic counters are retained alongside percentile summaries.

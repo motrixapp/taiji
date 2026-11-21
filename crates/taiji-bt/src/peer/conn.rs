@@ -459,7 +459,7 @@ where
         listen_port: mut my_listen_port,
         peer_upload_only,
         mut super_seed,
-        holepunch: hp_ext,
+        holepunch: mut hp_ext,
         client_deny,
         read_pool,
         block_arena,
@@ -473,7 +473,7 @@ where
         enabled: ext_enabled,
         metadata: metadata_serve,
         fetch: fetch_spec,
-        pex: pex_ext,
+        pex: mut pex_ext,
     } = ext;
     let mut allowed_fast = allowed_fast;
     // Window mode (test injection face): None = environment default
@@ -700,6 +700,9 @@ where
     let serve_out_tx = serving_queue.out_tx();
 
     let end = loop {
+        let mut metadata_changes = fetch_session
+            .as_ref()
+            .and_then(MetadataFetchSession::changes);
         tokio::select! {
             biased;
             _ = token.cancelled() => break PeerEnd::Cancelled,
@@ -992,6 +995,14 @@ where
                                         }
                                     }
                                 }
+                                PeerCommand::DisableDiscovery => {
+                                    pex_ext = None;
+                                    hp_ext = None;
+                                    peer_ut_holepunch_id = None;
+                                    pex_sender = PexSwarmSender::new(PexOffer::from_negotiation(false), None, Instant::now());
+                                    pex_fresh_cands.clear();
+                                    pex_dropped_cands.clear();
+                                }
                                 PeerCommand::SetPexCandidates { fresh, dropped } => {
                                     // Overwriting snapshot (the engine
                                     // already prunes by the 60s window);
@@ -1262,6 +1273,16 @@ where
                 }
             },
             _ = metadata_tick.tick(), if fetch_session.as_ref().is_some_and(MetadataFetchSession::is_shared) => {
+                if let Some(session) = fetch_session.as_mut() {
+                    if let Err(e) = session.issue(&mut writer, Instant::now()).await { break wire_io_end(&e); }
+                }
+            }
+            _ = async {
+                match metadata_changes.as_mut() {
+                    Some(changes) => { let _ = changes.changed().await; },
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
                 if let Some(session) = fetch_session.as_mut() {
                     if let Err(e) = session.issue(&mut writer, Instant::now()).await { break wire_io_end(&e); }
                 }

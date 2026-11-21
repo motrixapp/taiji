@@ -164,6 +164,8 @@ pub struct FileEntryView {
 /// supplements metaVersion/v2InfoHash/private).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BittorrentView {
+    /// Full v1 identity for the native primary-hash projection; not a compat field.
+    pub v1_info_hash: Option<[u8; 20]>,
     /// info.comment (None/empty = key omitted; the aria2
     /// `!comment.empty()` rule).
     pub comment: Option<String>,

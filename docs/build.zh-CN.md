@@ -30,6 +30,38 @@ windows-latest 跑 store/filetree 子集。模糊测试：`cargo fuzz`（见
 `fuzz/`；目标覆盖 bencode / filetree / peer frame / magnet / µTP / MSE /
 UDP demux / NAT-PMP / IGD XML）。
 
+## 磁链解析延迟对照
+
+`scripts/bench_magnet.py` 使用合成 tracker、元数据 peer 和独立配置测试。
+可选参考端为 libtorrent Python 绑定与 `transmission-daemon`；两者都不是
+taiji 运行依赖。在隔离环境安装 Python 绑定，构建 release 版 taiji 后运行：
+
+```sh
+python scripts/bench_magnet.py --taiji target/release/taiji \
+  --samples 30 --peer-host <本机局域网IPv4> --output /tmp/magnet-comparison
+```
+
+peer 地址必须属于测试机。Transmission 拒绝 tracker 返回的回环 peer，
+跨客户端测试因此使用本机局域网接口；RPC 和 tracker 仍绑定回环地址。
+合成 peer 使用明文 TCP，Transmission 配置为允许明文，libtorrent 在此
+fixture 中关闭 uTP；加密和传输互操作应由相应的独立测试验证。默认 fixture
+不使用公网 swarm 或用户客户端配置，脚本不会安装或启动系统服务。
+
+场景包括健康发现、64 个不回握手的 peer 后才出现可用 peer、24 个不响应的
+HTTP tracker 后才出现可用 tracker，以及元数据分块延迟。`--baseline` 可
+加入旧 taiji 二进制，`--clients` 选择参考端，`--scenarios` 选择场景。
+执行顺序按记录的随机种子交错。输出保留全部超时与错误、每轮计数器、原生
+阶段计时和仅成功样本的延迟分位数。libtorrent 会话是协议引擎参考，不代表
+qBittorrent 整个界面的性能。已有结果不会覆盖，每轮应使用新的输出目录。
+
+显式传入 `--torrent <已知种子文件> --scenarios public-trackers,public-dht`
+可选择公网元数据对照。提交给客户端的只有派生 magnet，不提供本地种子内容；
+DHT-only 场景去掉 tracker 提示。`--warmup 30` 给每个客户端 30 秒空闲发现
+准备时间，不计入解析延迟。taiji 等待文件选择，libtorrent 使用 upload mode。
+Transmission 的 RPC 不能在元数据到达前落实文件排除，因此不参加公网测试；
+合成 fixture 不提供正文数据，仍可用于对照。公网测试启用参考客户端正常的 DHT
+和 uTP 路径。公网与确定性 fixture 的结果分开统计，并保留失败尝试。
+
 ## 发布
 
 - crates.io：永不发布 —— 工作区声明为 `publish = false`；引擎只以二进制
@@ -41,3 +73,52 @@ UDP demux / NAT-PMP / IGD XML）。
   平台的未签名归档并创建草稿发布；独立的 `sign-macos` 工作流负责两个 macOS
   二进制的签名与公证，通过后再公开发布。Windows 二进制未签名。
   详见[打包约定](../packaging/README.md)。
+
+### 磁链基准配置与判定
+
+候选默认使用可复现的乱序（`--peer-order seeded`），`first`、`middle`、`last`
+用于固定位置探测；每条结果保留有效候选位置和重复元数据字节数。比较前先进行
+真实网络预检：libtorrent 必须访问排在 24 个静默 tracker 后面的有效 tracker。
+同时启用 `announce_to_all_tiers` 和 `announce_to_all_trackers`，规避 libtorrent
+2.1.1 设置名称表中两个布尔项对调的问题；只读回设置无法验证实际行为。
+磁链中的 tracker 分属不同 tier。延迟统计到文件列表取回并校验身份为止，
+不包含随后可选的诊断 RPC。所有客户端使用相同截止时间，超时保留为失败，
+不纳入成功样本的延迟百分位数。
+
+`--scenarios v2-32k,v2-513 --clients taiji,baseline,libtorrent` 验证没有提供
+piece-layer 证明时的 info-first 文件列表；完整导出与证明恢复由原生集成测试覆盖。
+
+### WebSocket 与 alert 比较
+
+`scripts/bench_magnet_ws.py` 为原生引擎使用经过认证的 WebSocket 长连接，
+libtorrent 则通过非阻塞 `set_alert_fd` 等待 `metadata_received_alert`。
+在可选的 libtorrent Python 环境中安装 `websockets==15.0.1`，例如：
+
+```sh
+python scripts/bench_magnet_ws.py --taiji target/release/taiji \
+  --baseline /tmp/previous-taiji --samples 30 --output /tmp/magnet-ws
+```
+
+默认 `--mode notify` 同时等待就绪通知和有界的 10 ms 状态同步兜底，使旧基线也能
+参与。使用 `--mode poll --poll-ms 1 --clients baseline,taiji` 可用相同的轮询间隔对比
+交付延迟。结果记录 `ready_via` 和 RPC 调用数量；这组数据应与原先的 HTTP
+短连接结果分开。双方均在取回文件列表并核对身份后结束计时。计时前均空闲准备 50 ms（`--prepare-ms`），
+原生客户端像 Motrix 一样先请求 `prepareBitTorrent`，不预载 metadata。仅允许本机合成夹具。
+libtorrent 的停止 announce 等待仅在计时结束后的夹具清理阶段关闭；不请求 payload。
+
+### 引擎磁链获取基准
+
+`scripts/bench_magnet_fetch.py` 对比带相同 `infoValidatedUs` 埋点的两个 taiji
+二进制。脚本检查就绪、身份和文件数量，延迟取自引擎单调时钟，计到 info
+校验完成。基线需包含计时埋点并使用原调度策略。
+
+```sh
+python scripts/bench_magnet_fetch.py --baseline /tmp/baseline-taiji \
+  --candidate target/release/taiji --samples 30 --seed 44 --output /tmp/magnet-fetch
+```
+
+每对样本共用 tracker 和 peer 的端点，随机决定引擎顺序。每次使用新建会话，
+在本机回环上指定 TCP 并关闭 DHT。默认提前调用 `prepareBitTorrent` 并等待
+50 ms，元数据缓存为空。`--prepare-ms 0` 将发现服务启动计入耗时。
+`--cache memory --scenarios healthy,v2-file-tree` 测量已预填的内存缓存。
+原始结果和 peer 流量计数随分位数汇总一并保留。

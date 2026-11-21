@@ -36,7 +36,8 @@ use taiji_store::merkle;
 
 use crate::session::persist::import::hex_lower;
 
-use super::{MagnetTaskConfig, MetaFace, check_identity, scan_layers_needed};
+use super::layers::scan_layers_needed;
+use super::{MagnetTaskConfig, MetaFace, check_identity};
 
 /// URL template placeholder (= the lowercase hex40 of the v1 btih; the
 /// public-site index ecosystem is v1).

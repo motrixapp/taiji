@@ -1260,7 +1260,7 @@ surface; the difference direction = taiji security enhancements). Anchors:
   keep the current behavior (`/metrics` anonymously readable on loopback, WS
   subscription upon upgrade).
 
-HTTP output publication adds `taiji.onHttpOutputReady` in both native and compatibility modes, including `system.listNotifications`. The original six compatibility event names and order remain unchanged; the differential excludes only this explicitly declared addition.
+HTTP output publication adds `taiji.onHttpOutputReady`, and verified magnet selection adds `taiji.onTorrentMetadataReady`, in both native and compatibility modes, including `system.listNotifications`. The original six compatibility event names and order remain unchanged; the differential excludes only these explicitly declared additions.
 
 With partial file selection, task progress counts selected payload bytes. aria2 rounds its filtered length to the involved pieces; taiji excludes shared boundary-piece overhead from file progress. Completion still waits for verification and writing of every required piece.
 

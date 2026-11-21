@@ -49,6 +49,7 @@ pub use taiji_domain::hash_source;
 pub use taiji_domain::hook;
 pub mod magnet;
 pub use taiji_domain::metainfo;
+pub use taiji_domain::torrent_manifest;
 
 /// NAT assembly (SPEC §3.2 single-instance NatActor + §6.8): a
 /// single-instance supervisor + the engine consumption face + external

@@ -250,6 +250,7 @@ const TAIJI_ONLY_ECHO_AUDIT: &[(&str, &str)] = &[
     ("bt-metadata-web-sources", "`bt-metadata-web-sources`"),
     ("bt-peer-connection-type", "`bt-peer-connection-type`"),
     ("bt-tracker", "`bt-tracker` (the fork silently ignores"),
+    ("bt-tracker-apply-existing", "`bt-tracker-apply-existing`"),
     ("bt-tracker-file", "`bt-tracker-file`"),
     ("client-ban-prefixes", "`client-ban-prefixes`"),
     ("dht-entry-point", "`dht-entry-point`"),

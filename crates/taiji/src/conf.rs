@@ -52,6 +52,7 @@ const CONF_KEYS: &[&str] = &[
     "bt-detach-seed-only",
     "bt-tracker",
     "bt-tracker-file",
+    "bt-tracker-apply-existing",
     "peer-id-prefix",
     // Behavior-misc family (same face as the CLI flags; the value-domain
     // arms share the CLI value_parser / parser single points — the
@@ -435,6 +436,11 @@ fn apply_entry(
         "bt-tracker-file" => {
             cli_wins!("bt_tracker_file");
             cli.bt_tracker_file = Some(PathBuf::from(value));
+        }
+        "bt-tracker-apply-existing" => {
+            if let Ok(b) = value.parse::<bool>() {
+                cli.bt_tracker_apply_existing = b;
+            }
         }
         "peer-id-prefix" => {
             cli_wins!("peer_id_prefix");
@@ -1506,6 +1512,7 @@ mod tests {
         match key {
             "conf-path" => "/tmp/another.conf",
             "dir" | "sqlite3-db-path" | "bt-tracker-file" | "input-file" => "/tmp/x",
+            "bt-tracker-apply-existing" => "false",
  // Domain B TLS/certificate path-face dummy values (stored
  // verbatim, no disk read — any path literal).
             "ca-certificate" | "certificate" | "private-key" | "rpc-certificate"

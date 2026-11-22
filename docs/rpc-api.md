@@ -298,7 +298,17 @@ guard / attach comparison semantics).
 - Relation to the `--bt-tracker` global import: the global set is merged as a
   union at task activation (the edited per-task table is preserved up front);
   a further global import within the session still appends the increment —
-  deduplicated against the per-task table — to in-flight tasks.
+  deduplicated against the per-task table — to in-flight tasks. Two guards:
+  the `bt-tracker-apply-existing` session option (taiji extension, default
+  **true**; `changeGlobalOption`-writable + echoed) gates the in-session
+  hot push — `false` = an import only accumulates + persists and reaches
+  tasks at their next activation (the aria2 reserved-task / qBittorrent
+  only-new-tasks shape); and **private torrents (BEP27) are exempt from the
+  global supplement unconditionally** — neither the activation merge nor
+  the hot push appends externally-curated trackers to a private task (the
+  metainfo's own announce table and manual addTracker edits are unaffected;
+  a magnet's metadata phase cannot know the private fact, so a private
+  upgrade rebuilds its table from the metadata at the upgrade point).
 
 ## Events (WebSocket Notifications)
 

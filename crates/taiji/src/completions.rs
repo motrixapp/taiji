@@ -97,6 +97,7 @@ const LONG_FLAGS: &[&str] = &[
     // Tracker face.
     "bt-tracker",
     "bt-tracker-file",
+    "bt-tracker-apply-existing",
     // High-frequency BT family.
     "bt-max-peers",
     "bt-request-peer-speed-limit",

@@ -2028,6 +2028,198 @@ async fn global_tracker_hot_reload_reaches_running_and_later_tasks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Minimal private v1 metainfo (single 32B file / 1 piece, placeholder
+/// hashes — the parser does not verify hash consistency; `info.private`
+/// = 1 per BEP27).
+fn private_v1_torrent() -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(
+        b"d8:announce27:http://127.0.0.1:1/announce4:infod6:lengthi32e4:name11:private.bin12:piece lengthi16384e6:pieces20:",
+    );
+    v.extend_from_slice(&[0x9E; 20]);
+    v.extend_from_slice(b"7:privatei1eee");
+    v
+}
+
+/// The announceList projection (tellStatus bittorrent dict; the job
+/// mirror tiers — hot pushes and activation merges land here).
+async fn announce_list_of(handle: &SessionHandle, gid: &str) -> Vec<Vec<String>> {
+    match call(
+        handle,
+        SessionCommand::TellStatus {
+            gid: gid.to_string(),
+            keys: vec![],
+        },
+    )
+    .await
+    {
+        Ok(CommandReply::TorrentStatus(v)) => {
+            v.bittorrent
+                .unwrap_or_else(|| panic!("bittorrent"))
+                .announce_list
+        }
+        other => panic!("tellStatus failed, got {other:?}"),
+    }
+}
+
+/// The hot-apply gate + the private-torrent exemption:
+/// - `bt-tracker-apply-existing=false`: an import accumulates + persists
+///   but never touches a running task's table; the task picks the set
+///   up at its next activation (pause → unpause);
+/// - a private torrent (BEP27) never takes the global supplement — not
+///   at activation, not through the in-flight hot push (the default
+///   gate=true face), while its own announce table stays intact.
+#[tokio::test]
+async fn global_tracker_gate_and_private_exemption() {
+    let dir = temp_dir("p62-gate");
+    let global = GlobalOptions {
+        dir: dir.clone(),
+        ..Default::default()
+    };
+    let (handle, join) = SessionActor::spawn_with(SessionOptions { global });
+    let builtin = dead_tracker();
+    let flat = |tiers: &[Vec<String>]| -> Vec<String> {
+        tiers.iter().flat_map(|t| t.iter().cloned()).collect()
+    };
+
+    // ---- gate=false: the running table is untouched by the import ----
+    assert_eq!(
+        call(
+            &handle,
+            change_global(&[("bt-tracker-apply-existing", "false")])
+        )
+        .await,
+        Ok(CommandReply::Accepted)
+    );
+    let gated = gid_of(
+        &call(
+            &handle,
+            torrent_cmd(build_v2_torrent(&vec![0x71u8; 128 * 1024], &builtin), &dir),
+        )
+        .await,
+    );
+    let g = gated.to_string();
+    wait_until(|| async { flat(&announce_list_of(&handle, &g).await) == vec![builtin.clone()] })
+        .await;
+    assert_eq!(
+        call(
+            &handle,
+            change_global(&[("bt-tracker", "udp://gate.example:6969/announce")])
+        )
+        .await,
+        Ok(CommandReply::Accepted)
+    );
+    // The global echo carries the import (accumulated + persisted)...
+    let echo = global_echo(&handle).await;
+    assert_eq!(
+        echo.get("bt-tracker").map(String::as_str),
+        Some("udp://gate.example:6969/announce")
+    );
+    // ...but the running task's table keeps the identity shape (no hot
+    // push under the gate). The mirror read is immediate — no race.
+    let tiers = announce_list_of(&handle, &g).await;
+    assert_eq!(
+        flat(&tiers),
+        vec![builtin.clone()],
+        "gate=false: the running table stays untouched"
+    );
+    // The next activation takes the set (the aria2 reserved-task shape).
+    call(&handle, SessionCommand::Pause { gid: g.clone() })
+        .await
+        .unwrap_or_else(|e| panic!("pause: {e:?}"));
+    call(&handle, SessionCommand::Unpause { gid: g.clone() })
+        .await
+        .unwrap_or_else(|e| panic!("unpause: {e:?}"));
+    wait_until(|| async {
+        flat(&announce_list_of(&handle, &g).await)
+            == vec![
+                builtin.clone(),
+                "udp://gate.example:6969/announce".to_string(),
+            ]
+    })
+    .await;
+
+    // ---- private exemption (the default gate=true face) ----
+    assert_eq!(
+        call(
+            &handle,
+            change_global(&[("bt-tracker-apply-existing", "true")])
+        )
+        .await,
+        Ok(CommandReply::Accepted)
+    );
+    let priv_gid = gid_of(
+        &call(
+            &handle,
+            SessionCommand::AddTorrent {
+                torrent: private_v1_torrent(),
+                options: BTreeMap::from([
+                    ("dir".to_string(), dir.display().to_string()),
+                    ("pause".to_string(), "true".to_string()),
+                ]),
+                position: None,
+            },
+        )
+        .await,
+    );
+    let pg = priv_gid.to_string();
+    call(&handle, SessionCommand::Unpause { gid: pg.clone() })
+        .await
+        .unwrap_or_else(|e| panic!("unpause private: {e:?}"));
+    // Activation with a non-empty global set: the private task's table
+    // stays its own announce only (BEP27 — the global supplement is
+    // exempt; the metainfo's own table is untouched).
+    wait_until(|| async {
+        flat(&announce_list_of(&handle, &pg).await)
+            == vec!["http://127.0.0.1:1/announce".to_string()]
+    })
+    .await;
+    // And the in-flight hot push skips it too: a fresh import leaves the
+    // private table identical (the mirror read is immediate).
+    assert_eq!(
+        call(
+            &handle,
+            change_global(&[("bt-tracker", "udp://later.example:6969/announce")])
+        )
+        .await,
+        Ok(CommandReply::Accepted)
+    );
+    let tiers = announce_list_of(&handle, &pg).await;
+    assert_eq!(
+        flat(&tiers),
+        vec!["http://127.0.0.1:1/announce".to_string()],
+        "private torrents are exempt from the global supplement (BEP27)"
+    );
+    // Manual per-task edits stay allowed on a private task (the
+    // exemption covers the automatic supplement only).
+    assert_eq!(
+        call(
+            &handle,
+            SessionCommand::AddTracker {
+                gid: pg.clone(),
+                urls: vec!["http://manual.example/announce".to_string()],
+                position: None,
+            },
+        )
+        .await,
+        Ok(CommandReply::TrackerChange {
+            removed: 0,
+            added: 1
+        })
+    );
+    wait_until(|| async {
+        flat(&announce_list_of(&handle, &pg).await)
+            == vec![
+                "http://127.0.0.1:1/announce".to_string(),
+                "http://manual.example/announce".to_string(),
+            ]
+    })
+    .await;
+    handle.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Persistence roundtrip: CLI injection (the bt-tracker comma list + the
 /// bt-tracker-file ngosang file) imports at startup into the store (table
 /// order = rowid import order); after a restart the global set restores

@@ -140,8 +140,15 @@ impl SessionActor {
                 // the merge result is also written back to the job mirror
                 // (same surface as tellStatus announceList / config_json
                 // persistence). An empty global set is the identity
-                // transform.
-                let tiers = {
+                // transform. **Private torrents (BEP27) are exempt from
+                // the global supplement** — announcing their infohash to
+                // externally-curated trackers would leak the swarm
+                // identity (the metainfo's own announce table and manual
+                // taiji.addTracker edits still apply; the exemption
+                // covers the automatic global supplement only).
+                let tiers = if tj.metainfo.private {
+                    tj.tiers.clone()
+                } else {
                     let global = self.global.bt_tracker.clone();
                     merge_global_trackers(&tj.tiers, &global)
                 };

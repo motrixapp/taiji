@@ -73,7 +73,11 @@ Native magnet selection adds `taiji.getTorrentMetadata` and `taiji.confirmTorren
   `client-ban-prefixes`, `bt-metadata-web-sources`), the hook notification family
   (`on-download-*`/`on-bt-download-complete`), `save-session`, `seed-time`,
   `bt-tracker` (the fork silently ignores this key when the global value is changed
-  via RPC; taiji imports it cumulatively as a union and echoes it), plus the 0.2
+  via RPC; taiji imports it cumulatively as a union and echoes it;
+  `bt-tracker-apply-existing` gates the in-session hot push — default true,
+  false = the import only reaches tasks at their next activation; private
+  torrents are exempt from the global supplement unconditionally, BEP27),
+  plus the 0.2
   extension keys (the HTTP scheduling group §8, `http-incomplete-suffix`/
   `http-max-per-host`, FTPS `ftp-ssl` §8, the metalink seam names §6), plus the
   four-pool budget trio (`max-concurrent-seeds`/`max-concurrent-checks`/

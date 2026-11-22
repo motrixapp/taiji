@@ -651,6 +651,23 @@ struct Cli {
     /// startup.
     #[arg(long)]
     bt_tracker_file: Option<PathBuf>,
+    /// Global-tracker hot-apply gate (`--bt-tracker-apply-existing`,
+    /// taiji extension; aria2 has no such option). **true (default)**:
+    /// a `changeGlobalOption("bt-tracker")` / bt-tracker-file import
+    /// hot-pushes the union into every running task's tracker table
+    /// immediately; **false**: the change only reaches tasks at their
+    /// next activation (new tasks, unpause, restart recovery). Private
+    /// torrents are exempt from the global supplement regardless
+    /// (BEP27).
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args(0..=1),
+        require_equals(true),
+        default_missing_value = "true"
+    )]
+    bt_tracker_apply_existing: bool,
     /// Per-torrent peer cap (aria2-compatible name `--bt-max-peers`;
     /// default **55**, domain >= 0 — aria2
     /// `NumberOptionHandler(PREF_BT_MAX_PEERS, …, "55", 0)` anchor
@@ -3347,6 +3364,7 @@ fn build_idle_options(
         // inside bootstrap (spawn_blocking).
         bt_tracker: taiji_core::session::split_bt_tracker(&cli.bt_tracker),
         bt_tracker_file: cli.bt_tracker_file.clone(),
+        bt_tracker_apply_existing: cli.bt_tracker_apply_existing,
         // peer-id-prefix into the session (consumed by the single peer
         // ID generation point at torrent activation / the magnet
         // metadata phase; getGlobalOption echo; startup-time option).
@@ -3468,6 +3486,9 @@ struct IdleOptions {
     /// `--bt-tracker-file` (parsed and imported inside the session
     /// bootstrap).
     bt_tracker_file: Option<PathBuf>,
+    /// `--bt-tracker-apply-existing` (session global; the
+    /// changeGlobalOption hot-apply gate).
+    bt_tracker_apply_existing: bool,
     /// `--peer-id-prefix` (session peer ID generation prefix; default
     /// `-TJ0001-`).
     peer_id_prefix: String,
@@ -3721,6 +3742,10 @@ impl IdleOptions {
                 dht_entry_point: self.dht_entry_point.clone(),
                 dht_entry_point6: self.dht_entry_point6.clone(),
                 dht_message_timeout: self.dht_message_timeout,
+                // --bt-tracker-apply-existing (the hot-apply gate; the
+                // default-true fallback must not swallow an explicit
+                // =false).
+                bt_tracker_apply_existing: self.bt_tracker_apply_existing,
                 ..Default::default()
             },
         }

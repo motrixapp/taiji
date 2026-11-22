@@ -121,7 +121,7 @@
   kind: known-deviation
   where: "taiji/docs/rpc-api-diff.md:72-74"
   what: >-
-    --bt-tracker 经 changeGlobalOption 全局修改时,fork 静默忽略该键;taiji 以并集累积导入并回显——声明的值面偏差(Motrix 对齐往返)。
+    --bt-tracker 经 changeGlobalOption 全局修改时,fork 静默忽略该键;taiji 以并集累积导入并回显——声明的值面偏差(Motrix 对齐往返)。2026-11-21 起两道护栏:bt-tracker-apply-existing(taiji 扩展键,默认 true,false=仅累积持久、任务下次激活生效,即 aria2 保留任务/qB 仅新任务形态)门控会话内热推;私有 torrent(BEP27)无条件豁免全局补充——激活合并与热推均不向私有任务追加外部策展 tracker(元数据自带 announce 表与手工 addTracker 不受影响;磁链元数据阶段无法预知私有事实,私有升级在升级点按元数据重建表)。
   refs: >-
     docs/rpc-api-diff.md §3:72-74;CLI 面 taiji/crates/taiji/src/main.rs:635-643(idle 模式注入会话并持久化 global_tracker 表、并集累积跨重启);差分锚 aria2_compat_live_diff.rs:247("bt-tracker (the fork silently ignores")
 
@@ -498,7 +498,7 @@
   kind: taiji-extension
   where: "taiji/crates/taiji-rpc/tests/aria2_compat_live_diff.rs:198-309"
   what: >-
-    getGlobalOption taiji-only 回显键预算(38 键,2026-11-14 起整表挂账):声明扩展名族与接受值面族——媒体 10 键(media-variant-policy、media-audio-lang、media-subtitles、media-segment-concurrency、media-staging-quota-gib、media-staging-dir、media-allow-private-key-url、media-ffmpeg-path、media-archive、media-info-json,详情条目 media-option-family)、四池 3 键(max-concurrent-seeds、max-concurrent-checks、media-synthesis-concurrency,详情条目 four-pool-budgets)、bt-tracker(bt-tracker-rpc-union)、http-max-per-host(http-max-per-host-extension)、声明扩展 7 键(bt-tracker-file、bt-peer-connection-type、bt-enable-upnp、bt-enable-nat-pmp、client-ban-prefixes、bt-metadata-web-sources、bt-lsd,详情条目 declared-extension-option-keys)、恒回显接受值面 9 键(all-proxy、https-proxy、async-dns、enable-async-dns6、bt-exclude-tracker、dht-entry-point、load-cookies、pause、save-session,详情条目 getglobaloption-echo-subset)、hook 6 键(on-download-start、on-download-stop、on-download-complete、on-download-error、on-download-pause、on-bt-download-complete)+ seed-time(fork 无此回显面;hook 族与 seed-time 的细分锚在本条)。live 集与预算表逐成员相等,新键无账即红。
+    getGlobalOption taiji-only 回显键预算(39 键,2026-11-21 起整表挂账):声明扩展名族与接受值面族——媒体 10 键(media-variant-policy、media-audio-lang、media-subtitles、media-segment-concurrency、media-staging-quota-gib、media-staging-dir、media-allow-private-key-url、media-ffmpeg-path、media-archive、media-info-json,详情条目 media-option-family)、四池 3 键(max-concurrent-seeds、max-concurrent-checks、media-synthesis-concurrency,详情条目 four-pool-budgets)、bt-tracker(bt-tracker-rpc-union)、http-max-per-host(http-max-per-host-extension)、声明扩展 8 键(bt-tracker-file、bt-tracker-apply-existing、bt-peer-connection-type、bt-enable-upnp、bt-enable-nat-pmp、client-ban-prefixes、bt-metadata-web-sources、bt-lsd,详情条目 declared-extension-option-keys)、恒回显接受值面 9 键(all-proxy、https-proxy、async-dns、enable-async-dns6、bt-exclude-tracker、dht-entry-point、load-cookies、pause、save-session,详情条目 getglobaloption-echo-subset)、hook 6 键(on-download-start、on-download-stop、on-download-complete、on-download-error、on-download-pause、on-bt-download-complete)+ seed-time(fork 无此回显面;hook 族与 seed-time 的细分锚在本条)。live 集与预算表逐成员相等,新键无账即红。
   refs: >-
     差分审计表 aria2_compat_live_diff.rs:198-309(2026-10-28 live run + 2026-10-30 media 增补,38 键逐键裁定;2026-11-14 起按键映射台账条目,机器校验 key ∈ 所映射条目 what+refs);docs/rpc-api-diff.md §3:68-104(taiji-only echo keys 两族声明);细分条目 media-option-family / four-pool-budgets / bt-tracker-rpc-union / http-max-per-host-extension / declared-extension-option-keys / getglobaloption-echo-subset
 

@@ -155,46 +155,61 @@ impl SessionActor {
                     "global tracker persist failed (in-memory set still live)");
             }
         }
-        // Metadata discovery needs the same updates before an engine exists.
-        for task in self.running.values_mut() {
-            if let TaskBackend::Metadata {
-                tracker_updates: Some(updates),
-            } = &task.backend
-            {
-                let tiers = merge_global_trackers(&task.tiers, &added_urls);
-                task.tiers = tiers.clone();
-                updates.send_replace(tiers);
-            }
-        }
-        // In-flight hot push: snapshot (gid, engine, current tiers)
-        // then merge-push one by one (avoids holding a mutable borrow
-        // across await; no engine = metadata-phase task, merges at
-        // activation after upgrade).
-        let targets: Vec<HotPushTarget> = self
-            .running
-            .iter()
-            .filter_map(|(gid, t)| {
-                t.backend
-                    .engine()
-                    .map(|e| (*gid, e.clone(), t.tiers.clone()))
-            })
-            .collect();
-        for (gid, engine, tiers) in targets {
-            let merged = merge_global_trackers(&tiers, &added_urls);
-            if merged == tiers {
-                continue;
-            }
-            if engine.set_trackers(merged.clone()).await.is_ok() {
-                if let Some(t) = self.running.get_mut(&gid) {
-                    t.tiers = merged.clone();
+        // The hot-apply face: bt-tracker-apply-existing = false skips
+        // both running-task faces entirely (the change accumulates +
+        // persists; tasks pick the set up at their next activation —
+        // the aria2 reserved-task / qB only-new-tasks shape).
+        if self.global.bt_tracker_apply_existing {
+            // Metadata discovery needs the same updates before an engine
+            // exists (a metadata-phase task has no private fact yet —
+            // the upgraded torrent job rebuilds its tiers from the
+            // metainfo, so a private upgrade never carries the global
+            // supplement).
+            for task in self.running.values_mut() {
+                if let TaskBackend::Metadata {
+                    tracker_updates: Some(updates),
+                } = &task.backend
+                {
+                    let tiers = merge_global_trackers(&task.tiers, &added_urls);
+                    task.tiers = tiers.clone();
+                    updates.send_replace(tiers);
                 }
-                // Job mirror sync + config_json refresh (the
-                // bt-tracker import effect face and persistence share
-                // one source, same discipline as the tracker edit face
-                // taiji.addTracker/removeTracker).
-                if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
-                    tj.tiers = merged;
-                    self.persist_refresh_config(gid).await;
+            }
+            // In-flight hot push: snapshot (gid, engine, current tiers)
+            // then merge-push one by one (avoids holding a mutable borrow
+            // across await; no engine = metadata-phase task, merges at
+            // activation after upgrade). Private torrents (BEP27) are
+            // exempt: announcing their infohash to externally-curated
+            // trackers would leak the swarm identity.
+            let targets: Vec<HotPushTarget> = self
+                .running
+                .iter()
+                .filter(|(gid, _)| {
+                    !matches!(self.jobs.get(*gid), Some(Job::Torrent(tj)) if tj.metainfo.private)
+                })
+                .filter_map(|(gid, t)| {
+                    t.backend
+                        .engine()
+                        .map(|e| (*gid, e.clone(), t.tiers.clone()))
+                })
+                .collect();
+            for (gid, engine, tiers) in targets {
+                let merged = merge_global_trackers(&tiers, &added_urls);
+                if merged == tiers {
+                    continue;
+                }
+                if engine.set_trackers(merged.clone()).await.is_ok() {
+                    if let Some(t) = self.running.get_mut(&gid) {
+                        t.tiers = merged.clone();
+                    }
+                    // Job mirror sync + config_json refresh (the
+                    // bt-tracker import effect face and persistence share
+                    // one source, same discipline as the tracker edit face
+                    // taiji.addTracker/removeTracker).
+                    if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
+                        tj.tiers = merged;
+                        self.persist_refresh_config(gid).await;
+                    }
                 }
             }
         }

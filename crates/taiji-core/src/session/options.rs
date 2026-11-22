@@ -343,6 +343,17 @@ pub struct GlobalOptions {
     /// once on startup bootstrap and once per changeGlobalOption hot
     /// update, reading the file inside spawn_blocking).
     pub bt_tracker_file: Option<PathBuf>,
+    /// `--bt-tracker-apply-existing` (taiji addition; aria2 has no such
+    /// option). **true (default)** = a global tracker change
+    /// (`changeGlobalOption("bt-tracker")` / `bt-tracker-file` import)
+    /// hot-pushes the union into every running task's tracker table
+    /// immediately (the declared bt-tracker-rpc-union extension);
+    /// **false** = the change only accumulates + persists — tasks pick
+    /// the set up at their next activation (new tasks, unpause,
+    /// restart recovery; the aria2 reserved-task semantics), running
+    /// tables stay untouched. Private torrents (BEP27) are exempt from
+    /// the global supplement on both faces regardless of this switch.
+    pub bt_tracker_apply_existing: bool,
     /// One-shot mode flag (a process lifetime bound to a single task —
     /// the bare CLI shapes). The old cookie coupling (one-shot =
     /// clear-on-error, resident = 24h retention) is retired by
@@ -603,6 +614,10 @@ impl Default for GlobalOptions {
             bt_tracker: Vec::new(),
             one_shot: false,
             bt_tracker_file: None,
+            // Default true = the shipped hot-apply extension semantics
+            // (backward compatible; false opts into the aria2/qB
+            // "only-new-tasks" shape).
+            bt_tracker_apply_existing: true,
             client_ban_prefixes: Vec::new(),
             bt_metadata_web_sources: Vec::new(),
             // Default false (zero behavior change by default; "defaults
@@ -796,6 +811,12 @@ pub fn global_option_echo(g: &GlobalOptions) -> BTreeMap<String, String> {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
+    );
+    // bt-tracker-apply-existing echo (default true = the hot-apply
+    // extension; false = the only-new-tasks shape).
+    m.insert(
+        "bt-tracker-apply-existing".into(),
+        g.bt_tracker_apply_existing.to_string(),
     );
     // NAT switch echo (value shape = "true"/"false" strings; default
     // false = zero behavior change by default — the libtorrent
@@ -1227,6 +1248,11 @@ pub const DECLARED_OPTION_DIFFS: &[(&str, &str)] = &[
     (
         "bt-tracker-file",
         "extension: ngosang/trackerslist import (no aria2 option; Phase A promised surface)",
+    ),
+    (
+        "bt-tracker-apply-existing",
+        "extension: global-tracker hot-apply gate (no aria2 option; true = the running-task \
+         hot push, false = only-new-tasks/next-activation)",
     ),
     (
         "bt-peer-connection-type",
@@ -2399,6 +2425,22 @@ static GLOBAL_PATCH_TABLE: &[OptionDecl<GlobalPatchApply>] = &[
     // BtStopTimeoutWatch (SeedPolicy.stop_timeout, a direct translation
     // of `BtSetup.cc`; consumed through the seed_policy_from
     // task-policy projection).
+    // bt-tracker-apply-existing (taiji extension; no aria2 option):
+    // gates whether a global tracker change hot-pushes into running
+    // tasks' tables (true, the shipped default — the bt-tracker-rpc-
+    // union extension) or only reaches tasks at their next activation
+    // (false — the aria2 reserved-task / qB only-new-tasks shape).
+    // Private torrents are exempt from the global supplement regardless
+    // of this switch (BEP27).
+    OptionDecl::table_row(
+        "bt-tracker-apply-existing",
+        OptionFace::session_runtime().echoing(|g| g.bt_tracker_apply_existing.to_string()),
+        |g, v| {
+            if let Some(b) = parse_bool(v) {
+                g.bt_tracker_apply_existing = b;
+            }
+        },
+    ),
     OptionDecl::table_row(
         "bt-tracker-interval",
         OptionFace::session_runtime().echoing(|g| g.bt_tracker_interval.to_string()),
@@ -2664,6 +2706,8 @@ pub(crate) const GLOBAL_PATCH_OPTION_NAMES: &[&str] = &[
     // Four tracker keys (the tracker announce client interval/timeout
     // pair + the seeding-stall watchdog — echoed via the table rows'
     // echo bits).
+    // taiji extension: the global-tracker hot-apply gate.
+    "bt-tracker-apply-existing",
     "bt-tracker-interval",
     "bt-tracker-timeout",
     "bt-tracker-connect-timeout",
@@ -4811,6 +4855,8 @@ mod tests {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
+                // The hot-apply gate.
+                g.bt_tracker_apply_existing.to_string(),
                 // The four tracker keys (interval/timeout pair/
                 // stop-timeout).
                 g.bt_tracker_interval.to_string(),
@@ -4880,6 +4926,7 @@ mod tests {
  // The four tracker keys (in-domain values pass through —
  // interval/stop-timeout default 0 flip positive, the
  // timeout pair default 60 flips to 90, observable).
+                "bt-tracker-apply-existing" => "false",
                 "bt-tracker-interval" => "120",
                 "bt-tracker-timeout" | "bt-tracker-connect-timeout" => "90",
                 "bt-stop-timeout" => "45",

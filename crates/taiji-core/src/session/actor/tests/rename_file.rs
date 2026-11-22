@@ -652,13 +652,18 @@ async fn rename_file_then_move_storage_composes() {
     )
     .await
     .unwrap_or_else(|e| panic!("{e:?}"));
-    let moved = dir_b.join("rn-x/renamed.bin");
-    wait_until(|| async { moved.exists() }).await;
-    let files = files_of(&call(&handle, SessionCommand::GetFiles { gid: g.clone() }).await);
-    assert_eq!(
-        files[0].path,
-        dir_b.join("renamed.bin").display().to_string(),
-        "view keeps the rename after the move"
+    // Condition-waited on the view, not the disk: the payload lands at
+    // B before the MoveDone consume swaps the job dir + row, so a
+    // disk-only wait races the commit.
+    let expected = dir_b.join("renamed.bin").display().to_string();
+    wait_until(|| async {
+        let files = files_of(&call(&handle, SessionCommand::GetFiles { gid: g.clone() }).await);
+        files.first().is_some_and(|f| f.path == expected)
+    })
+    .await;
+    assert!(
+        dir_b.join("rn-x/renamed.bin").exists(),
+        "payload landed at B"
     );
     handle.shutdown().await;
     ok(writer.await, "writer join");

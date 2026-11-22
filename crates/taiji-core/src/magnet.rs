@@ -1069,6 +1069,23 @@ async fn run(
         tiers = updates.borrow().clone();
         trs = tiers.iter().map(|(_, url)| url.clone()).collect();
     }
+    // BEP27: a private upgrade never carries the global tracker
+    // supplement — the metadata phase could not know the private fact
+    // (it announces before metadata lands), but the upgraded engine
+    // must not keep announcing the infohash to externally-curated
+    // trackers. The metadata's own announce table is the whole tracker
+    // face from here on.
+    if let Some((m, _)) = metainfo.as_ref()
+        && m.private
+    {
+        tiers = m
+            .announce_tiers
+            .iter()
+            .enumerate()
+            .flat_map(|(t, urls)| urls.iter().map(move |u| (t, u.clone())))
+            .collect();
+        trs = tiers.iter().map(|(_, url)| url.clone()).collect();
+    }
     // ---- rebuild + verify + options + upgrade ----
     finalize(
         cfg, magnet, trs, tiers, metadata, metainfo, phase, faces, state, parent, upgrade_tx,

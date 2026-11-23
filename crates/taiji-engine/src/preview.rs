@@ -7,7 +7,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::strategy::{PieceSelectionStrategy, SelectionCtx, StreamGeo};
+use crate::strategy::{PieceSelectionStrategy, RarestFirstStrategy, SelectionCtx, StreamGeo};
 
 /// Bytes preferred at each end of every selected payload file.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +80,15 @@ impl PieceSelectionStrategy for PreviewStrategy {
         let eligible = |i: u64| {
             available.get(i as usize) && !ctx.done.get(i as usize).copied().unwrap_or(true)
         };
+        // Once this peer has no unfinished preview piece, restore the ordinary
+        // rarity bucket fast path instead of scanning every remaining piece.
+        if !self
+            .ranges
+            .iter()
+            .any(|range| (range.start..range.end.min(ctx.done.len() as u64)).any(eligible))
+        {
+            return RarestFirstStrategy.select_piece(ctx);
+        }
         let rank = |i: u64| {
             ctx.priority
                 .and_then(|p| p.get(i as usize))
@@ -105,9 +114,12 @@ impl PieceSelectionStrategy for PreviewStrategy {
         if let Some((i, _, _)) = partial {
             return Some(i);
         }
-        let (spread, plain) =
-            ctx.stats
-                .select_two_phase_ranked(eligible, |i| ctx.claimed.contains(i), rank);
+        let (spread, plain) = ctx.stats.select_two_phase_ranked(
+            eligible,
+            |i| ctx.claimed.contains(i),
+            rank,
+            if ctx.priority.is_none() { 1 } else { 15 },
+        );
         spread.or(plain)
     }
 }
@@ -233,5 +245,33 @@ mod tests {
                 .len(),
             0
         );
+    }
+    #[test]
+    fn completed_preview_regions_restore_the_default_picker_verdict() {
+        let strategy = PreviewStrategy::new(
+            PreviewPieces { head: 4, tail: 4 },
+            &geo(&[(32, false)], false),
+        );
+        let stats = PieceStatMan::new(8, &mut |n| n / 2);
+        let available = PieceBitmap::ones(8);
+        let done = [true, false, false, false, false, false, false, true];
+        let mut claimed = ClaimedSet::with_len(8);
+        claimed.mark_claimed(2);
+        let priorities = [0, 0, 7, 5, 0, 1, 4, 0];
+        for priority in [None, Some(priorities.as_slice())] {
+            let ctx = SelectionCtx {
+                advertised: Some(&available),
+                done: &done,
+                stats: &stats,
+                claimed: &claimed,
+                preferred: &[],
+                stream: None,
+                priority,
+            };
+            assert_eq!(
+                strategy.select_piece(&ctx),
+                RarestFirstStrategy.select_piece(&ctx)
+            );
+        }
     }
 }

@@ -121,3 +121,6 @@ pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock()
         .expect("lock poisoned: invariant lost, fail loudly")
 }
+
+#[cfg(test)]
+mod preview_rank_tests;

@@ -322,19 +322,22 @@ impl PieceStatMan {
             eligible,
             claimed,
             |i| prio.and_then(|p| p.get(i as usize).copied()).unwrap_or(0),
-            prio.is_none(),
+            prio.is_none().then_some(0),
         )
     }
 
     /// One bucket pass with a caller-owned priority rank, preserving rarity
     /// ties and separate unclaimed/fallback candidates. No per-round vector.
+    /// `max_rank` is an upper bound on every value returned by `rank`; the
+    /// first unclaimed candidate at that rank is already optimal.
     pub fn select_two_phase_ranked(
         &self,
         eligible: impl Fn(u64) -> bool,
         claimed: impl Fn(u64) -> bool,
         rank: impl Fn(u64) -> i8,
+        max_rank: i8,
     ) -> (Option<u64>, Option<u64>) {
-        self.select_two_phase_by(eligible, claimed, rank, false)
+        self.select_two_phase_by(eligible, claimed, rank, Some(max_rank))
     }
 
     fn select_two_phase_by(
@@ -342,7 +345,7 @@ impl PieceStatMan {
         eligible: impl Fn(u64) -> bool,
         claimed: impl Fn(u64) -> bool,
         level: impl Fn(u64) -> i8,
-        uniform: bool,
+        max_rank: Option<i8>,
     ) -> (Option<u64>, Option<u64>) {
         self.rebuild_if_dirty();
         let pieces = self.pieces.borrow();
@@ -360,15 +363,14 @@ impl PieceStatMan {
                     continue;
                 }
                 let q = level(i);
+                debug_assert!(max_rank.is_none_or(|ceiling| q <= ceiling));
                 if plain.is_none_or(|(_, pq)| q > pq) {
                     plain = Some((i, q));
                 }
                 if !claimed(i) && spread.is_none_or(|(_, sq)| q > sq) {
-                    // default prio face keeps the existing early exit
-                    // (return on first hit, zero decision/performance
-                    // change); the prio face must scan everything (a
-                    // higher level may sit in a deeper bucket).
-                    if uniform {
+                    // Rarity buckets already order equal ranks correctly.
+                    // A known maximum cannot be beaten by a later bucket.
+                    if max_rank == Some(q) {
                         return (Some(i), plain.map(|(pi, _)| pi));
                     }
                     spread = Some((i, q));

@@ -104,3 +104,5 @@ include!("check.rs");
 include!("synthesis.rs");
 include!("observe.rs");
 include!("budget_keys.rs");
+
+include!("preview_priority.rs");

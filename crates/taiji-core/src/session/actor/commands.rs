@@ -2621,6 +2621,7 @@ impl SessionActor {
                 "Cannot change option for GID#{gid}"
             )));
         }
+        super::super::preview_options::validate(&options)?;
         let patch = parse_task_options(&options);
         // moveStorage race guard: a `dir` change during an
         // in-flight move would be silently overwritten by the move's
@@ -2734,7 +2735,7 @@ impl SessionActor {
         // authoritative face; the option key shares the select-file
         // gate — aria2 silently ignores non-changeable keys, taiji
         // errors); HTTP/.torrent URL tasks are rejected as non-BT.
-        if patch.bt_sequential_download.is_some() {
+        if patch.bt_sequential_download.is_some() || patch.preview_pieces.is_some() {
             // Live-engine faces (active download / seeding residence alike)
             // reject the mirror-only keys — the same reason as Active.
             if self.queue.contains_active(gid) || self.queue.contains_seeding(gid) {
@@ -2874,13 +2875,7 @@ impl SessionActor {
                 // through taiji.setSchedulerPolicy; this key shares the
                 // select-file gate: explicit rejection on active tasks,
                 // above).
-                if let Some(seq) = patch.bt_sequential_download {
-                    tj.scheduler_policy = if seq {
-                        crate::engine::SchedulerPolicy::sequential()
-                    } else {
-                        crate::engine::SchedulerPolicy::default()
-                    };
-                }
+                super::super::preview_options::apply(&mut tj.scheduler_policy, &patch);
             }
             Some(Job::Magnet(mj)) => {
                 if let Some(trackers) = &patch.bt_tracker {
@@ -2947,13 +2942,7 @@ impl SessionActor {
                 // bt-sequential-download: policy projection into the
                 // mirror (carried by job_config through the upgrade
                 // chain; the metadata phase holds no engine handle).
-                if let Some(seq) = patch.bt_sequential_download {
-                    mj.scheduler_policy = if seq {
-                        crate::engine::SchedulerPolicy::sequential()
-                    } else {
-                        crate::engine::SchedulerPolicy::default()
-                    };
-                }
+                super::super::preview_options::apply(&mut mj.scheduler_policy, &patch);
                 apply_magnet_patch(&mut mj.options, &patch);
             }
             Some(Job::Http(hj)) => {
@@ -3735,6 +3724,11 @@ pub(super) fn task_option_echo(job: Option<&Job>) -> BTreeMap<String, String> {
                 "bt-sequential-download".into(),
                 (tj.scheduler_policy == crate::engine::SchedulerPolicy::sequential()).to_string(),
             );
+            if let crate::engine::SchedulerPolicy::RarestFirst(params) = &tj.scheduler_policy
+                && let Some(preview) = params.preview
+            {
+                m.insert("bt-prioritize-piece".into(), preview.option_value());
+            }
         }
         Job::Magnet(mj) => {
             insert_common_task_options(
@@ -3777,6 +3771,11 @@ pub(super) fn task_option_echo(job: Option<&Job>) -> BTreeMap<String, String> {
                 "bt-sequential-download".into(),
                 (mj.scheduler_policy == crate::engine::SchedulerPolicy::sequential()).to_string(),
             );
+            if let crate::engine::SchedulerPolicy::RarestFirst(params) = &mj.scheduler_policy
+                && let Some(preview) = params.preview
+            {
+                m.insert("bt-prioritize-piece".into(), preview.option_value());
+            }
             // bt-disable-dht: echoed only on explicit override (as in
             // the torrent arm).
             if let Some(v) = mj.bt_disable_dht {

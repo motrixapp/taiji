@@ -2456,6 +2456,7 @@ impl SessionActor {
         if uris.is_empty() {
             return Err(SessionError::failed("URI is not provided."));
         }
+        super::super::preview_options::validate(&options)?;
         let patch = parse_task_options(&options);
         // Classification (the addUri always-on face): the first magnet wins
         // (aria2 createRequestGroupForUri magnet grouping semantics); next,
@@ -2584,10 +2585,7 @@ impl SessionActor {
                     // Scheduler policy (a projection of the
                     // bt-sequential-download option; the upgrade chain
                     // carries it via job_config).
-                    scheduler_policy: match patch.bt_sequential_download {
-                        Some(true) => crate::engine::SchedulerPolicy::sequential(),
-                        _ => crate::engine::SchedulerPolicy::default(),
-                    },
+                    scheduler_policy: super::super::preview_options::initial(&patch),
                     // Per-task rate limits (0 = unlimited default, SPEC §11).
                     max_download_limit: patch.max_download_limit.unwrap_or(0),
                     max_upload_limit: patch.max_upload_limit.unwrap_or(0),
@@ -2999,6 +2997,7 @@ impl SessionActor {
                 "duplicate download: torrent identity already registered",
             ));
         }
+        super::super::preview_options::validate(&options)?;
         let patch = parse_task_options(&options);
         let output_paths = super::output_paths::parse(&options, meta.meta.files.len())?;
         super::output_paths::apply(&mut meta, &output_paths)?;

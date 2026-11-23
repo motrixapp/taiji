@@ -80,6 +80,7 @@ mod options;
 /// §10 `taiji import`) is called by the taiji CLI orchestration; the
 /// row assembly face stays pub(crate).
 pub mod persist;
+pub mod preview_options;
 mod queue;
 /// Startup recheck (re-entering the checking state, SPEC §10/§5.4) —
 /// consumed by bootstrap. The standalone CLI `--check-integrity` reuses

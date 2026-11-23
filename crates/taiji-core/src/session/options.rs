@@ -1011,6 +1011,7 @@ pub const ARIA2_OPTION_NAMES: &[&str] = &[
     "seed-ratio",
     "seed-time",
     "bt-max-peers",
+    "bt-prioritize-piece",
     "max-download-limit",
     "max-upload-limit",
     "bt-save-metadata",
@@ -1891,6 +1892,9 @@ type GlobalPatchApply = fn(&mut GlobalOptions, &str);
 /// [`parse_task_options`] explicit section). Accepted-name mirror =
 /// [`TASK_OPTION_NAMES`] (cfg(test); governance tests pin the table).
 static TASK_OPTION_TABLE: &[OptionDecl<TaskPatchApply>] = &[
+    OptionDecl::table_row("bt-prioritize-piece", OptionFace::task_payload(), |p, v| {
+        p.preview_pieces = super::preview_options::parse_preview_pieces(v).ok();
+    }),
     OptionDecl::table_row("dir", OptionFace::task_payload(), |p, v| {
         p.dir = Some(PathBuf::from(v));
     }),
@@ -2052,6 +2056,7 @@ static TASK_OPTION_TABLE: &[OptionDecl<TaskPatchApply>] = &[
 /// consumer).
 #[cfg(test)]
 pub(crate) const TASK_OPTION_NAMES: &[&str] = &[
+    "bt-prioritize-piece",
     "dir",
     "pause",
     "seed-ratio",
@@ -3018,6 +3023,8 @@ pub struct TaskOptionPatch {
     /// active tasks are explicitly rejected (restart semantics belong to
     /// the setSchedulerPolicy live face).
     pub bt_sequential_download: Option<bool>,
+    /// Head/tail preference within rarest-first. Explicit policies take precedence.
+    pub preview_pieces: Option<taiji_engine::preview::PreviewPieces>,
     /// Increment for the six hook commands (None = keep the global
     /// value. An empty-string value = blank = unset, normalized per the
     /// reference `option->blank` rule).
@@ -4784,6 +4791,13 @@ mod tests {
                 "seed-ratio" => patch_of(name, "1.5").seed_ratio == Some(1.5),
                 "seed-time" => patch_of(name, "45").seed_time_min == Some(45.0),
                 "bt-max-peers" => patch_of(name, "80").bt_max_peers == Some(80),
+                "bt-prioritize-piece" => {
+                    patch_of(name, "head=1M,tail=2M").preview_pieces
+                        == Some(taiji_engine::preview::PreviewPieces {
+                            head: 1048576,
+                            tail: 2097152,
+                        })
+                }
                 "max-connection" => patch_of(name, "77").bt_max_peers == Some(77),
                 "max-connection-per-server" => patch_of(name, "16").bt_max_peers == Some(16),
                 "max-download-limit" => patch_of(name, "1M").max_download_limit.is_some(),

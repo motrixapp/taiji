@@ -222,6 +222,7 @@ async fn magnet_selection_barrier_and_atomic_confirmation_survive_restart() {
             let selection = BTreeMap::from([
                 ("dir".into(), dir.join("chosen").display().to_string()),
                 ("select-file".into(), "2".into()),
+                ("bt-prioritize-piece".into(), "head=10M,tail=10M".into()),
                 (
                     "motrix-output-paths".into(),
                     r#"{"2":"renamed.bin"}"#.into(),
@@ -281,7 +282,7 @@ async fn magnet_selection_barrier_and_atomic_confirmation_survive_restart() {
                         &handle,
                         SessionCommand::ConfirmTorrentSelection {
                             gid: gid.into(),
-                            options: selection
+                            options: selection.clone()
                         }
                     )
                     .await
@@ -294,6 +295,22 @@ async fn magnet_selection_barrier_and_atomic_confirmation_survive_restart() {
                 &Gid::from_u64(0x7000000000000001),
             ));
             assert!(!saved.selection_pending);
+            assert!(
+                matches!(saved.scheduler_policy, Some(crate::engine::SchedulerPolicy::RarestFirst(ref params)) if params.preview == Some(taiji_engine::preview::PreviewPieces { head: 10 * 1024 * 1024, tail: 10 * 1024 * 1024 }))
+            );
+            let mut changed_preview = selection.clone();
+            changed_preview.insert("bt-prioritize-piece".into(), "head=1M".into());
+            assert!(
+                call(
+                    &handle,
+                    SessionCommand::ConfirmTorrentSelection {
+                        gid: gid.into(),
+                        options: changed_preview
+                    }
+                )
+                .await
+                .is_err()
+            );
             assert_eq!(saved.selected_files, Some(vec![1]));
             assert_eq!(
                 saved.output_paths.get(&2),

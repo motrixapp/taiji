@@ -294,7 +294,7 @@ pub(super) async fn handle_engine_command(
                     policy.name()
                 )));
             } else {
-                let strategy = policy.into_strategy();
+                let strategy = policy.into_strategy(&state.stream_geo);
                 info!(target: "taiji::core::engine", policy = strategy.name(),
                     "scheduler policy swapped (piece selection strategy)");
                 state.strategy = strategy;

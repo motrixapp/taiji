@@ -272,6 +272,7 @@ pub mod metainfo_admission;
 /// per-class metrics gauge).
 mod peer_class;
 mod pipeline;
+pub mod preview;
 mod progress;
 mod query;
 mod redial;

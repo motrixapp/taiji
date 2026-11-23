@@ -318,6 +318,32 @@ impl PieceStatMan {
         claimed: impl Fn(u64) -> bool,
         prio: Option<&[i8]>,
     ) -> (Option<u64>, Option<u64>) {
+        self.select_two_phase_by(
+            eligible,
+            claimed,
+            |i| prio.and_then(|p| p.get(i as usize).copied()).unwrap_or(0),
+            prio.is_none(),
+        )
+    }
+
+    /// One bucket pass with a caller-owned priority rank, preserving rarity
+    /// ties and separate unclaimed/fallback candidates. No per-round vector.
+    pub fn select_two_phase_ranked(
+        &self,
+        eligible: impl Fn(u64) -> bool,
+        claimed: impl Fn(u64) -> bool,
+        rank: impl Fn(u64) -> i8,
+    ) -> (Option<u64>, Option<u64>) {
+        self.select_two_phase_by(eligible, claimed, rank, false)
+    }
+
+    fn select_two_phase_by(
+        &self,
+        eligible: impl Fn(u64) -> bool,
+        claimed: impl Fn(u64) -> bool,
+        level: impl Fn(u64) -> i8,
+        uniform: bool,
+    ) -> (Option<u64>, Option<u64>) {
         self.rebuild_if_dirty();
         let pieces = self.pieces.borrow();
         if pieces.is_empty() {
@@ -326,7 +352,6 @@ impl PieceStatMan {
         let bounds = self.bounds.borrow();
         let mut plain: Option<(u64, i8)> = None;
         let mut spread: Option<(u64, i8)> = None;
-        let level = |i: u64| prio.and_then(|p| p.get(i as usize).copied()).unwrap_or(0);
         for c in 0..bounds.len().saturating_sub(1) {
             let (lo, hi) = (bounds[c] as usize, bounds[c + 1] as usize);
             for &p in pieces[lo..hi].iter() {
@@ -343,7 +368,7 @@ impl PieceStatMan {
                     // (return on first hit, zero decision/performance
                     // change); the prio face must scan everything (a
                     // higher level may sit in a deeper bucket).
-                    if prio.is_none() {
+                    if uniform {
                         return (Some(i), plain.map(|(pi, _)| pi));
                     }
                     spread = Some((i, q));

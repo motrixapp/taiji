@@ -2127,6 +2127,9 @@ async fn global_tracker_gate_and_private_exemption() {
     call(&handle, SessionCommand::Pause { gid: g.clone() })
         .await
         .unwrap_or_else(|e| panic!("pause: {e:?}"));
+    // Pause acknowledges the halt request before the running engine retires.
+    // Observe the paused state before testing the next activation's trackers.
+    wait_until(|| async { status_of(&handle, &g).await.status == StatusKind::Paused }).await;
     call(&handle, SessionCommand::Unpause { gid: g.clone() })
         .await
         .unwrap_or_else(|e| panic!("unpause: {e:?}"));

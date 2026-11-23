@@ -52,7 +52,7 @@ use crate::dispatch::{
     HashFetchEvent, LayerFetchState, LedgerArrival, PieceSentLedger,
     dispatch_face_selected_with_stream, handle_recovery_reply_and_drive, note_peer_bitfield,
     note_peer_have, note_peer_have_all, note_peer_have_none, note_recovery_evidence,
-    on_block_arrived, priority_mask, remove_peer_avail, selection_mask,
+    on_block_arrived, policy_priority_mask, priority_mask, remove_peer_avail, selection_mask,
 };
 use crate::faces::{
     FaceState, PeerRegistration, attach_seeding_sources, on_piece_verified, on_piece_written,
@@ -243,6 +243,56 @@ pub(super) async fn handle_engine_command(
                     info!(target: "taiji::core::engine",
                         entries = priority.len(),
                         "file priority applied");
+                    let _ = reply.send(Ok(()));
+                }
+                Err(e) => {
+                    let _ = reply.send(Err(e));
+                }
+            }
+        }
+        // 原子文件策略更新：先同时校验 selection 与 priority，全部合法后再一次性切换掩码与优先级表。
+        Some(EngineCommand::SetFilePolicy {
+            selection,
+            priority,
+            reply,
+        }) => {
+            type ValidatedFilePolicy = (Option<Vec<bool>>, Option<Vec<i8>>);
+            let validated = (|| -> Result<ValidatedFilePolicy, String> {
+                let next_mask = match selection.as_deref() {
+                    Some(files) => Some(selection_mask(layout, piece_len, files)?),
+                    None => None,
+                };
+                let next_prio =
+                    policy_priority_mask(layout, piece_len, selection.as_deref(), &priority)?;
+                Ok((next_mask, next_prio))
+            })();
+            match validated {
+                Ok((next_mask, next_prio)) => {
+                    match next_mask {
+                        Some(mask) => {
+                            let req = mask.iter().filter(|&&b| b).count();
+                            state.required = state.faces.iter().map(|_| req).collect();
+                            state.selected_mask = Some(Arc::from(mask.as_slice()));
+                        }
+                        None => {
+                            state.required = state.faces.iter().map(|f| f.piece_count).collect();
+                            state.selected_mask = None;
+                        }
+                    }
+                    state.piece_priority = next_prio.map(|t| Arc::from(t.as_slice()));
+                    let all_done = crate::faces::apply_file_selection(
+                        &mut state.faces,
+                        &state.required,
+                        state.selected_mask.as_deref(),
+                    );
+                    if !all_done {
+                        state.completed = false;
+                    }
+                    info!(target: "taiji::core::engine",
+                        selected_files = selection.as_ref().map(|s| s.len()),
+                        priority_entries = priority.len(),
+                        pieces = state.required.first().copied().unwrap_or(0),
+                        "atomic file policy applied");
                     let _ = reply.send(Ok(()));
                 }
                 Err(e) => {

@@ -829,10 +829,7 @@ async fn scheduler_policy_persist_failure_rejects_and_keeps_mirror_and_restart_c
         "持久化失败后实时查询必须仍为旧策略 rarest_first"
     );
     let stored = PersistedTaskConfig::from_json(&read_config_json(&db, &gid));
-    assert!(
-        stored.scheduler_policy.is_none(),
-        "DB 中不应残留新策略"
-    );
+    assert!(stored.scheduler_policy.is_none(), "DB 中不应残留新策略");
     assert_eq!(stored.selected_files, Some(vec![0]), "文件选择不得被破坏");
 
     // 清除故障触发器并重试
@@ -910,7 +907,10 @@ async fn scheduler_policy_persist_failure_rejects_and_keeps_mirror_and_restart_c
     let restored_files =
         files_of(&call(&handle2, SessionCommand::GetFiles { gid: g.clone() }).await);
     assert_eq!(
-        restored_files.iter().map(|f| f.selected).collect::<Vec<_>>(),
+        restored_files
+            .iter()
+            .map(|f| f.selected)
+            .collect::<Vec<_>>(),
         vec![true, false],
         "原文件选择在故障与重试后必须保持不变"
     );
@@ -1177,11 +1177,7 @@ async fn config_mutation_commands_reject_atomically_on_persist_failure() {
             .collect::<Vec<_>>(),
         vec![(true, 7), (false, -1)]
     );
-    assert_eq!(
-        restored_files[0].uris.len(),
-        1,
-        "重启后 webseed 应保留"
-    );
+    assert_eq!(restored_files[0].uris.len(), 1, "重启后 webseed 应保留");
     match call(&handle2, SessionCommand::GetDiskTier { gid: g.clone() }).await {
         Ok(CommandReply::DiskTier { tier }) => {
             assert_eq!(tier, taiji_store::disk_policy::DiskTier::SsdProtect);
@@ -1189,14 +1185,192 @@ async fn config_mutation_commands_reject_atomically_on_persist_failure() {
         other => panic!("期望 SsdProtect，实际: {other:?}"),
     }
     let st2 = status_of(&handle2, &g).await;
-    assert!(st2
-        .bittorrent
-        .as_ref()
-        .is_some_and(|bt| bt
-            .announce_list
+    assert!(st2.bittorrent.as_ref().is_some_and(|bt| {
+        bt.announce_list
             .iter()
             .flatten()
-            .any(|u| u == "http://tracker.example/announce")));
+            .any(|u| u == "http://tracker.example/announce")
+    }));
+
+    handle2.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), join2).await;
+    drop(writer2);
+    let _ = tokio::time::timeout(Duration::from_secs(2), wjoin2).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&db);
+}
+
+/// P0-2 对抗测试：活跃任务上持久化被拒绝时，setSchedulerPolicy 与 setFilePriority 均报错，
+/// 且运行中引擎、内存镜像、原 GID 与文件选择全部保持原状不受干扰；故障恢复后正常提交并经崩溃重启保留。
+#[tokio::test]
+async fn active_task_persist_failure_leaves_running_task_and_mirror_intact() {
+    let db = tmp_db("p0-2-active-persist-fail");
+    let dir = temp_dir("p0-2-active-persist-fail");
+    let bytes = build_custom_v1_torrent(
+        &dead_tracker(),
+        "p0-2-active",
+        16384,
+        &[("a.bin", 16384, false), ("b.bin", 16384, false)],
+    );
+
+    let (writer, wjoin) = ok(PersistWriter::spawn(db.clone()).await, "启动 writer 1");
+    let (handle, join) = SessionActor::spawn_with_persist(
+        SessionOptions {
+            global: GlobalOptions {
+                dir: dir.clone(),
+                enable_dht: false,
+                enable_dht6: false,
+                ..Default::default()
+            },
+        },
+        Some(writer.clone()),
+    );
+
+    let gid = gid_of(
+        &call(
+            &handle,
+            SessionCommand::AddTorrent {
+                torrent: bytes,
+                options: BTreeMap::from([("select-file".to_string(), "1".to_string())]),
+                position: None,
+            },
+        )
+        .await,
+    );
+    let g = gid.to_string();
+    wait_until(|| async {
+        status_list(&call(&handle, SessionCommand::TellActive { keys: vec![] }).await)
+            .iter()
+            .any(|v| v.gid == gid)
+    })
+    .await;
+
+    {
+        let conn = ok(rusqlite::Connection::open(&db), "注入触发器");
+        ok(
+            conn.execute_batch(
+                "CREATE TRIGGER reject_active_cfg BEFORE UPDATE ON torrent \
+                 BEGIN SELECT RAISE(ABORT, 'active-persist-fail'); END;",
+            ),
+            "创建拒绝触发器",
+        );
+    }
+
+    let seq: crate::engine::SchedulerPolicy =
+        "sequential".parse().unwrap_or_else(|e| panic!("{e}"));
+    assert!(matches!(
+        call(
+            &handle,
+            SessionCommand::SetSchedulerPolicy {
+                gid: g.clone(),
+                policy: seq.clone(),
+            },
+        )
+        .await,
+        Err(SessionError::Failed { .. })
+    ));
+    assert!(matches!(
+        call(
+            &handle,
+            SessionCommand::SetFilePriority {
+                gid: g.clone(),
+                pairs: vec![(1, 7)],
+            },
+        )
+        .await,
+        Err(SessionError::Failed { .. })
+    ));
+
+    // 任务仍处于活跃态，策略与文件选择/优先级均未改变
+    let active = status_list(&call(&handle, SessionCommand::TellActive { keys: vec![] }).await);
+    assert!(
+        active.iter().any(|v| v.gid == gid),
+        "活跃任务不应因配置写库失败而退出"
+    );
+    assert_eq!(
+        policy_of(
+            call(
+                &handle,
+                SessionCommand::GetSchedulerPolicy { gid: g.clone() },
+            )
+            .await
+        )
+        .name(),
+        "rarest_first"
+    );
+    let files = files_of(&call(&handle, SessionCommand::GetFiles { gid: g.clone() }).await);
+    assert_eq!(
+        files
+            .iter()
+            .map(|f| (f.selected, f.priority))
+            .collect::<Vec<_>>(),
+        vec![(true, 0), (false, -1)]
+    );
+
+    // 移除触发器后重试，确认活跃任务上可正常更新并在崩溃重启后持久保留
+    {
+        let conn = ok(rusqlite::Connection::open(&db), "移除触发器");
+        ok(
+            conn.execute_batch("DROP TRIGGER reject_active_cfg;"),
+            "移除拒绝触发器",
+        );
+    }
+    ok(
+        call(
+            &handle,
+            SessionCommand::SetSchedulerPolicy {
+                gid: g.clone(),
+                policy: seq,
+            },
+        )
+        .await,
+        "故障恢复后活跃任务 setSchedulerPolicy 应成功",
+    );
+    ok(
+        call(
+            &handle,
+            SessionCommand::SetFilePriority {
+                gid: g.clone(),
+                pairs: vec![(1, 7)],
+            },
+        )
+        .await,
+        "故障恢复后活跃任务 setFilePriority 应成功",
+    );
+
+    simulate_crash_stop(handle, join, writer, wjoin).await;
+
+    let (writer2, wjoin2) = ok(PersistWriter::spawn(db.clone()).await, "启动 writer 2");
+    let (handle2, join2) = SessionActor::spawn_with_persist(
+        SessionOptions {
+            global: GlobalOptions {
+                dir: dir.clone(),
+                enable_dht: false,
+                enable_dht6: false,
+                ..Default::default()
+            },
+        },
+        Some(writer2.clone()),
+    );
+    assert_eq!(
+        policy_of(
+            call(
+                &handle2,
+                SessionCommand::GetSchedulerPolicy { gid: g.clone() },
+            )
+            .await
+        )
+        .name(),
+        "sequential"
+    );
+    let restored = files_of(&call(&handle2, SessionCommand::GetFiles { gid: g.clone() }).await);
+    assert_eq!(
+        restored
+            .iter()
+            .map(|f| (f.selected, f.priority))
+            .collect::<Vec<_>>(),
+        vec![(true, 7), (false, -1)]
+    );
 
     handle2.shutdown().await;
     let _ = tokio::time::timeout(Duration::from_secs(2), join2).await;

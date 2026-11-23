@@ -794,14 +794,12 @@ pub(super) fn file_views(
     priorities: Option<&[(u32, i8)]>,
     uris: Vec<UriEntryView>,
 ) -> Vec<FileEntryView> {
-    // Sparse priority table lookup (entries not listed = 0, normal):
-    // tables over 8 entries become a HashMap (removes the files x
-    // priorities linear product — the status-view CPU face for large
-    // tables + large tasks); small tables keep a zero-allocation linear
-    // scan.
+    // 稀疏查找优化：超过 8 条时构建 HashMap / HashSet，保证海量文件列表投影保持 O(N)。
+    let sel_set: Option<std::collections::HashSet<u32>> =
+        selection.and_then(|s| (s.len() > 8).then(|| s.iter().copied().collect()));
     let prio_map: Option<std::collections::HashMap<u32, i8>> =
         priorities.and_then(|p| (p.len() > 8).then(|| p.iter().copied().collect()));
-    let level_of = |idx: u32| {
+    let raw_level_of = |idx: u32| -> i8 {
         if let Some(m) = &prio_map {
             return m.get(&idx).copied().unwrap_or(0);
         }
@@ -809,32 +807,47 @@ pub(super) fn file_views(
             .and_then(|p| p.iter().find(|(i, _)| *i == idx).map(|(_, q)| *q))
             .unwrap_or(0)
     };
-    // BEP53 client file-list cursor: increments only over non-pad
-    // entries (pad = BEP47 transfer placeholders, not files, never in
-    // the selection set — false on the Some face, true with select-all
-    // on the None face).
+    let face_of = |idx: u32| -> (bool, i8) {
+        let raw = raw_level_of(idx);
+        match selection {
+            Some(sel) => {
+                let in_sel = match &sel_set {
+                    Some(set) => set.contains(&idx),
+                    None => sel.contains(&idx),
+                };
+                if !in_sel {
+                    (false, -1)
+                } else {
+                    (true, raw.clamp(0, 7))
+                }
+            }
+            None => {
+                if raw == -1 {
+                    (false, -1)
+                } else {
+                    (true, raw.clamp(0, 7))
+                }
+            }
+        }
+    };
+    // BEP53 非 padding 文件游标：padding 文件不参与序号计数。
     let mut client_idx = 0u32;
     meta.files
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let selected = if f.padding {
-                file_selected(selection, None)
+            let (selected, priority) = if f.padding {
+                (file_selected(selection, None), 0)
             } else {
                 let idx = client_idx;
                 client_idx += 1;
-                file_selected(selection, Some(idx))
+                face_of(idx)
             };
             FileEntryView {
                 index: i as u64 + 1,
                 path: f.path.display().to_string(),
                 selected,
-                priority: if f.padding {
-                    0
-                } else {
-                    let idx = client_idx - 1;
-                    level_of(idx)
-                },
+                priority,
                 length: f.length,
                 completed_length: completed.and_then(|c| c.get(i)).copied().unwrap_or(0),
                 // A BT task's FileEntry URIs = the task-level webseed

@@ -200,7 +200,7 @@ impl SessionActor {
                     )));
                 }
             }
-            self.swap_job_dir(gid, &to_dir).await;
+            self.swap_job_dir(gid, &to_dir).await?;
             return Ok(CommandReply::Accepted);
         };
 
@@ -351,28 +351,41 @@ impl SessionActor {
         }
     }
 
-    /// Inline dir swap (dir-only families): mutate the Job, rewrite the
-    /// row through the derived-config path (no journal involved).
-    async fn swap_job_dir(&mut self, gid: Gid, to_dir: &Path) {
-        match self.jobs.get_mut(&gid) {
-            Some(Job::Torrent(tj)) => tj.dir = to_dir.to_path_buf(),
-            Some(Job::Magnet(mj)) => mj.dest = to_dir.to_path_buf(),
-            Some(Job::TorrentUrl { dir, .. }) => *dir = to_dir.to_path_buf(),
-            Some(Job::Http(job)) => {
-                job.dir = to_dir.to_path_buf();
-                // A never-activated HTTP task may still carry a restore
-                // row (no `out` yet): keep the row's dir in step so a
-                // restart restores at the new dir.
-                if let Some(row) = job.restore.as_mut() {
-                    row.dir = to_dir.display().to_string();
-                    let row = row.clone();
-                    self.persist_http_row(&row).await;
+    /// Inline dir swap (dir-only families)：先落盘更新 `row.dir` 与 `config_json.dir`，
+    /// 持久化失败时返回 `Err` 且不修改内存镜像。
+    async fn swap_job_dir(&mut self, gid: Gid, to_dir: &Path) -> Result<(), SessionError> {
+        let dir_text = to_dir.display().to_string();
+        match self.jobs.get(&gid) {
+            Some(Job::Torrent(_) | Job::Magnet(_) | Job::TorrentUrl { .. }) => {
+                let mut cand_cfg = self.job_config(&gid);
+                cand_cfg.dir = dir_text.clone();
+                let committed = self
+                    .persist_torrent_candidate(gid, &cand_cfg, Some(&dir_text), None)
+                    .await?;
+                match self.jobs.get_mut(&gid) {
+                    Some(Job::Torrent(tj)) => tj.dir = to_dir.to_path_buf(),
+                    Some(Job::Magnet(mj)) => mj.dest = to_dir.to_path_buf(),
+                    Some(Job::TorrentUrl { dir, .. }) => *dir = to_dir.to_path_buf(),
+                    _ => {}
                 }
-                return;
+                self.commit_torrent_row_mirror(gid, committed);
             }
-            _ => return,
+            Some(Job::Http(job)) => {
+                let mut cand_restore = job.restore.clone();
+                if let Some(row) = cand_restore.as_mut() {
+                    row.dir = dir_text;
+                    self.persist_http_candidate(row).await?;
+                }
+                if let Some(Job::Http(job)) = self.jobs.get_mut(&gid) {
+                    job.dir = to_dir.to_path_buf();
+                    if let Some(row) = cand_restore {
+                        job.restore = Some(row);
+                    }
+                }
+            }
+            _ => {}
         }
-        self.persist_refresh_config(gid).await;
+        Ok(())
     }
 
     /// Journal write (torrent face: the rows mirror + upsert; HTTP
@@ -544,18 +557,28 @@ impl SessionActor {
             Some(Job::Torrent(tj)) => {
                 tj.dir = to_dir.clone();
                 let key = gid.to_string();
-                if let Some((row, files)) = self.rows.get_mut(&key) {
-                    let mut cfg = PersistedTaskConfig::from_json(&row.config_json);
+                if let Some((prev_row, prev_files)) = self.rows.get(&key) {
+                    let mut cand_row = prev_row.clone();
+                    let mut cfg = PersistedTaskConfig::from_json(&cand_row.config_json);
                     cfg.dir = pending.to_dir.clone();
                     cfg.move_pending = None;
-                    row.dir = pending.to_dir.clone();
-                    row.config_json = cfg.to_json();
-                    let (row, files) = (row.clone(), files.clone());
-                    if let Some(p) = &self.persist {
-                        if let Err(e) = p.upsert_torrent(row, files).await {
-                            warn!(target: "taiji::core::session", gid = %gid, %e,
-                                "move commit row persist failed");
+                    cand_row.dir = pending.to_dir.clone();
+                    cand_row.config_json = cfg.to_json();
+                    let cand_files = prev_files.clone();
+                    let persisted_ok = if let Some(p) = &self.persist {
+                        match p.upsert_torrent(cand_row.clone(), cand_files.clone()).await {
+                            Ok(_) => true,
+                            Err(e) => {
+                                warn!(target: "taiji::core::session", gid = %gid, %e,
+                                    "move commit row persist failed; journal kept in mirror for retry");
+                                false
+                            }
                         }
+                    } else {
+                        true
+                    };
+                    if persisted_ok {
+                        self.rows.insert(key, (cand_row, cand_files));
                     }
                 }
             }

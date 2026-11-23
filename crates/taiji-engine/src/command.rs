@@ -102,6 +102,15 @@ pub enum EngineCommand {
         priority: Arc<[(u32, i8)]>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// 原子文件策略下发：在同一单写者命令内同时校验并切换文件选择掩码与分块优先级表，
+    /// 消除先更新选择再更新优先级的中间调度窗口与半提交状态。
+    /// - `selection`: `None` 表示全选所有真实文件；`Some(files)` 表示 0-based 非 padding 选中子集（非空）。
+    /// - `priority`: 稀疏的 `(0-based 非 padding 索引, 等级 -1..=7)` 表；空表表示清除自定义高优先级（恢复默认 0）。
+    SetFilePolicy {
+        selection: Option<Arc<[u32]>>,
+        priority: Arc<[(u32, i8)]>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// ut_holepunch runtime switch (internal config face; enabled by
     /// default — libtorrent has no separate switch, it follows extension
     /// negotiation). Loaded via the config_json chain: the session sends
@@ -219,6 +228,15 @@ impl std::fmt::Debug for EngineCommand {
                 .finish_non_exhaustive(),
             Self::SetFilePriority { priority, .. } => f
                 .debug_struct("SetFilePriority")
+                .field("priority", priority)
+                .finish_non_exhaustive(),
+            Self::SetFilePolicy {
+                selection,
+                priority,
+                ..
+            } => f
+                .debug_struct("SetFilePolicy")
+                .field("selection", selection)
                 .field("priority", priority)
                 .finish_non_exhaustive(),
             Self::SetHolepunch { enabled, .. } => f
@@ -411,6 +429,31 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EngineCommand::SetFilePriority {
+                priority,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| EngineError::EngineClosed)?;
+        rx.await
+            .map_err(|_| EngineError::EngineClosed)?
+            .map_err(EngineError::failed)
+    }
+
+    /// 原子推送完整文件策略（选择掩码 + 分块优先级表），避免双命令中间窗口。
+    ///
+    /// # Errors
+    ///
+    /// - [`EngineError::EngineClosed`][]：引擎主循环已退出或通道关闭。
+    /// - [`EngineError::Failed`][]：索引越界、空选择或优先级超出 `-1..=7` 范围。
+    pub async fn set_file_policy(
+        &self,
+        selection: Option<Arc<[u32]>>,
+        priority: Arc<[(u32, i8)]>,
+    ) -> Result<(), EngineError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EngineCommand::SetFilePolicy {
+                selection,
                 priority,
                 reply: tx,
             })

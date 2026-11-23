@@ -3439,6 +3439,90 @@ pub(super) fn priority_mask(
         _ => Err("unknown layout kind".into()),
     }
 }
+
+/// 原子文件策略的分块优先级投影：结合有效选择集计算分块优先级表。
+/// - 当没有任何已选文件带有高优先级（`1..=7`）时返回 `Ok(None)`，保持默认全 0 快路径（不触发额外排序开销，
+///   且保留自动预览选块与用户优先级的明确层级）。
+/// - v1/hybrid 共享边界分块仅取「已选且优先级 > 0」的相交文件最大值，未选文件不得抬升共享分块优先级；
+///   共享分块本身是否下载仍由 `selection_mask` 按协议字节区间交集决定。
+pub(crate) fn policy_priority_mask(
+    layout: &Layout,
+    piece_len: u32,
+    selection: Option<&[u32]>,
+    prio: &[(u32, i8)],
+) -> Result<Option<Vec<i8>>, String> {
+    let real_count = layout.files().iter().filter(|f| !f.padding).count() as u32;
+    let mut table: std::collections::BTreeMap<u32, i8> = std::collections::BTreeMap::new();
+    for &(idx, level) in prio {
+        if idx >= real_count {
+            return Err(format!(
+                "file index {idx} out of range ({real_count} files)"
+            ));
+        }
+        if !(-1..=7).contains(&level) {
+            return Err(format!("file priority {level} out of range (-1..=7)"));
+        }
+        if table.insert(idx, level).is_some() {
+            return Err(format!("duplicate file index {idx}"));
+        }
+    }
+    let selected_set: Option<std::collections::HashSet<u32>> =
+        selection.map(|files| files.iter().copied().collect());
+    let is_selected = |idx: u32| selected_set.as_ref().is_none_or(|set| set.contains(&idx));
+    let has_positive = table.iter().any(|(&idx, &q)| q > 0 && is_selected(idx));
+    if !has_positive {
+        return Ok(None);
+    }
+    let level_of = |idx: u32| -> i8 {
+        if !is_selected(idx) {
+            -1
+        } else {
+            table.get(&idx).copied().unwrap_or(0).clamp(0, 7)
+        }
+    };
+    match layout.kind() {
+        taiji_store::layout::LayoutKind::V2Compact => {
+            let mut mask: Vec<i8> = Vec::new();
+            for (i, f) in layout.files().iter().filter(|f| !f.padding).enumerate() {
+                let pieces = f.length.div_ceil(u64::from(piece_len)) as usize;
+                mask.extend(std::iter::repeat_n(level_of(i as u32), pieces));
+            }
+            Ok(Some(mask))
+        }
+        taiji_store::layout::LayoutKind::V1Padded => {
+            let mut spans: Vec<(u64, u64, i8)> = Vec::new();
+            let mut idx = 0u32;
+            for f in layout.files() {
+                if f.padding {
+                    continue;
+                }
+                let q = level_of(idx);
+                if q > 0 && f.length > 0 {
+                    spans.push((f.offset, f.offset + f.length, q));
+                }
+                idx += 1;
+            }
+            let piece_count = if layout.total() == 0 {
+                0usize
+            } else {
+                layout.total().div_ceil(u64::from(piece_len)) as usize
+            };
+            let mut mask = vec![0i8; piece_count];
+            for (i, slot) in mask.iter_mut().enumerate() {
+                let lo = i as u64 * u64::from(piece_len);
+                let hi = lo.saturating_add(u64::from(piece_len));
+                *slot = spans
+                    .iter()
+                    .filter(|&&(start, end, _)| start < hi && lo < end)
+                    .map(|&(_, _, q)| q)
+                    .max()
+                    .unwrap_or(0);
+            }
+            Ok(Some(mask))
+        }
+        _ => Err("unknown layout kind".into()),
+    }
+}
 /// Dispatch-round scratch (resident transient-buffer reuse): the buffers
 /// discarded and rebuilt at the top of every dispatch round — the done
 /// bitmap, the [`ClaimedSet`] inner bitmap, the endgame aux tables

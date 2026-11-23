@@ -336,6 +336,8 @@ pub(crate) fn lock_write<T>(m: &std::sync::RwLock<T>) -> std::sync::RwLockWriteG
 pub(crate) use transit::LeaveKind;
 
 #[cfg(test)]
+mod file_policy_tests;
+#[cfg(test)]
 #[rustfmt::skip]
 mod tests;
 #[cfg(test)]

@@ -39,7 +39,10 @@ use crate::dispatch::{
 /// enhancement semantics are on by default, with no tunable constants); this
 /// struct stays empty as a future tuning extension point (stable serde form).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct RarestFirstParams {}
+pub struct RarestFirstParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<crate::preview::PreviewPieces>,
+}
 
 /// Sequential-download parameter struct; stays empty (sequential semantics
 /// have no tunable constants). Stable serde extension point.
@@ -187,22 +190,22 @@ pub(super) struct Playhead {
 /// assumption does not hold for v1-only no-pad layouts (the playhead file's
 /// true first piece would never enter the priority map).
 pub(super) struct StreamGeo {
-    piece_len: u32,
+    pub(super) piece_len: u32,
     /// Flat-piece geometry per real file (client order).
-    files: Vec<FileGeo>,
+    pub(super) files: Vec<FileGeo>,
 }
 
 /// Mapping of one real file into flat piece space.
 #[derive(Debug, Clone, Copy)]
-struct FileGeo {
+pub(super) struct FileGeo {
     /// File length in bytes (zero-length files cover 0 pieces).
-    len: u64,
+    pub(super) len: u64,
     /// Number of flat pieces covered (unaligned files share first/last pieces with neighbors).
-    pieces: u64,
+    pub(super) pieces: u64,
     /// First flat piece (the piece containing file byte 0).
-    base: u64,
+    pub(super) base: u64,
     /// Offset of the file start within its first piece (0 for aligned files).
-    rem: u64,
+    pub(super) rem: u64,
 }
 
 impl StreamGeo {
@@ -491,9 +494,14 @@ impl SchedulerPolicy {
     /// arm; strategy bodies are stateless — round inputs all arrive via
     /// [`SelectionCtx`], so whole-object replacement is the entire switch
     /// surface).
-    pub(super) fn into_strategy(self) -> Box<dyn PieceSelectionStrategy> {
+    pub(super) fn into_strategy(self, geo: &StreamGeo) -> Box<dyn PieceSelectionStrategy> {
         match self {
-            SchedulerPolicy::RarestFirst(_) => Box::new(RarestFirstStrategy),
+            SchedulerPolicy::RarestFirst(params) => {
+                match params.preview.filter(|p| !p.is_empty()) {
+                    Some(preview) => Box::new(crate::preview::PreviewStrategy::new(preview, geo)),
+                    None => Box::new(RarestFirstStrategy),
+                }
+            }
             SchedulerPolicy::Sequential(_) => Box::new(SequentialStrategy),
             SchedulerPolicy::Streaming(_) => Box::new(StreamingStrategy),
         }

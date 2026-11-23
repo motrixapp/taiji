@@ -550,3 +550,14 @@ inventory).
   policy seam, transcribed from the upstream reference where one exists.
 - **declared divergence** — a documented, test-pinned difference from aria2;
   anything else that differs is a bug.
+
+### Preview piece preference (Motrix integration)
+
+Torrent preview preference is a durable, optional rarest-first parameter,
+consumed via `bt-prioritize-piece` at creation or while paused and atomically by
+native magnet selection confirmation. Explicit scheduler policies and user file
+priorities take precedence; availability, selection, padding and verification
+remain hard constraints. Geometry comes from the native Layout, including
+unaligned v1 boundary pieces and v2 file-local pieces. Compact merged ranges
+avoid per-file piece copies. The implementation and acceptance cases live in
+`taiji-engine::preview` and `taiji-core::session::preview_options`.

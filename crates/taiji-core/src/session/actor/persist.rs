@@ -163,9 +163,10 @@ impl SessionActor {
             // sequential (the authoritative face is
             // taiji.setSchedulerPolicy; this key is a compatibility
             // projection).
-            scheduler_policy: patch
-                .bt_sequential_download
-                .and_then(|seq| seq.then_some(crate::engine::SchedulerPolicy::sequential())),
+            scheduler_policy: {
+                let policy = super::super::preview_options::initial(patch);
+                (policy != crate::engine::SchedulerPolicy::default()).then_some(policy)
+            },
             // No RPC option on the add face (internal config_json face)
             // — default None = throughput tier.
             disk_tier: None,

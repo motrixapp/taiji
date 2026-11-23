@@ -990,3 +990,13 @@ HTTP 文件收尾额外通知为 `taiji.onHttpOutputReady`，已验证的磁链�
 部分文件选择的任务进度按所选文件的有效字节计算；aria2 的过滤长度按涉及的完整分块计数。taiji 不把共享边界分块的额外字节计入文件进度，完成判定仍等待所需分块验证和写入。
 
 全局回显还包括 IPv6 DHT 入口 `dht-entry-point6`，以及宿主观测用的 `motrix-peer-listeners`（已绑定的 BT 端口）和 `motrix-startup-tasks`（待恢复任务与运行意图）。参考 fork 是否回显 `async-dns` 等项取决于编译功能；已被双方回显的项按共享值检查，其余扩展仍必须逐项出现在审计表中。
+
+### 预览优先的投影
+
+`bt-prioritize-piece` 消费 aria2 的 head/tail 大小语法（默认 1 MiB，重复区域
+取最大值并集）。原生表示为稀有优先策略的可选参数：显式顺序/流式策略优先，
+用户文件优先级高于预览偏好；头尾不可用或已被占用时，普通未占用分块仍可推进。
+`getOption` 将大小归一化为字节。此参数不属于全局配置；活动/做种任务的
+`changeOption` 会拒绝修改，需先暂停。`confirmTorrentSelection` 额外接受该参数，
+在释放选择屏障前持久化。代码锚点：`taiji-engine::preview`、
+`taiji-core::session::preview_options` 和 `actor::torrent_selection`。

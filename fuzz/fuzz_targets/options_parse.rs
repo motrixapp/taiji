@@ -2,7 +2,7 @@
 
 //! fuzz target: the taiji-core option-string parsers.
 //!
-//! Covers `parse_size` (size literals) and `parse_select_file` (BEP53
+//! Covers head/tail preview options, `parse_size` (size literals) and `parse_select_file` (BEP53
 //! 1-based interval lists). Invariants:
 //! 1. No text input panics;
 //! 2. `parse_size` Some implies a finite value with no sign flip;
@@ -16,6 +16,9 @@ use taiji_core::session::{parse_select_file, parse_size};
 
 fuzz_target!(|data: &[u8]| {
     let s = String::from_utf8_lossy(data);
+    if let Ok(preview) = taiji_core::session::preview_options::parse_preview_pieces(&s) {
+        assert_eq!(taiji_core::session::preview_options::parse_preview_pieces(&preview.option_value()), Ok(preview));
+    }
     // parse_size: Some implies no panic and no overflow flip (inside
     // u64 — checked_mul; value-domain validation belongs to option
     // acceptance, not parsing). Wired in: the import

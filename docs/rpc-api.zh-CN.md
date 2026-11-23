@@ -280,3 +280,16 @@ tellStatus 轮询语义），会话数据库与任务行和 RPC 面完全同构 
 
 `taiji.getHttpOutput`、`taiji.finalizeHttp`、`taiji.onHttpOutputReady`
 及固定宿主接口见[HTTP 文件收尾](http-publication.zh-CN.md)。
+
+## 面向预览的种子分块顺序
+
+`bt-prioritize-piece=head[=SIZE],tail[=SIZE]` 在创建种子/磁链任务及
+`confirmTorrentSelection` 时生效。省略大小时采用 1 MiB；
+`head=0,tail=0` 关闭优先规则。参数随稀有优先策略持久化，`getOption`
+以字节数回读。暂停的种子和磁链可通过 `changeOption` 更新；活动或做种任务
+需要先暂停。显式设置的顺序下载或流式策略优先。
+
+在同一文件优先级内，先选择可用的头尾分块，同时保留稀有度排序与未占用分块
+优先。文件选择、padding 排除和校验约束仍然生效。如果节点没有可下载的头尾
+分块，其他分块仍可继续。该功能不会创建播放位置。磁链确认在放行内容下载前，
+把此参数与输出路径、文件选择一起持久化；以不同参数重放确认会被拒绝。

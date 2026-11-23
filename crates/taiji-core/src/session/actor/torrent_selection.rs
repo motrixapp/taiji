@@ -91,10 +91,12 @@ impl SessionActor {
         raw_gid: &str,
         options: BTreeMap<String, String>,
     ) -> Result<CommandReply, SessionError> {
-        if options
-            .keys()
-            .any(|key| !matches!(key.as_str(), "dir" | "select-file" | "motrix-output-paths"))
-        {
+        if options.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "dir" | "select-file" | "motrix-output-paths" | "bt-prioritize-piece"
+            )
+        }) {
             return Err(SessionError::failed("unsupported torrent selection option"));
         }
         let gid = if raw_gid.len() == 16 {
@@ -116,6 +118,7 @@ impl SessionActor {
         } else {
             return Err(SessionError::failed("torrent metadata is not ready"));
         };
+        super::super::preview_options::validate(&options)?;
         let patch = parse_task_options(&options);
         let dir = patch
             .dir
@@ -128,6 +131,8 @@ impl SessionActor {
             ));
         }
         let mut cfg = PersistedTaskConfig::from_json(&row.config_json);
+        let mut policy = cfg.scheduler_policy.clone().unwrap_or_default();
+        super::super::preview_options::apply(&mut policy, &patch);
         let directory = dir.display().to_string();
         let requested = Some(
             parse_select_file(patch.select_file.as_deref().unwrap_or_default())
@@ -140,7 +145,10 @@ impl SessionActor {
                 .transpose()
                 .map_err(|_| SessionError::failed("invalid torrent output paths"))?
                 .unwrap_or_default();
-            if cfg.dir == directory && cfg.output_paths == paths && cfg.selected_files == requested
+            if cfg.dir == directory
+                && cfg.output_paths == paths
+                && cfg.selected_files == requested
+                && cfg.scheduler_policy.clone().unwrap_or_default() == policy
             {
                 return Ok(CommandReply::Gid(gid));
             }
@@ -170,6 +178,8 @@ impl SessionActor {
         cfg.dir = directory;
         cfg.output_paths = paths;
         cfg.selected_files = selected.clone();
+        cfg.scheduler_policy =
+            (policy != crate::engine::SchedulerPolicy::default()).then_some(policy.clone());
         cfg.selection_pending = false;
         row.config_json = cfg.to_json();
         row.state = TaskPhase::Queued.as_v1_str().into();
@@ -188,6 +198,7 @@ impl SessionActor {
             job.metainfo = Arc::new(meta);
             job.dir = dir;
             job.selected_files = selected;
+            job.scheduler_policy = policy;
         }
         self.queue.startup_held.remove(&gid);
         if let Some(entry) = self.queue.reserved_entry_mut(gid) {

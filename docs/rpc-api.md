@@ -346,3 +346,20 @@ extensions, see the differential declaration §3).
 
 See [HTTP publication](http-publication.md) for `taiji.getHttpOutput`,
 `taiji.finalizeHttp`, `taiji.onHttpOutputReady`, and the fixed host contract.
+
+## Preview-oriented torrent piece ordering
+
+`bt-prioritize-piece=head[=SIZE],tail[=SIZE]` is consumed on torrent/magnet
+creation and by `confirmTorrentSelection`. A missing size means 1 MiB;
+`head=0,tail=0` disables the preference. The option is persisted with the
+rarest-first policy and echoed as byte counts by `getOption`. Paused torrent
+and magnet tasks can update it through `changeOption`; active/seeding tasks
+must be paused first. Explicit sequential or streaming policy takes precedence.
+
+Within a file-priority level, available head/tail pieces are preferred while
+retaining rarity ordering and unclaimed-piece spreading. Selection masks,
+padding exclusion and verification gates still apply. If a peer has no eligible
+edge piece, ordinary pieces can progress. This does not create a playback
+cursor. Magnet confirmation persists this preference together with the output
+paths and selection before admitting payload work; a replay with a different
+preference is rejected.

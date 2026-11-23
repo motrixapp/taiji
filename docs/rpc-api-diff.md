@@ -1270,3 +1270,16 @@ HTTP output publication adds `taiji.onHttpOutputReady`, and verified magnet sele
 With partial file selection, task progress counts selected payload bytes. aria2 rounds its filtered length to the involved pieces; taiji excludes shared boundary-piece overhead from file progress. Completion still waits for verification and writing of every required piece.
 
 Global echo extensions also include the IPv6 DHT entry `dht-entry-point6`, `motrix-peer-listeners` (bound BT listeners), and `motrix-startup-tasks` (held recovery tasks and run intent). Reference builds may already echo keys such as `async-dns` depending on compiled features. Those keys are checked as shared values; every remaining native-only key must still appear in the explicit audit table.
+
+### Preview preference projection
+
+`bt-prioritize-piece` consumes aria2's head/tail size grammar (default 1 MiB,
+repeated regions union by maximum size). The native representation is an optional
+rarest-first parameter: explicit sequential/streaming policy wins, user file
+priority precedes preview preference, and normal unclaimed work can progress
+when preview pieces are unavailable or already claimed. `getOption` normalizes
+sizes to bytes. The option is not session-global; active/seeding changeOption
+calls reject until paused. `confirmTorrentSelection` additionally accepts the
+option and durably commits it before releasing the selection barrier. Anchors:
+`taiji-engine::preview`, `taiji-core::session::preview_options`, and
+`actor::torrent_selection`.

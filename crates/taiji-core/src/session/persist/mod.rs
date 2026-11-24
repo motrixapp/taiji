@@ -489,26 +489,49 @@ pub(crate) fn file_rows_with_face(
     selection: Option<&[u32]>,
     priorities: Option<&[(u32, i8)]>,
 ) -> Vec<TorrentFileRow> {
-    // BEP53 client file-order cursor (increments over non-pad files;
-    // pad files are always selected at level 0 — transfer placeholders,
-    // not files, so they take no part in selection / priority faces).
+    // 统一投影语义（与 views::file_views 一致）：
+    // - 超过 8 条时构建 HashSet/HashMap 保证 O(N)；
+    // - 未选的真实文件统一投影为 (false, -1)，已选真实文件为 (true, 0..=7)；
+    // - padding 文件不参与非 padding 游标计数，priority 恒为 0。
+    let sel_set: Option<std::collections::HashSet<u32>> =
+        selection.and_then(|s| (s.len() > 8).then(|| s.iter().copied().collect()));
+    let prio_map: Option<std::collections::HashMap<u32, i8>> =
+        priorities.and_then(|p| (p.len() > 8).then(|| p.iter().copied().collect()));
+    let raw_level_of = |idx: u32| -> i8 {
+        if let Some(m) = &prio_map {
+            return m.get(&idx).copied().unwrap_or(0);
+        }
+        priorities
+            .and_then(|p| p.iter().find(|(i, _)| *i == idx).map(|(_, q)| *q))
+            .unwrap_or(0)
+    };
     let mut client_idx = 0u32;
     let face = |padding: bool, client_idx: &mut u32| -> (bool, i8) {
         if padding {
-            return (true, 0);
+            return (selection.is_none(), 0);
         }
         let idx = *client_idx;
         *client_idx += 1;
-        let level = priorities
-            .and_then(|p| p.iter().find(|(i, _)| *i == idx).map(|(_, q)| *q))
-            .unwrap_or(0);
-        match (selection, priorities) {
-            // Priority face present = authoritative (-1 <=> unselected;
-            // selected_files is its projection).
-            (_, Some(_)) => (level != -1, level),
-            // Selection face only: the BEP53 mask.
-            (Some(sel), None) => (sel.contains(&idx), level),
-            (None, None) => (true, level),
+        let raw = raw_level_of(idx);
+        match selection {
+            Some(sel) => {
+                let in_sel = match &sel_set {
+                    Some(set) => set.contains(&idx),
+                    None => sel.contains(&idx),
+                };
+                if !in_sel {
+                    (false, -1)
+                } else {
+                    (true, raw.clamp(0, 7))
+                }
+            }
+            None => {
+                if raw == -1 {
+                    (false, -1)
+                } else {
+                    (true, raw.clamp(0, 7))
+                }
+            }
         }
     };
     files

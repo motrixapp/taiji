@@ -44,7 +44,12 @@ impl SessionActor {
                 &cfg,
             );
             super::super::persist::fill_torrent_identity(&mut row, &meta, torrent);
-            let files = file_rows(&gid_hex, &meta.meta.files);
+            let files = super::super::persist::file_rows_with_face(
+                &gid_hex,
+                &meta.meta.files,
+                cfg.selected_files.as_deref(),
+                cfg.file_priorities.as_deref(),
+            );
             // Keep the mirror's existing row state (a pre-upgrade
             // paused/queued state does not drift because of the upgrade).
             if let Some((prev, _)) = self.rows.get(&gid_hex) {

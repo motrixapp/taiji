@@ -106,3 +106,4 @@ include!("observe.rs");
 include!("budget_keys.rs");
 
 include!("preview_priority.rs");
+include!("file_policy_and_persist.rs");

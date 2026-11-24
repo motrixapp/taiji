@@ -506,16 +506,9 @@ impl SessionActor {
                 return;
             }
         };
-        // (2) The row face: file rows from the new view; config_json
-        // via the job projection (the journal clears on the mirror
-        // first — job_config's overlay reads it back).
+        // (2) 先构造候选行落盘，仅在持久化成功后才清除内存中的 rename_pending journal，
+        // 避免 DB 写入失败时内存假装已关闭 journal。
         let key = gid.to_string();
-        if let Some((row, _)) = self.rows.get_mut(&key) {
-            let mut cfg = PersistedTaskConfig::from_json(&row.config_json);
-            cfg.rename_pending = None;
-            row.config_json = cfg.to_json();
-        }
-        let config_json = self.job_config(&gid).to_json();
         let new_files = match self.jobs.get(&gid) {
             Some(Job::Torrent(tj)) => crate::session::persist::file_rows_with_face(
                 &key,
@@ -525,15 +518,26 @@ impl SessionActor {
             ),
             _ => return,
         };
-        if let Some((row, files)) = self.rows.get_mut(&key) {
-            row.config_json = config_json;
-            *files = new_files;
-            let (row, files) = (row.clone(), files.clone());
-            if let Some(p) = &self.persist {
-                if let Err(e) = p.upsert_torrent(row, files).await {
-                    warn!(target: "taiji::core::session", gid = %gid, %e,
-                        "rename commit row persist failed");
+        let mut next_cfg = self.job_config(&gid);
+        next_cfg.rename_pending = None;
+        let config_json = next_cfg.to_json();
+        if let Some((prev_row, _)) = self.rows.get(&key) {
+            let mut cand_row = prev_row.clone();
+            cand_row.config_json = config_json;
+            let persisted_ok = if let Some(p) = &self.persist {
+                match p.upsert_torrent(cand_row.clone(), new_files.clone()).await {
+                    Ok(_) => true,
+                    Err(e) => {
+                        warn!(target: "taiji::core::session", gid = %gid, %e,
+                            "rename commit row persist failed; journal kept in mirror for retry");
+                        false
+                    }
                 }
+            } else {
+                true
+            };
+            if persisted_ok {
+                self.rows.insert(key, (cand_row, new_files));
             }
         }
     }

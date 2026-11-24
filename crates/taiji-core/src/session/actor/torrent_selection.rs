@@ -183,7 +183,12 @@ impl SessionActor {
         cfg.selection_pending = false;
         row.config_json = cfg.to_json();
         row.state = TaskPhase::Queued.as_v1_str().into();
-        let files = file_rows(&row.gid, &meta.meta.files);
+        let files = super::super::persist::file_rows_with_face(
+            &row.gid,
+            &meta.meta.files,
+            selected.as_deref(),
+            cfg.file_priorities.as_deref(),
+        );
         // This acknowledgement is a commit boundary. Never start payload IO
         // or expose new paths if the durable write fails.
         if let Some(persist) = &self.persist {

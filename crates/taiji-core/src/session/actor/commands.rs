@@ -1687,14 +1687,9 @@ impl SessionActor {
 
     // ---- Scheduler policy switch face (taiji.set/getSchedulerPolicy) ----
 
-    /// taiji.setSchedulerPolicy: support validation (rarest_first/
-    /// streaming are configurable; sequential is unimplemented and
-    /// fails explicitly, sharing the engine-side text) -> torrent job
-    /// mirror update -> atomic `SetSchedulerPolicy` policy-object swap
-    /// on the running engine (waits for the engine receipt) ->
-    /// config_json rewrite (survives restart). Metadata tasks
-    /// (magnet/URL fetch) are refused explicitly — same rule as
-    /// changeUri (only the post-upgrade torrent face is editable).
+    /// taiji.setSchedulerPolicy：校验策略受支持与任务类型为 Torrent -> 先持久化 `config_json` ->
+    /// 若任务正在运行则推送至活跃引擎（引擎应用失败时尝试回滚持久化状态，回滚失败则诚实收敛镜像）。
+    /// 元数据阶段任务（magnet/URL fetch）显式拒绝。
     pub(super) async fn set_scheduler_policy(
         &mut self,
         raw_gid: String,
@@ -1712,15 +1707,30 @@ impl SessionActor {
                 "taiji.setSchedulerPolicy: requires a torrent task (GID#{gid})"
             )));
         }
-        if let Some(engine) = self.running.get(&gid).and_then(|t| t.backend.engine()) {
-            engine.set_scheduler_policy(policy.clone()).await?;
-        }
-        if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
-            tj.scheduler_policy = policy.clone();
-        }
-        self.persist_refresh_config(gid).await;
+        let mut cand_cfg = self.job_config(&gid);
+        cand_cfg.scheduler_policy =
+            (policy != crate::engine::SchedulerPolicy::default()).then_some(policy.clone());
+        let prev_row = self.rows.get(&gid.to_string()).cloned();
+        let committed_row = self
+            .persist_torrent_candidate(gid, &cand_cfg, None, None)
+            .await?;
+        let policy_for_engine = policy.clone();
+        let policy_for_mirror = policy.clone();
+        self.finish_live_torrent_commit(
+            "taiji.setSchedulerPolicy",
+            gid,
+            prev_row,
+            committed_row,
+            |engine| async move { engine.set_scheduler_policy(policy_for_engine).await },
+            |actor| {
+                if let Some(Job::Torrent(tj)) = actor.jobs.get_mut(&gid) {
+                    tj.scheduler_policy = policy_for_mirror;
+                }
+            },
+        )
+        .await?;
         info!(target: "taiji::core::session", gid = %gid, policy = policy.name(),
-            "scheduler policy updated ");
+            "scheduler policy updated");
         Ok(CommandReply::Accepted)
     }
 
@@ -1737,150 +1747,69 @@ impl SessionActor {
         Ok(CommandReply::SchedulerPolicy { policy })
     }
 
-    /// taiji.setFilePriority: partial update of per-file priority
-    /// levels as decided pairs (unlisted files untouched). Validation
-    /// order — everything before any mirror change, so a rejected call
-    /// has zero side effects: gid resolution -> torrent gate
-    /// (magnet/URL metadata and HTTP = explicit Err, the file face
-    /// belongs to torrent jobs) -> pairs parse (1-based -> 0-based,
-    /// level domain -1..=7, duplicate and out-of-range indexes explicit
-    /// Err; file count = metadata non-padding entries) -> sparse-table
-    /// merge simulation + selection-face recomputation (-1 removes,
-    /// 0..=7 includes; the priority table is the single truth and
-    /// selected_files its projection) -> an empty selection is an
-    /// explicit Err (the engine rejects an empty mask with the same
-    /// meaning). After validation: live push to the active engine
-    /// (SetFileSelection + SetFilePriority as a pair — skip face and
-    /// selection order change together) -> mirror rewrite ->
-    /// config_json rewrite (survives restart). Waiting/paused tasks
-    /// have no engine = mirror + persistence only (pushed at
-    /// activation, same shape as the select-file Reserved face).
+    /// taiji.setFilePriority：基于当前单一权威文件策略执行局部更新（未列出文件保留原选中状态与等级）：
+    /// 1. 前置校验（GID、Torrent 类型、1-based 非 padding 索引范围、等级 `-1..=7`、去重、非空选择集）；
+    /// 2. 先将规范化后的 `config_json` 与 `torrent_file` 投影行持久化落盘；
+    /// 3. 若引擎活跃，以单条原子命令 `EngineCommand::SetFilePolicy` 同步切换掩码与优先级表（失败则回滚或诚实收敛）。
     pub(super) async fn set_file_priority(
         &mut self,
         raw_gid: String,
         pairs: Vec<(u32, i8)>,
     ) -> Result<CommandReply, SessionError> {
         let gid = self.resolve_gid(&raw_gid)?;
-        if !matches!(self.jobs.get(&gid), Some(Job::Torrent(_))) {
-            return Err(SessionError::failed(format!(
-                "taiji.setFilePriority: requires a torrent task (GID#{raw_gid})"
-            )));
-        }
-        if pairs.is_empty() {
-            return Err(SessionError::failed(
-                "taiji.setFilePriority: empty priority table",
-            ));
-        }
-        let real_count = {
+        let (next_policy, cand_files) = {
             let Some(Job::Torrent(tj)) = self.jobs.get(&gid) else {
-                // The gate above passed; a refetch miss means the
-                // invariant broke — fail explicitly, never panic.
                 return Err(SessionError::failed(format!(
-                    "taiji.setFilePriority: task GID#{raw_gid} is not a torrent job"
+                    "taiji.setFilePriority: requires a torrent task (GID#{raw_gid})"
                 )));
             };
-            tj.metainfo.meta.files.iter().filter(|f| !f.padding).count() as u32
+            let real_count =
+                super::file_policy::FilePolicy::real_file_count(&tj.metainfo.meta.files);
+            let current = super::file_policy::FilePolicy::from_job(
+                real_count,
+                tj.selected_files.as_deref(),
+                tj.file_priorities.as_deref(),
+            );
+            let next = current.apply_priority_patch(&pairs)?;
+            let next_sel = next.selected_files();
+            let next_prio = next.file_priorities();
+            let rows = super::super::persist::file_rows_with_face(
+                &gid.to_string(),
+                &tj.metainfo.meta.files,
+                next_sel.as_deref(),
+                next_prio.as_deref(),
+            );
+            (next, rows)
         };
-        // 1-based -> 0-based + domain validation + duplicate rejection
-        // (the same three tightenings as the select-file parse:
-        // illegal input is rejected explicitly, never silently
-        // absorbed).
-        let mut patch: Vec<(u32, i8)> = Vec::with_capacity(pairs.len());
-        // Duplicate check via HashSet (removes the O(p^2) patch
-        // scan).
-        let mut patch_seen: std::collections::HashSet<u32> =
-            std::collections::HashSet::with_capacity(pairs.len());
-        for (index, level) in pairs {
-            if index == 0 || index > real_count {
-                return Err(SessionError::failed(format!(
-                    "taiji.setFilePriority: file index {index} out of range ({real_count} files)"
-                )));
-            }
-            if !(-1..=7).contains(&level) {
-                return Err(SessionError::failed(format!(
-                    "taiji.setFilePriority: priority {level} out of range (-1..=7)"
-                )));
-            }
-            let zero_based = index - 1;
-            if !patch_seen.insert(zero_based) {
-                return Err(SessionError::failed(format!(
-                    "taiji.setFilePriority: duplicate file index {index}"
-                )));
-            }
-            patch.push((zero_based, level));
-        }
-        // Merge simulation + selection recompute (validate before
-        // mutate — a rejected call leaves no side effects). Both the
-        // merge and the selection recompute are HashMap-based (removes
-        // the O(p*t + n*t) linear scans on the RPC hot path of
-        // large-file tasks).
-        let (merged, selection) = {
-            let Some(Job::Torrent(tj)) = self.jobs.get(&gid) else {
-                // Same defensive face as the real_count refetch: the
-                // gate above passed, so a miss here fails explicitly.
-                return Err(SessionError::failed(format!(
-                    "taiji.setFilePriority: task GID#{raw_gid} is not a torrent job"
-                )));
-            };
-            let mut table: Vec<(u32, i8)> = tj.file_priorities.clone().unwrap_or_default();
-            let mut table_map: std::collections::HashMap<u32, i8> = table.iter().copied().collect();
-            for (i, q) in &patch {
-                table_map.insert(*i, *q);
-            }
-            table = table_map.iter().map(|(&i, &q)| (i, q)).collect();
-            table.sort_by_key(|(i, _)| *i);
-            let selected: Vec<u32> = (0..real_count)
-                .filter(|i| table_map.get(i).is_none_or(|&q| q != -1))
-                .collect();
-            if selected.is_empty() {
-                return Err(SessionError::failed(
-                    "taiji.setFilePriority: all files skipped (empty selection)",
-                ));
-            }
-            (table, selected)
-        };
-        // Live push to the active engine (selection + priority as a
-        // pair; the engine re-validates defensively). Engine offline
-        // (waiting/paused) = pushed at activation.
-        if let Some(engine) = self.running.get(&gid).and_then(|t| t.backend.engine()) {
-            engine
-                .set_file_selection(Arc::from(selection.as_slice()))
-                .await?;
-            let sparse: Vec<(u32, i8)> = merged.iter().filter(|&(_, q)| q != &0).copied().collect();
-            let push = if sparse.is_empty() {
-                // All levels fall back to 0 = the default face (the
-                // engine rejects an empty table, so a single (0,0)
-                // placeholder expresses "clear priorities"; the
-                // engine's all-zero default reads the same).
-                vec![(0u32, 0i8)]
-            } else {
-                sparse
-            };
-            engine.set_file_priority(Arc::from(push.as_slice())).await?;
-        }
-        if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
-            // Single truth = the priority table; selected_files is its
-            // projection (-1 = removed).
-            let sparse: Vec<(u32, i8)> = merged.iter().filter(|&(_, q)| q != &0).copied().collect();
-            tj.file_priorities = (!sparse.is_empty()).then_some(sparse);
-            tj.selected_files = Some(selection);
-        }
-        // Row projection sync (torrent_file.selected/priority columns
-        // rewrite with the mirror; config_json is the single truth and
-        // the row columns are the externally visible projection).
-        let key = gid.to_string();
-        if let Some(Job::Torrent(tj)) = self.jobs.get(&gid) {
-            if let Some((_, files)) = self.rows.get_mut(&key) {
-                *files = super::super::persist::file_rows_with_face(
-                    &key,
-                    &tj.metainfo.meta.files,
-                    tj.selected_files.as_deref(),
-                    tj.file_priorities.as_deref(),
-                );
-            }
-        }
-        self.persist_refresh_config(gid).await;
-        info!(target: "taiji::core::session", gid = %gid, entries = patch.len(),
+
+        let next_sel = next_policy.selected_files();
+        let next_prio = next_policy.file_priorities();
+        let mut cand_cfg = self.job_config(&gid);
+        cand_cfg.selected_files = next_sel.clone();
+        cand_cfg.file_priorities = next_prio.clone();
+
+        let prev_row = self.rows.get(&gid.to_string()).cloned();
+        let committed_row = self
+            .persist_torrent_candidate(gid, &cand_cfg, None, Some(cand_files))
+            .await?;
+
+        let eng_sel = next_policy.engine_selection();
+        let eng_prio = next_policy.engine_priority();
+        self.finish_live_torrent_commit(
+            "taiji.setFilePriority",
+            gid,
+            prev_row,
+            committed_row,
+            |engine| async move { engine.set_file_policy(eng_sel, eng_prio).await },
+            |actor| {
+                if let Some(Job::Torrent(tj)) = actor.jobs.get_mut(&gid) {
+                    tj.selected_files = next_sel;
+                    tj.file_priorities = next_prio;
+                }
+            },
+        )
+        .await?;
+        info!(target: "taiji::core::session", gid = %gid, entries = pairs.len(),
             "file priority updated");
         Ok(CommandReply::Accepted)
     }
@@ -1968,13 +1897,27 @@ impl SessionActor {
                 "taiji.setDiskTier: requires a torrent task (GID#{gid})"
             )));
         }
-        if let Some(engine) = self.running.get(&gid).and_then(|t| t.backend.engine()) {
-            engine.set_disk_policy(tier.policy()).await?;
-        }
-        if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
-            tj.disk_tier = Some(tier.name().to_string());
-        }
-        self.persist_refresh_config(gid).await;
+        let tier_name = tier.name().to_string();
+        let mut cand_cfg = self.job_config(&gid);
+        cand_cfg.disk_tier = Some(tier_name.clone());
+        let prev_row = self.rows.get(&gid.to_string()).cloned();
+        let committed_row = self
+            .persist_torrent_candidate(gid, &cand_cfg, None, None)
+            .await?;
+        let policy = tier.policy();
+        self.finish_live_torrent_commit(
+            "taiji.setDiskTier",
+            gid,
+            prev_row,
+            committed_row,
+            |engine| async move { engine.set_disk_policy(policy).await },
+            |actor| {
+                if let Some(Job::Torrent(tj)) = actor.jobs.get_mut(&gid) {
+                    tj.disk_tier = Some(tier_name);
+                }
+            },
+        )
+        .await?;
         info!(target: "taiji::core::session", gid = %gid, tier = tier.name(),
             "disk tier updated (live io-gate/flush/merge for running engine, \
              prealloc applies to new allocations only)");
@@ -2787,11 +2730,176 @@ impl SessionActor {
         } else {
             None
         };
-        // Active-task per-task rate limit applies live (direct
-        // translation of setMaxDownload/UploadSpeedLimit,
-        // RpcMethodImpl.cc) — set_rate changes the shared bucket
-        // atomically and Throttled streams see it immediately (ahead of
-        // the restart convergence).
+        // 预计算并先执行持久化提交：在 DB 接受写入之前，绝不修改内存镜像、限速器、DHT 或取消活跃任务。
+        let mut torrent_next_policy: Option<super::file_policy::FilePolicy> = None;
+        let mut committed_torrent_row: Option<super::config_commit::CommittedTorrentRow> = None;
+        let mut http_cand_restore: Option<taiji_store::persist::HttpTaskRow> = None;
+        let mut http_cand_mirror: Option<taiji_store::persist::HttpTaskRow> = None;
+        let is_live_torrent = self.queue.contains_active(gid) || self.queue.contains_seeding(gid);
+        match self.jobs.get(&gid) {
+            Some(Job::Torrent(tj)) => {
+                let mut cand_cfg = self.job_config(&gid);
+                let mut next_dir: Option<String> = None;
+                if let Some(dir) = &patch.dir
+                    && !is_live_torrent
+                {
+                    let dir_text = dir.display().to_string();
+                    cand_cfg.dir = dir_text.clone();
+                    next_dir = Some(dir_text);
+                }
+                if let Some(r) = patch.seed_ratio {
+                    cand_cfg.seed_ratio = r;
+                }
+                if let Some(m) = patch.seed_time_min
+                    && let Some(d) = seed_duration_from_minutes(m)
+                {
+                    cand_cfg.seed_time_min = d.as_secs_f64() / 60.0;
+                }
+                if let Some(m) = patch.max_download_limit {
+                    cand_cfg.max_download_limit = m;
+                }
+                if let Some(m) = patch.max_upload_limit {
+                    cand_cfg.max_upload_limit = m;
+                }
+                let mut next_files = None;
+                if let Some(sel) = select_file_sel.clone() {
+                    let real_count =
+                        super::file_policy::FilePolicy::real_file_count(&tj.metainfo.meta.files);
+                    let cur = super::file_policy::FilePolicy::from_job(
+                        real_count,
+                        tj.selected_files.as_deref(),
+                        tj.file_priorities.as_deref(),
+                    );
+                    let next = cur.apply_select_file(sel)?;
+                    let next_sel = next.selected_files();
+                    let next_prio = next.file_priorities();
+                    cand_cfg.selected_files = next_sel.clone();
+                    cand_cfg.file_priorities = next_prio.clone();
+                    next_files = Some(super::super::persist::file_rows_with_face(
+                        &gid.to_string(),
+                        &tj.metainfo.meta.files,
+                        next_sel.as_deref(),
+                        next_prio.as_deref(),
+                    ));
+                    torrent_next_policy = Some(next);
+                }
+                if let Some(v) = patch.bt_disable_dht {
+                    cand_cfg.bt_disable_dht = Some(v);
+                }
+                if let Some(v) = patch.enable_http_seeding {
+                    cand_cfg.enable_http_seeding = Some(v);
+                }
+                let mut next_sched = tj.scheduler_policy.clone();
+                super::super::preview_options::apply(&mut next_sched, &patch);
+                cand_cfg.scheduler_policy =
+                    (next_sched != crate::engine::SchedulerPolicy::default()).then_some(next_sched);
+                committed_torrent_row = self
+                    .persist_torrent_candidate(gid, &cand_cfg, next_dir.as_deref(), next_files)
+                    .await?;
+            }
+            Some(Job::Magnet(mj)) => {
+                let mut cand_cfg = self.job_config(&gid);
+                if let Some(r) = patch.seed_ratio {
+                    cand_cfg.seed_ratio = r;
+                }
+                if let Some(m) = patch.seed_time_min
+                    && let Some(d) = seed_duration_from_minutes(m)
+                {
+                    cand_cfg.seed_time_min = d.as_secs_f64() / 60.0;
+                }
+                if let Some(m) = patch.max_download_limit {
+                    cand_cfg.max_download_limit = m;
+                }
+                if let Some(m) = patch.max_upload_limit {
+                    cand_cfg.max_upload_limit = m;
+                }
+                if let Some(sel) = select_file_sel.clone() {
+                    cand_cfg.selected_files = Some(sel);
+                }
+                if let Some(v) = patch.bt_disable_dht {
+                    cand_cfg.bt_disable_dht = Some(v);
+                }
+                if let Some(v) = patch.enable_http_seeding {
+                    cand_cfg.enable_http_seeding = Some(v);
+                }
+                let mut next_sched = mj.scheduler_policy.clone();
+                super::super::preview_options::apply(&mut next_sched, &patch);
+                cand_cfg.scheduler_policy =
+                    (next_sched != crate::engine::SchedulerPolicy::default()).then_some(next_sched);
+                let mut next_mopts = mj.options.clone();
+                apply_magnet_patch(&mut next_mopts, &patch);
+                cand_cfg.magnet_flags = Some(crate::session::persist::PersistedMagnetFlags::from(
+                    &next_mopts,
+                ));
+                committed_torrent_row = self
+                    .persist_torrent_candidate(gid, &cand_cfg, None, None)
+                    .await?;
+            }
+            Some(Job::Http(hj)) => {
+                let mut cand_restore = hj.restore.clone();
+                let mut cand_mirror = hj.mirror.as_ref().map(|m| crate::lock(m).clone());
+                let mut row_dirty = false;
+                if let Some(dir) = &patch.dir
+                    && !self.queue.contains_active(gid)
+                {
+                    let dir_text = dir.display().to_string();
+                    if let Some(r) = cand_restore.as_mut() {
+                        r.dir = dir_text.clone();
+                        row_dirty = true;
+                    }
+                    if let Some(m) = cand_mirror.as_mut() {
+                        m.dir = dir_text;
+                        row_dirty = true;
+                    }
+                }
+                if let Some((cfg, opts, sched)) = &http_apply {
+                    let mut cand_opts = opts.clone();
+                    if let Some(v) = sched.split {
+                        cand_opts.split = v;
+                    }
+                    if let Some(v) = sched.min_split_size {
+                        cand_opts.min_split_size = v;
+                    }
+                    if let Some(v) = sched.max_conn_per_server {
+                        cand_opts.max_conn_per_server = v;
+                    }
+                    if let Some(v) = sched.stall_window {
+                        cand_opts.stall_window = v;
+                    }
+                    if let Some(v) = sched.scheduler {
+                        cand_opts.scheduler = v;
+                    }
+                    if let Some(v) = sched.max_chunk {
+                        cand_opts.max_chunk = v;
+                    }
+                    if let Some(r) = cand_restore.as_mut() {
+                        http_overlay_persist_config(r, cfg);
+                        if sched.split.is_some() || sched.max_conn_per_server.is_some() {
+                            http_overlay_concurrency(r, &cand_opts);
+                        }
+                        row_dirty = true;
+                    }
+                    if let Some(m) = cand_mirror.as_mut() {
+                        http_overlay_persist_config(m, cfg);
+                        if sched.split.is_some() || sched.max_conn_per_server.is_some() {
+                            http_overlay_concurrency(m, &cand_opts);
+                        }
+                        row_dirty = true;
+                    }
+                }
+                if row_dirty {
+                    let row_to_persist = cand_mirror.as_ref().or(cand_restore.as_ref());
+                    if let Some(row) = row_to_persist {
+                        self.persist_http_candidate(row).await?;
+                    }
+                    http_cand_restore = cand_restore;
+                    http_cand_mirror = cand_mirror;
+                }
+            }
+            Some(Job::Media(_)) | Some(Job::TorrentUrl { .. }) | None => {}
+        }
+
+        // 持久化已成功：现在同步内存镜像、活跃限速器、DHT 热推与重启标记。
         let live_limiter = self.running.get(&gid).and_then(|t| t.limiter.clone());
         if let Some(limiter) = live_limiter {
             if let Some(m) = patch.max_download_limit {
@@ -2801,26 +2909,19 @@ impl SessionActor {
                 limiter.per_torrent.up.set_rate(m);
             }
         }
-        let mut http_row_snapshot: Option<taiji_store::persist::HttpTaskRow> = None;
         // bt-disable-dht change flag (set inside the match, pushed
         // outside it — the borrow phase split).
         let mut dht_flag_changed = false;
         match self.jobs.get_mut(&gid) {
             Some(Job::Torrent(tj)) => {
-                // dir applies only to never-activated tasks (aria2
-                // reserved face; a seeding residence is activated too).
                 if let Some(dir) = &patch.dir {
-                    if !(self.queue.contains_active(gid) || self.queue.contains_seeding(gid)) {
+                    if !is_live_torrent {
                         tj.dir = dir.clone();
                     }
                 }
                 if let Some(r) = patch.seed_ratio {
                     tj.seed.seed_ratio = r;
                 }
-                // Out-of-domain value = invalid: skip this seed change
-                // (keep the current value) and warn, no panic (the
-                // parse face catches extremes; this is the conversion
-                // backstop).
                 if let Some(m) = patch.seed_time_min {
                     match seed_duration_from_minutes(m) {
                         Some(d) => tj.seed.seed_time = d,
@@ -2829,52 +2930,23 @@ impl SessionActor {
                             "changeOption seed-time out of range; ignored"),
                     }
                 }
-                // Per-task rate limits into the payload
-                // (restart/reactivation path).
                 if let Some(m) = patch.max_download_limit {
                     tj.max_download_limit = m;
                 }
                 if let Some(m) = patch.max_upload_limit {
                     tj.max_upload_limit = m;
                 }
-                // bt-max-peers / max-connection: numbers land in the
-                // payload; live connection management hangs off the
-                // engine constant seam (MIN_PEERS) with the query
-                // seam.
-                //
-                // select-file (validated up front): recompute selection
-                // into the job mirror -> config_json via
-                // persist_refresh_config below -> SetFileSelection
-                // replay on reactivation (the activate consumer).
-                if let Some(sel) = select_file_sel {
-                    tj.selected_files = Some(sel);
+                if let Some(next_policy) = torrent_next_policy {
+                    tj.selected_files = next_policy.selected_files();
+                    tj.file_priorities = next_policy.file_priorities();
                 }
-                // bt-disable-dht: the flag enters the job mirror
-                // (persist_refresh_config below lands config_json —
-                // same source as restart restore). Hot push happens
-                // outside the match (borrow phase split;
-                // push_dht_task_change needs &mut self): libtorrent
-                // set_flags runtime-flip semantics; an explicit false
-                // forces it back on (recomposed with the session
-                // face).
                 if let Some(v) = patch.bt_disable_dht {
                     tj.bt_disable_dht = Some(v);
                     dht_flag_changed = true;
                 }
-                // enable-http-seeding (BEP19): the switch enters the
-                // job mirror (config_json via persist_refresh_config
-                // below — same source as restart restore). Effect =
-                // restart semantics (active tasks pause + reactivate
-                // below; build_engine_config clears the webseed set);
-                // no live engine push exists for webseeding.
                 if let Some(v) = patch.enable_http_seeding {
                     tj.enable_http_seeding = Some(v);
                 }
-                // bt-sequential-download: project onto the policy in
-                // the mirror (live switching on active tasks goes
-                // through taiji.setSchedulerPolicy; this key shares the
-                // select-file gate: explicit rejection on active tasks,
-                // above).
                 super::super::preview_options::apply(&mut tj.scheduler_policy, &patch);
             }
             Some(Job::Magnet(mj)) => {
@@ -2896,8 +2968,6 @@ impl SessionActor {
                 if let Some(r) = patch.seed_ratio {
                     mj.seed.seed_ratio = r;
                 }
-                // Out-of-domain values skip the seed change (same as
-                // the Torrent arm).
                 if let Some(m) = patch.seed_time_min {
                     match seed_duration_from_minutes(m) {
                         Some(d) => mj.seed.seed_time = d,
@@ -2906,104 +2976,42 @@ impl SessionActor {
                             "changeOption seed-time out of range; ignored"),
                     }
                 }
-                // Per-task rate limits into the payload.
                 if let Some(m) = patch.max_download_limit {
                     mj.max_download_limit = m;
                 }
                 if let Some(m) = patch.max_upload_limit {
                     mj.max_upload_limit = m;
                 }
-                // select-file (validated up front; metadata unknown so
-                // range validation defers to the upgrade chain): the
-                // value enters the job mirror -> config_json (the
-                // effective_magnet_selection merge point) -> replayed
-                // by the upgrade chain via MagnetTaskConfig.
                 if let Some(sel) = select_file_sel {
                     mj.selected_files = Some(sel);
                 }
-                // bt-disable-dht: the flag enters the mirror (gates the
-                // next activation of the metadata phase; after upgrade
-                // the engine gets the hot push — the phase holds no
-                // engine handle, the upgrade chain consumes it). Hot
-                // push outside the match (borrow phase split).
                 if let Some(v) = patch.bt_disable_dht {
                     mj.bt_disable_dht = Some(v);
                     dht_flag_changed = true;
                 }
-                // enable-http-seeding (BEP19): the switch enters the
-                // mirror (consumed by the upgrade chain via
-                // MagnetTaskConfig.webseeding_enabled; the metadata
-                // phase has no webseed face and no hot-push arm —
-                // restart semantics backstops, as in the torrent
-                // arm).
                 if let Some(v) = patch.enable_http_seeding {
                     mj.enable_http_seeding = Some(v);
                 }
-                // bt-sequential-download: policy projection into the
-                // mirror (carried by job_config through the upgrade
-                // chain; the metadata phase holds no engine handle).
                 super::super::preview_options::apply(&mut mj.scheduler_policy, &patch);
                 apply_magnet_patch(&mut mj.options, &patch);
             }
             Some(Job::Http(hj)) => {
-                // Whole-set seed replacement (load-cookies changeOption
-                // face, validated up front): the next activation seeds
-                // the task store (running tasks pick it up on
-                // reactivation via restart semantics).
                 if let Some(seed) = cookie_seed_replace.take() {
                     hj.cookie_seed = seed;
                 }
-                // Per-task rate limits into the payload (consumed by
-                // restart/reactivation); live application matches the
-                // torrent arm (shared LimiterSet).
                 if let Some(m) = patch.max_download_limit {
                     hj.max_download_limit = m;
                 }
                 if let Some(m) = patch.max_upload_limit {
                     hj.max_upload_limit = m;
                 }
-                // dir applies only to never-activated tasks (aria2
-                // reserved face, same as the torrent branch). The row
-                // (restore/mirror) follows: the task's own storage
-                // face trusts the row dir, and a driver-created .part
-                // lands under run.dir anyway — a split would send a
-                // later moveStorage journal at the wrong dir.
                 if let Some(dir) = &patch.dir
                     && !self.queue.contains_active(gid)
                 {
                     hj.dir = dir.clone();
-                    let dir_text = dir.display().to_string();
-                    if let Some(row) = hj.restore.as_mut() {
-                        row.dir = dir_text.clone();
-                        http_row_snapshot = Some(row.clone());
-                    }
-                    if let Some(m) = &hj.mirror {
-                        crate::lock(m).dir = dir_text.clone();
-                        http_row_snapshot = Some(crate::lock(m).clone());
-                    }
                 }
-                // Apply legal values for known HTTP options (validated
-                // up front): the runtime family (read by
-                // restart/reactivation) + the persist family (row
-                // config_json rewrite — absent keys were baseline-merged
-                // in the parse face, so a whole payload overwrite is
-                // safe). Row persistence is deferred outside the match
-                // (borrow phase split).
-                if let Some((cfg, opts, sched)) = &http_apply {
+                if let Some((_, opts, sched)) = &http_apply {
                     hj.opts = opts.clone();
-                    for row in hj.restore.iter_mut() {
-                        http_overlay_persist_config(row, cfg);
-                    }
-                    if let Some(m) = &hj.mirror {
-                        let mut guard = crate::lock(m);
-                        http_overlay_persist_config(&mut guard, cfg);
-                        http_row_snapshot = Some(guard.clone());
-                    }
-                    // Scheduler parameter family: applies via the
-                    // existing restart semantics (merge, requeue at the
-                    // head, reactivate — bitmap progress survives; the
-                    // AIMD ring rebuilds the connection ring with the
-                    // new caps).
                     if let Some(v) = sched.split {
                         hj.opts.split = v;
                     }
@@ -3020,35 +3028,19 @@ impl SessionActor {
                         hj.opts.scheduler = v;
                     }
                     if let Some(v) = sched.max_chunk {
-                        // Cross-key domain check already ran
-                        // (http_apply construction); plain assignment
-                        // here.
                         hj.opts.max_chunk = v;
                     }
-                    // Concurrency intent sync: split/cap changes
-                    // persist with the row so recovery after a restart
-                    // starts from the latest effective values (same
-                    // source as hj.opts; replayed by bootstrap_http).
-                    if sched.split.is_some() || sched.max_conn_per_server.is_some() {
-                        for row in hj.restore.iter_mut() {
-                            http_overlay_concurrency(row, &hj.opts);
-                        }
-                        if let Some(m) = &hj.mirror {
-                            let mut guard = crate::lock(m);
-                            http_overlay_concurrency(&mut guard, &hj.opts);
-                            http_row_snapshot = Some(guard.clone());
-                        }
-                    }
+                }
+                if let Some(row) = http_cand_restore {
+                    hj.restore = Some(row);
+                }
+                if let Some(row) = http_cand_mirror
+                    && let Some(m) = &hj.mirror
+                {
+                    *crate::lock(m) = row;
                 }
             }
             Some(Job::Media(mj)) => {
-                // Media waiting/paused/error-resident tasks: the
-                // selector + template keys re-arm the next
-                // Resolving pass (§3.2: Error -> unpause/change selector
-                // -> Resolving re-resolution). Active tasks take effect
-                // via the shared restart semantics below (cancel +
-                // requeue -> re-resolve). dir applies to never-activated
-                // tasks (the aria2 reserved face).
                 if let Some(dir) = &patch.dir
                     && !self.queue.contains_active(gid)
                 {
@@ -3066,12 +3058,7 @@ impl SessionActor {
             }
             Some(Job::TorrentUrl { .. }) | None => {}
         }
-        if let Some(row) = http_row_snapshot {
-            self.persist_http_row(&row).await;
-        }
-        // bt-disable-dht change -> immediate hot push on active tasks
-        // (ahead of the restart backstop — engine SetDhtEnabled goes
-        // live without tearing down connections).
+        self.commit_torrent_row_mirror(gid, committed_torrent_row);
         if dht_flag_changed {
             self.push_dht_task_change(gid).await;
         }
@@ -3086,7 +3073,6 @@ impl SessionActor {
                 t.token.cancel();
             }
         }
-        self.persist_refresh_config(gid).await;
         Ok(CommandReply::Accepted)
     }
 
@@ -3403,31 +3389,22 @@ impl SessionActor {
             return Err(SessionError::failed("fileIndex is out of range"));
         }
 
-        // BT face: the task webseed ledger.
-        if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
+        // BT 分支：先落盘候选 webseed 账本，落盘成功后才更新镜像与触发活跃任务重启。
+        if let Some(Job::Torrent(tj)) = self.jobs.get(&gid) {
             let (ledger, deleted, added) =
                 edit_uri_ledger(&tj.webseeds, &del_uris, &add_uris, pos, is_webseed_url);
             if deleted == 0 && added == 0 {
                 return Ok(CommandReply::UriChange { deleted, added });
             }
-            let new_ledger = ledger.clone();
-            tj.webseeds = ledger;
-            // Persist the authoritative ledger into the row mirror
-            // first (job_config reads the face back from there), then
-            // refresh config_json.
-            let key = gid.to_string();
-            if let Some((row, _)) = self.rows.get_mut(&key) {
-                let mut cfg = PersistedTaskConfig::from_json(&row.config_json);
-                cfg.webseeds = Some(new_ledger);
-                row.config_json = cfg.to_json();
+            let mut cand_cfg = self.job_config(&gid);
+            cand_cfg.webseeds = Some(ledger.clone());
+            let committed_row = self
+                .persist_torrent_candidate(gid, &cand_cfg, None, None)
+                .await?;
+            if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
+                tj.webseeds = ledger;
             }
-            self.persist_refresh_config(gid).await;
-            // Active tasks re-project through the changeOption restart
-            // face (pause → teardown → requeue at the front → the
-            // activation chain rebuilds the engine with the new
-            // webseed set). Other residences apply at their next
-            // activation; seeding/checking need no interruption (a
-            // complete task has no webseed fetches in flight).
+            self.commit_torrent_row_mirror(gid, committed_row);
             if self.queue.contains_active(gid) && self.queue.request_pause(gid) {
                 if let Some(rec) = self.queue.active_record_mut(gid) {
                     rec.restart_requested = true;
@@ -3440,42 +3417,41 @@ impl SessionActor {
             return Ok(CommandReply::UriChange { deleted, added });
         }
 
-        // HTTP face: the source list.
-        if let Some(Job::Http(hj)) = self.jobs.get_mut(&gid) {
+        // HTTP 分支：先构造候选 HttpTaskRow 落盘，失败则零污染内存镜像与活跃任务。
+        if let Some(Job::Http(hj)) = self.jobs.get(&gid) {
             let (uris, deleted, added) =
                 edit_uri_ledger(&hj.uris, &del_uris, &add_uris, pos, is_download_uri);
             if deleted == 0 && added == 0 {
                 return Ok(CommandReply::UriChange { deleted, added });
             }
-            hj.uris = uris;
-            // Row follow: `url` = the new first source, mirrors_json =
-            // the new manifest (restart recovery reads them through
-            // uris_from_mirrors); the restore/mirror rows keep in step
-            // with the same values.
-            let url = hj.uris.first().cloned().unwrap_or_default();
-            let mirrors = http_task::mirrors_json_of(&hj.uris);
-            if let Some(row) = hj.restore.as_mut() {
+            let url = uris.first().cloned().unwrap_or_default();
+            let mirrors = http_task::mirrors_json_of(&uris);
+            let mut cand_restore = hj.restore.clone();
+            if let Some(row) = cand_restore.as_mut() {
                 row.url = url.clone();
                 row.mirrors_json = mirrors.clone();
-                super::http_source_rebind::authorize(row, &hj.uris);
+                super::http_source_rebind::authorize(row, &uris);
             }
-            if let Some(mirror) = hj.mirror.as_ref() {
-                let mut row = crate::lock(mirror);
-                row.url = url.clone();
-                row.mirrors_json = mirrors.clone();
-                super::http_source_rebind::authorize(&mut row, &hj.uris);
+            let mut cand_mirror = hj.mirror.as_ref().map(|m| crate::lock(m).clone());
+            if let Some(row) = cand_mirror.as_mut() {
+                row.url = url;
+                row.mirrors_json = mirrors;
+                super::http_source_rebind::authorize(row, &uris);
             }
-            if let Some(Job::Http(hj)) = self.jobs.get(&gid) {
-                if let Some(row) = hj.restore.clone() {
-                    self.persist_http_row(&row).await;
+            if let Some(row) = cand_mirror.as_ref().or(cand_restore.as_ref()) {
+                self.persist_http_candidate(row).await?;
+            }
+            if let Some(Job::Http(hj)) = self.jobs.get_mut(&gid) {
+                hj.uris = uris;
+                if let Some(row) = cand_restore {
+                    hj.restore = Some(row);
                 }
-                if let Some(mirror) = hj.mirror.as_ref() {
-                    let row = crate::lock(mirror).clone();
-                    self.persist_http_row(&row).await;
+                if let Some(row) = cand_mirror
+                    && let Some(mirror) = hj.mirror.as_ref()
+                {
+                    *crate::lock(mirror) = row;
                 }
             }
-            // Active tasks re-source through the changeOption restart
-            // face (the driver's source set is fixed at spawn).
             if self.queue.contains_active(gid) && self.queue.request_pause(gid) {
                 if let Some(rec) = self.queue.active_record_mut(gid) {
                     rec.restart_requested = true;
@@ -3522,33 +3498,43 @@ impl SessionActor {
         {
             return Err(SessionError::failed(message));
         }
-        if let Some(t) = self.running.get_mut(&gid) {
-            let (tiers, added) = add_trackers(&t.tiers, &urls, position);
-            if let Some(engine) = t.backend.engine() {
-                engine.set_trackers(tiers.clone()).await?;
-            }
-            t.tiers = tiers.clone();
-            if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
-                tj.tiers = tiers;
-                self.persist_refresh_config(gid).await;
-            }
+        let current_tiers = if let Some(t) = self.running.get(&gid) {
+            t.tiers.clone()
+        } else if let Some(Job::Torrent(tj)) = self.jobs.get(&gid) {
+            tj.tiers.clone()
+        } else {
+            return Err(SessionError::failed(format!(
+                "taiji.addTracker: task GID#{gid} is not editable"
+            )));
+        };
+        let (tiers, added) = add_trackers(&current_tiers, &urls, position);
+        if added == 0 {
             return Ok(CommandReply::TrackerChange { removed: 0, added });
         }
-        match self.jobs.get_mut(&gid) {
-            Some(Job::Torrent(tj)) => {
-                let (tiers, added) = add_trackers(&tj.tiers, &urls, position);
-                tj.tiers = tiers;
-                self.persist_refresh_config(gid).await;
-                Ok(CommandReply::TrackerChange { removed: 0, added })
-            }
-            // The gate only passes torrent payloads; this arm is
-            // normally unreachable (activation/teardown and command
-            // handling never overlap in the single-threaded actor) —
-            // defensive, fails explicitly.
-            _ => Err(SessionError::failed(format!(
-                "taiji.addTracker: task GID#{gid} is not editable"
-            ))),
-        }
+        let mut cand_cfg = self.job_config(&gid);
+        cand_cfg.tiers = tiers.clone();
+        let prev_row = self.rows.get(&gid.to_string()).cloned();
+        let committed_row = self
+            .persist_torrent_candidate(gid, &cand_cfg, None, None)
+            .await?;
+        let tiers_for_engine = tiers.clone();
+        self.finish_live_torrent_commit(
+            "taiji.addTracker",
+            gid,
+            prev_row,
+            committed_row,
+            |engine| async move { engine.set_trackers(tiers_for_engine).await },
+            |actor| {
+                if let Some(t) = actor.running.get_mut(&gid) {
+                    t.tiers = tiers.clone();
+                }
+                if let Some(Job::Torrent(tj)) = actor.jobs.get_mut(&gid) {
+                    tj.tiers = tiers;
+                }
+            },
+        )
+        .await?;
+        Ok(CommandReply::TrackerChange { removed: 0, added })
     }
 
     /// taiji.removeTracker: delete by exact URL match (tier cleanup
@@ -3566,31 +3552,43 @@ impl SessionActor {
         {
             return Err(SessionError::failed(message));
         }
-        if let Some(t) = self.running.get_mut(&gid) {
-            let (tiers, removed) = remove_trackers(&t.tiers, &urls);
-            if let Some(engine) = t.backend.engine() {
-                engine.set_trackers(tiers.clone()).await?;
-            }
-            t.tiers = tiers.clone();
-            if let Some(Job::Torrent(tj)) = self.jobs.get_mut(&gid) {
-                tj.tiers = tiers;
-                self.persist_refresh_config(gid).await;
-            }
+        let current_tiers = if let Some(t) = self.running.get(&gid) {
+            t.tiers.clone()
+        } else if let Some(Job::Torrent(tj)) = self.jobs.get(&gid) {
+            tj.tiers.clone()
+        } else {
+            return Err(SessionError::failed(format!(
+                "taiji.removeTracker: task GID#{gid} is not editable"
+            )));
+        };
+        let (tiers, removed) = remove_trackers(&current_tiers, &urls);
+        if removed == 0 {
             return Ok(CommandReply::TrackerChange { removed, added: 0 });
         }
-        match self.jobs.get_mut(&gid) {
-            Some(Job::Torrent(tj)) => {
-                let (tiers, removed) = remove_trackers(&tj.tiers, &urls);
-                tj.tiers = tiers;
-                self.persist_refresh_config(gid).await;
-                Ok(CommandReply::TrackerChange { removed, added: 0 })
-            }
-            // Defensive arm (as in add_tracker — normally unreachable
-            // past the gate).
-            _ => Err(SessionError::failed(format!(
-                "taiji.removeTracker: task GID#{gid} is not editable"
-            ))),
-        }
+        let mut cand_cfg = self.job_config(&gid);
+        cand_cfg.tiers = tiers.clone();
+        let prev_row = self.rows.get(&gid.to_string()).cloned();
+        let committed_row = self
+            .persist_torrent_candidate(gid, &cand_cfg, None, None)
+            .await?;
+        let tiers_for_engine = tiers.clone();
+        self.finish_live_torrent_commit(
+            "taiji.removeTracker",
+            gid,
+            prev_row,
+            committed_row,
+            |engine| async move { engine.set_trackers(tiers_for_engine).await },
+            |actor| {
+                if let Some(t) = actor.running.get_mut(&gid) {
+                    t.tiers = tiers.clone();
+                }
+                if let Some(Job::Torrent(tj)) = actor.jobs.get_mut(&gid) {
+                    tj.tiers = tiers;
+                }
+            },
+        )
+        .await?;
+        Ok(CommandReply::TrackerChange { removed, added: 0 })
     }
 }
 

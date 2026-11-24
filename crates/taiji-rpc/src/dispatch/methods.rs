@@ -900,6 +900,26 @@ pub(crate) async fn execute_session_method(
                 let name = match &shown {
                     Value::String(s) => Some(s.clone()),
                     Value::Object(map) => {
+                        for (k, v) in map {
+                            match k.as_str() {
+                                "policy" => {}
+                                "params" => {
+                                    let empty_ok = match v {
+                                        Value::Null => true,
+                                        Value::Object(inner) => inner.is_empty(),
+                                        _ => false,
+                                    };
+                                    if !empty_ok {
+                                        return Err(RpcError::unsupported_scheduler_policy_field(
+                                            "params",
+                                        ));
+                                    }
+                                }
+                                other => {
+                                    return Err(RpcError::unsupported_scheduler_policy_field(other));
+                                }
+                            }
+                        }
                         map.get("policy").and_then(|v| v.as_str()).map(String::from)
                     }
                     _ => None,

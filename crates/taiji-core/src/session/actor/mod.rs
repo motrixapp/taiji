@@ -3088,7 +3088,9 @@ use views::{group_tiers, random_session_id};
 mod tests;
 
 mod commands;
+mod config_commit;
 mod discovery;
+mod file_policy;
 mod http_output_commands;
 mod http_publication;
 mod http_source_rebind;

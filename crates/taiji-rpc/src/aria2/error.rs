@@ -271,6 +271,13 @@ impl RpcError {
         RpcError::generic(format!("unknown scheduler policy: {shown}"))
     }
 
+    /// `taiji.setSchedulerPolicy` 对象形式收到未知字段或未支持的非空 `params` 时显式拒绝。
+    pub(crate) fn unsupported_scheduler_policy_field(field: &str) -> Self {
+        RpcError::generic(format!(
+            "unsupported scheduler policy field: {field} (only 'policy' and empty 'params' are accepted)"
+        ))
+    }
+
     /// `taiji.setStreamingPlayhead`'s zero-rate rejection (position 3;
     /// the default rate is carried by omitting the parameter).
     pub(crate) fn playhead_bps_zero() -> Self {

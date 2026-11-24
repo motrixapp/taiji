@@ -160,6 +160,8 @@ impl SessionActor {
                 // spawn (selection order takes effect before the first
                 // dispatch round).
                 let file_priorities = tj.file_priorities.clone();
+                let real_file_count =
+                    super::file_policy::FilePolicy::real_file_count(&tj.metainfo.meta.files);
                 // ut_holepunch switch snapshot (taken before the `jobs`
                 // borrow ends).
                 let holepunch_enabled = tj.holepunch;
@@ -403,30 +405,31 @@ impl SessionActor {
                     debug!(target: "taiji::core::session", gid = %gid, %e,
                         "ban config push skipped (engine already down)");
                 }
-                // BEP53: selection pushed at activation (consumed by the
-                // engine before announce connects); an out-of-range or empty
-                // selection = explicit failure → task recorded as error
-                // (silently ignoring is forbidden by the BEP53 surface
-                // design).
-                if let Some(sel) = selected_files {
-                    if let Err(e) = engine.set_file_selection(Arc::from(sel.as_slice())).await {
+                // 原子文件策略下发：合并选择掩码与多级优先级为单条 `SetFilePolicy` 命令，
+                // 避免激活窗口期出现仅选中未应用优先级的中间态；同时保持非法/越界配置显式报错转入 Error 态。
+                if selected_files.is_some() || file_priorities.is_some() {
+                    let has_legacy_skip = selected_files.is_none()
+                        && file_priorities
+                            .as_deref()
+                            .is_some_and(|p| p.iter().any(|&(_, q)| q == -1));
+                    let (eng_sel, eng_prio) = if has_legacy_skip {
+                        let normalized = super::file_policy::FilePolicy::from_job(
+                            real_file_count,
+                            None,
+                            file_priorities.as_deref(),
+                        );
+                        (normalized.engine_selection(), normalized.engine_priority())
+                    } else {
+                        let sel: Option<Arc<[u32]>> = selected_files.as_deref().map(Arc::from);
+                        let prio: Arc<[(u32, i8)]> = file_priorities
+                            .as_deref()
+                            .map(Arc::from)
+                            .unwrap_or_else(|| Arc::from(&[][..]));
+                        (sel, prio)
+                    };
+                    if let Err(e) = engine.set_file_policy(eng_sel, eng_prio).await {
                         warn!(target: "taiji::core::session", gid = %gid, %e,
-                            "file selection rejected; task recorded as error");
-                        let entry =
-                            self.build_result_entry(gid, StatusKind::Error, total_len, 0, None);
-                        self.queue.retire_active(gid, entry);
-                        self.jobs.remove(&gid);
-                        return;
-                    }
-                }
-                // Priority face pushed at activation (a projection
-                // validation failure is handled like the selection face —
-                // the restored payload already passed write-side validation,
-                // so this is a defensive explicit failure, never silent).
-                if let Some(pr) = file_priorities {
-                    if let Err(e) = engine.set_file_priority(Arc::from(pr.as_slice())).await {
-                        warn!(target: "taiji::core::session", gid = %gid, %e,
-                            "file priority rejected; task recorded as error");
+                            "file policy rejected; task recorded as error");
                         let entry =
                             self.build_result_entry(gid, StatusKind::Error, total_len, 0, None);
                         self.queue.retire_active(gid, entry);
@@ -1896,7 +1899,12 @@ impl SessionActor {
             &cfg,
         );
         super::super::persist::fill_torrent_identity(&mut row, &meta, torrent.clone());
-        let files = file_rows(&row.gid, &meta.meta.files);
+        let files = super::super::persist::file_rows_with_face(
+            &row.gid,
+            &meta.meta.files,
+            selected_files.as_deref(),
+            None,
+        );
         self.persist_row(row, files).await;
         let total_len = meta.meta.total_len();
         let tiers = tiers_from_metainfo(&meta);
@@ -3063,7 +3071,12 @@ impl SessionActor {
             &cfg,
         );
         super::super::persist::fill_torrent_identity(&mut row, &meta, torrent.clone());
-        let files = file_rows(&row.gid, &meta.meta.files);
+        let files = super::super::persist::file_rows_with_face(
+            &row.gid,
+            &meta.meta.files,
+            selected_files.as_deref(),
+            None,
+        );
         self.persist_row(row, files).await;
         self.jobs.insert(
             gid,

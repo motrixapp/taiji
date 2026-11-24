@@ -2742,16 +2742,49 @@ async fn taiji_scheduler_policy_set_get_e2e() {
     .await;
     assert_eq!(set.code, 0, "{}", set.payload["message"]);
     assert_eq!(set.payload, "OK");
-    // set: dict form → OK.
-    let set_dict = call_auth(
-        &st,
-        "taiji.setSchedulerPolicy",
-        vec![json!(&gid), json!({"policy": "rarest_first"})],
-    )
-    .await;
-    assert_eq!(set_dict.code, 0, "{}", set_dict.payload["message"]);
+    // set: dict form → OK (空 params 或省略 params 均合法).
+    for ok_dict in [
+        json!({"policy": "rarest_first"}),
+        json!({"policy": "rarest_first", "params": {}}),
+        json!({"policy": "rarest_first", "params": null}),
+    ] {
+        let set_dict = call_auth(
+            &st,
+            "taiji.setSchedulerPolicy",
+            vec![json!(&gid), ok_dict.clone()],
+        )
+        .await;
+        assert_eq!(
+            set_dict.code, 0,
+            "{ok_dict}: {}",
+            set_dict.payload["message"]
+        );
+    }
     let get = call_auth(&st, "taiji.getSchedulerPolicy", vec![json!(&gid)]).await;
     assert_eq!(get.payload["policy"], "rarest_first");
+
+    // 未知顶层键或非空未支持 params 必须显式拒绝，不得伪装生效。
+    for bad_fields in [
+        json!({"policy": "rarest_first", "params": {"window": 1024}}),
+        json!({"policy": "rarest_first", "params": 1}),
+        json!({"policy": "rarest_first", "unknown": true}),
+    ] {
+        let r = call_auth(
+            &st,
+            "taiji.setSchedulerPolicy",
+            vec![json!(&gid), bad_fields.clone()],
+        )
+        .await;
+        assert_eq!(r.code, 1, "未支持字段必须拒绝: {bad_fields}");
+        assert!(
+            r.payload["message"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("unsupported scheduler policy field"),
+            "{bad_fields}: {}",
+            r.payload["message"]
+        );
+    }
 
     // sequential is accepted and echoed.
     {

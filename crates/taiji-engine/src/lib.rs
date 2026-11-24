@@ -338,6 +338,8 @@ pub(crate) use transit::LeaveKind;
 #[cfg(test)]
 mod file_policy_tests;
 #[cfg(test)]
+mod hash_wakeup_tests;
+#[cfg(test)]
 #[rustfmt::skip]
 mod tests;
 #[cfg(test)]

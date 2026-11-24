@@ -662,6 +662,11 @@ pub(super) async fn run(
                 // outstanding set is fully unblocked, relay
                 // taiji.recoveryCompleted (exactly once).
                 recovery_admit::note_promotions(&mut state, &lifted, &hook);
+                // 晋升打开下载门后立即登记 dispatch debt，使 base=0 leaf-fetch 零延迟启动，
+                // 不再空等下一拍 2 秒常规 ticker。
+                for (fi, _, _) in &lifted {
+                    state.note_dispatch_debt(*fi);
+                }
             }
             Some((fi, ev)) = tracker_ev_rx.recv() => {
                 if handle_tracker_event(

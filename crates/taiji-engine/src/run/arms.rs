@@ -50,9 +50,10 @@ use crate::command::EngineCommand;
 use crate::dht::{DhtFamilyWiring, DhtRuntimeSeam, spawn_dht_announces, spawn_dht_family};
 use crate::dispatch::{
     HashFetchEvent, LayerFetchState, LedgerArrival, PieceSentLedger,
-    dispatch_face_selected_with_stream, handle_recovery_reply_and_drive, note_peer_bitfield,
-    note_peer_have, note_peer_have_all, note_peer_have_none, note_recovery_evidence,
-    on_block_arrived, policy_priority_mask, priority_mask, remove_peer_avail, selection_mask,
+    dispatch_face_selected_with_stream, drive_recovery, handle_recovery_reply_and_drive,
+    note_peer_bitfield, note_peer_have, note_peer_have_all, note_peer_have_none,
+    note_recovery_evidence, on_block_arrived, policy_priority_mask, priority_mask,
+    remove_peer_avail, selection_mask,
 };
 use crate::faces::{
     FaceState, PeerRegistration, attach_seeding_sources, on_piece_verified, on_piece_written,
@@ -1150,6 +1151,19 @@ pub(super) fn flush_dispatch_debt(state: &mut EngineLoop) {
                 plan.as_ref(),
                 state.piece_priority.as_deref(),
             );
+            // 若该 face 存在待恢复的 v2 piece-layer，随可用性/事件唤醒即时驱动，
+            // 避免首个 recovery 批次空等 2 秒常规 ticker。
+            if let Some(book) = state.recovery.get_mut(fi)
+                && !book.files.is_empty()
+            {
+                drive_recovery(
+                    face,
+                    fi,
+                    book,
+                    &state.recovery_deliver,
+                    state.selected_mask.as_deref(),
+                );
+            }
         }
     }
 }
@@ -1637,7 +1651,24 @@ pub(super) fn handle_hash_fetch(
     let Some(layer) = face.layers.get_mut(file_idx) else {
         return ControlFlow::Break(());
     };
-    match evt {
+    let should_wake_dispatch = apply_leaf_hash_fetch_event(layer, &evt, fi, file_idx);
+    if should_wake_dispatch {
+        state.note_dispatch_debt(fi);
+    }
+    ControlFlow::Continue(())
+}
+
+/// 处理单个文件的 `base=0` leaf-fetch 回调事件，并返回是否需要立即登记 `dispatch_debt` 唤醒调度：
+/// - `Admitted`（推进下一批或全部完成变 `Done`）：返回 `true`，事件驱动零延迟推进；
+/// - `Failed` 达重试上限降级为整片缓冲下载：返回 `true`，立即唤醒内容块调度；
+/// - `Failed` 未达上限重试：返回 `false`，由常规 ticker 提供自然退避，避免错误风暴。
+pub(crate) fn apply_leaf_hash_fetch_event(
+    layer: &mut crate::dispatch::FileLayerState,
+    evt: &HashFetchEvent,
+    fi: usize,
+    file_idx: usize,
+) -> bool {
+    match *evt {
         HashFetchEvent::Admitted { next } => {
             layer.attempts = 0;
             if next + 1 < layer.plans.len() {
@@ -1648,6 +1679,7 @@ pub(super) fn handle_hash_fetch(
                     file_index = file_idx, leaves = layer.leaf_total,
                     "base layer fetched + verified to piece root: cached");
             }
+            true
         }
         HashFetchEvent::Failed { next } => {
             layer.attempts += 1;
@@ -1658,19 +1690,17 @@ pub(super) fn handle_hash_fetch(
                      whole-piece buffering (non-silent fallback, BEP52 hash \
                      exchange optional on remote peers)");
                 layer.state = LayerFetchState::Failed;
+                true
             } else {
                 debug!(target: "taiji::core::engine", face = fi,
                     file_index = file_idx, plan = next,
                     attempt = layer.attempts, "hash fetch failed, will retry");
                 layer.state = LayerFetchState::Queued { next };
+                false
             }
         }
-        // Unreachable: Recovery replies returned early above (the if-let);
-        // this defensive arm satisfies exhaustiveness (never touches
-        // lazy-fetch bookkeeping).
-        HashFetchEvent::Recovery { .. } => {}
+        HashFetchEvent::Recovery { .. } => false,
     }
-    ControlFlow::Continue(())
 }
 
 // ---------------------------------------------------------------------------

@@ -1567,10 +1567,12 @@ The HTTP `SegmentTransport` implementations
   back to the original chain once (the redirect chain is the only
   authoritative mirror-discovery face; success self-heals the start
   via `note_final`). When the start URL and source entry differ in
-  origin, challenge credentials are stripped — the same
-  cross-endpoint rule as the manual redirect loop (a 302 across
-  hosts carries no Authorization anyway); same-origin keeps ctx
-  intact so 401 challenge-response semantics are unchanged.
+  origin, every credential class is stripped — the same cross-host
+  rule as the manual redirect loop: credential headers, preset Basic,
+  explicit cookie pairs and the 401 challenge answer (a 302 across
+  hosts carries no Authorization or Cookie anyway; jar and task-store
+  cookies stay domain-matched). Same-origin keeps ctx intact so 401
+  challenge-response semantics are unchanged.
 - Download-phase 200 after a 206 probe = explicit failure
   (`HttpError::RangeIgnored`), the same verdict as aria2
   `executeDownload`'s "Expected partial, but received OK" →

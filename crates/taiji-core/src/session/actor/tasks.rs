@@ -13,6 +13,37 @@
 use super::*;
 use crate::session::queue::RetireOutcome;
 
+/// Global observation record of the engines stopped at an activation
+/// rejection (a test assertion face, never read in production; compare
+/// http_task's `PREFETCH_OBS`).
+#[cfg(test)]
+static ACTIVATION_REJECTION_OBS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Observation seam delivery (the activation rejection arm, right after
+/// the engine is stopped; the record keeps the last 8). The entry carries
+/// the token state seen at that moment, so the assertion face tells a
+/// stopped engine from a merely reached arm (the abort that follows the
+/// cancel is the backstop; the token is what the engine selects on).
+#[cfg(test)]
+fn note_activation_rejection_stopped(gid: &Gid, token: &CancellationToken) {
+    let state = if token.is_cancelled() {
+        "cancelled"
+    } else {
+        "live"
+    };
+    let mut obs = crate::lock(&ACTIVATION_REJECTION_OBS);
+    obs.push(format!("{gid}:{state}"));
+    if obs.len() > 8 {
+        obs.remove(0);
+    }
+}
+
+/// Observation seam read (which engines an activation rejection stopped).
+#[cfg(test)]
+pub(super) fn activation_rejection_observations() -> Vec<String> {
+    crate::lock(&ACTIVATION_REJECTION_OBS).clone()
+}
+
 impl SessionActor {
     fn allocate_task_gid(
         &mut self,
@@ -32,6 +63,65 @@ impl SessionActor {
             return Err(SessionError::failed("gid is already in use or zero"));
         }
         Ok(Gid::from_u64(raw))
+    }
+
+    /// Landing of an activation that failed before the task ever ran
+    /// (engine config build, file-policy push rejection) — one exit for
+    /// every failure arm of [`Self::activate`]:
+    ///
+    /// - the Error terminal is recorded while the job payload is still
+    ///   present (the result entry carries dir / files / info hash), on
+    ///   the face that holds the gid: the active face, or the seeding
+    ///   registry of a seed-side activation (whose caller would otherwise
+    ///   backfill a job-less entry);
+    /// - the row follows with the failure note: left `queued`, the task
+    ///   would revive and fail again on every restart;
+    /// - a pause / restart intent already pending on the record is
+    ///   honored the way the Ended landing honors it
+    ///   ([`Self::retire_and_fire`]): the task requeues with its payload
+    ///   and the row follows the flags — only a real terminal drops the
+    ///   job.
+    ///
+    /// Does **not** pump: the callers own the trailing fillup (as with
+    /// [`Self::activate_seed`]), and an inner `pump_all` would close a
+    /// recursive async cycle (`pump_all → activate → pump_all`) anyway.
+    /// The download slot a failure frees is backfilled by the fillup
+    /// loop of `pump_all` that admitted the task.
+    async fn fail_activation(&mut self, gid: Gid, total_len: u64, note: Option<String>) {
+        let entry = self.build_result_entry(gid, StatusKind::Error, total_len, 0, note.clone());
+        // (outcome, flags = (pause, remove, restart)) of the face that
+        // holds the gid. A seed-side activation registered the gid right
+        // before the pipeline ran, so its record is fresh (no pending
+        // intent); the general dispatch is kept for both faces.
+        let (outcome, flags) = match self.queue.seeding_flags(gid) {
+            Some((pause, remove)) => {
+                let outcome = self.queue.retire_seeding(gid, entry);
+                if matches!(outcome, RetireOutcome::Requeued { paused: true }) {
+                    self.seed_parked.insert(gid);
+                }
+                (outcome, Some((pause, remove, false)))
+            }
+            None => {
+                let flags = self.queue.active_flags(gid);
+                (self.queue.retire_active(gid, entry), flags)
+            }
+        };
+        // A pause an unpauseAll already revoked lands unpaused — the row
+        // must not say 'paused' (the restart face writes the queued row).
+        let flags = if matches!(outcome, RetireOutcome::RequeuedUnpauseSuperseded) {
+            flags.map(|(_pause, remove, _restart)| (false, remove, true))
+        } else {
+            flags
+        };
+        if matches!(outcome, RetireOutcome::Result) {
+            self.jobs.remove(&gid);
+            self.seed_parked.remove(&gid);
+        }
+        self.persist_after_end(gid, StatusKind::Error, note, flags, None)
+            .await;
+        if !matches!(outcome, RetireOutcome::Result) {
+            self.persist_queue_renumber().await;
+        }
     }
 
     /// Activate a queue item: spawn the engine / magnet full chain /
@@ -239,19 +329,15 @@ impl SessionActor {
                     Ok(Err(e)) => {
                         warn!(target: "taiji::core::session", gid = %gid, %e,
                             "engine config build failed; task recorded as error");
-                        let entry =
-                            self.build_result_entry(gid, StatusKind::Error, total_len, 0, None);
-                        self.queue.retire_active(gid, entry);
-                        self.jobs.remove(&gid);
+                        let note = Some(format!("engine config build failed: {e}"));
+                        self.fail_activation(gid, total_len, note).await;
                         return;
                     }
                     Err(e) => {
                         warn!(target: "taiji::core::session", gid = %gid, %e,
-                            "engine config build join failed");
-                        let entry =
-                            self.build_result_entry(gid, StatusKind::Error, total_len, 0, None);
-                        self.queue.retire_active(gid, entry);
-                        self.jobs.remove(&gid);
+                            "engine config build task failed; task recorded as error");
+                        let note = Some(format!("engine config build task failed: {e}"));
+                        self.fail_activation(gid, total_len, note).await;
                         return;
                     }
                 };
@@ -430,10 +516,19 @@ impl SessionActor {
                     if let Err(e) = engine.set_file_policy(eng_sel, eng_prio).await {
                         warn!(target: "taiji::core::session", gid = %gid, %e,
                             "file policy rejected; task recorded as error");
-                        let entry =
-                            self.build_result_entry(gid, StatusKind::Error, total_len, 0, None);
-                        self.queue.retire_active(gid, entry);
-                        self.jobs.remove(&gid);
+                        // The engine was spawned ahead of this push and its
+                        // Ended forwarder is spawned only after it: nothing
+                        // else would ever stop it, and it would keep
+                        // announcing, connecting and writing with no owner
+                        // and no RPC handle. The forceRemove recipe — cancel
+                        // the token first (the engine's sub-tasks exit in
+                        // order at their select points), then abort.
+                        token.cancel();
+                        join.abort();
+                        #[cfg(test)]
+                        note_activation_rejection_stopped(&gid, &token);
+                        let note = Some(format!("file policy rejected: {e}"));
+                        self.fail_activation(gid, total_len, note).await;
                         return;
                     }
                 }
@@ -1733,10 +1828,12 @@ impl SessionActor {
         self.queue.insert_seeding(gid);
         self.activate(gid, None).await;
         if !self.running.contains_key(&gid) && self.queue.remove_seeding(gid) {
-            // The shared pipeline failed after the registry insert
-            // (engine config build / selection rejection — it already
-            // recorded the error result on the active face, a no-op
-            // here): record the error from the seed face so the task
+            // Defensive residual: the shared pipeline returned without a
+            // running task and left the registry entry behind (every
+            // failure arm of the torrent path lands through
+            // `fail_activation`, which records from this face itself and
+            // takes the entry away, so `remove_seeding` answers false
+            // there). Record the error from the seed face so the task
             // neither leaks the registry nor vanishes silently.
             let entry = self.build_result_entry(gid, StatusKind::Error, 0, 0, None);
             self.queue.record_result(entry);
@@ -2244,6 +2341,12 @@ impl SessionActor {
         };
         self.running.remove(&gid);
         self.activate(gid, Some(token)).await;
+        // A re-activation that failed released the slot it carried over
+        // (fail_activation): backfill it here — this arm returns before
+        // handle_ended's trailing pump.
+        if !self.running.contains_key(&gid) {
+            self.pump_all().await;
+        }
         info!(target: "taiji::core::session", gid = %gid,
             "fetched .torrent metadata upgraded in place (same GID, SPEC §7.1)");
     }
@@ -3642,7 +3745,7 @@ impl SessionActor {
         }
         match self.queue.find(gid) {
             Some(Location::Active) => {
-                if self.queue.request_pause(gid) {
+                if self.queue.request_user_pause(gid) {
                     if let Some(t) = self.running.get(&gid) {
                         // HTTP tasks: pause sets the cancel-source flag (the
                         // driver teardown writes the http_task row as paused
@@ -3696,7 +3799,7 @@ impl SessionActor {
             // existing pause path, only the registry source differs —
             // the seeding record's flag instead of the active record's).
             Some(Location::Seeding) => {
-                if self.queue.request_seed_pause(gid) {
+                if self.queue.request_user_seed_pause(gid) {
                     if let Some(t) = self.running.get(&gid) {
                         t.token.cancel();
                     }
@@ -4018,6 +4121,12 @@ impl SessionActor {
         // face as a restart requeue).
         let token = self.token.child_token();
         self.activate(gid, Some(token)).await;
+        // Same as the URL metadata upgrade: a failed re-activation freed
+        // the carried-over slot and this arm returns before
+        // handle_ended's trailing pump.
+        if !self.running.contains_key(&gid) {
+            self.pump_all().await;
+        }
         info!(target: "taiji::core::session", gid = %gid,
             "media entry classified as a direct file; converted to the HTTP task family");
     }

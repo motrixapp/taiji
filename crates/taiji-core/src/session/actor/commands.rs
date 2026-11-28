@@ -407,7 +407,7 @@ impl SessionActor {
             // paused by both methods.
             C::PauseAll | C::ForcePauseAll => {
                 for gid in self.queue.active_gids() {
-                    if self.queue.request_pause(gid) {
+                    if self.queue.request_user_pause(gid) {
                         if let Some(t) = self.running.get(&gid) {
                             // HTTP task: pause raises the
                             // source-cancel flag (the drive finishes

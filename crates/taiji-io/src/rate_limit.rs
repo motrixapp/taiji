@@ -411,7 +411,7 @@ impl LimiterSet {
 /// Gate state (shared by read and write): idle -> global-bucket permit ->
 /// per-torrent-bucket permit. The chain order is fixed, so waits can never
 /// form a cycle across buckets.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 enum Gate {
     #[default]
     Idle,
@@ -628,7 +628,12 @@ where
         out: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
-        if this.read_passthrough() {
+        // The short-circuit is legal only from the idle gate: a read parked
+        // at Global/Torrent already holds staged bytes (consumed from the
+        // inner stream, not yet handed over) — bypassing the gate would
+        // drop them. Parked permits clear on their own once the limit is
+        // lifted (rate 0 = Ready), returning the gate to Idle.
+        if this.read_gate == Gate::Idle && this.read_passthrough() {
             // Zero-overhead short-circuit: one test, then passthrough (no copy, lock, or future).
             return Pin::new(&mut this.inner).poll_read(cx, out);
         }
@@ -659,7 +664,10 @@ where
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
-        if this.write_passthrough() {
+        // Idle only, as on the read half: bytes written ahead of a pending
+        // permit are still unreported, and the caller retries this buffer
+        // until they are — a passthrough poll would write them twice.
+        if this.write_gate == Gate::Idle && this.write_passthrough() {
             return Pin::new(&mut this.inner).poll_write(cx, buf);
         }
         loop {
@@ -1121,5 +1129,93 @@ mod tests {
             &[4, 5, 6],
             "data delivered through the staging buffer"
         );
+    }
+
+    /// Lifting the limit while a read is parked at the gate must hand
+    /// over the staged chunk, not skip it: the passthrough short-circuit
+    /// is only legal from the idle gate. Before the fix the next poll
+    /// went straight to the inner stream and the bytes already staged
+    /// were lost (a corrupted peer wire).
+    #[tokio::test]
+    async fn lifting_the_limit_mid_gate_keeps_the_staged_read() {
+        let payload: Vec<u8> = (0..64u8).collect();
+        let (mut tx, rx) = tokio::io::duplex(READ_CHUNK);
+        // 1 B/s from a cold bucket: the first chunk parks for a minute.
+        let limits = Arc::new(LimiterSet {
+            global: LimiterPair::new(0, 0),
+            per_torrent: LimiterPair::new(1, 0),
+        });
+        tx.write_all(&payload)
+            .await
+            .unwrap_or_else(|e| panic!("write: {e}"));
+        drop(tx); // EOF behind the payload: the stream ends once it is read
+        let reader = {
+            let limits = Arc::clone(&limits);
+            tokio::spawn(async move {
+                let mut throttled = Throttled::new(rx, limits);
+                let mut got = Vec::new();
+                throttled
+                    .read_to_end(&mut got)
+                    .await
+                    .unwrap_or_else(|e| panic!("read: {e}"));
+                got
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await; // parked at the gate
+
+        limits.per_torrent.down.set_rate(0); // the limit is lifted
+
+        let got = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .unwrap_or_else(|e| panic!("the parked read must complete: {e}"))
+            .unwrap_or_else(|e| panic!("reader join: {e}"));
+        assert_eq!(got, payload, "every byte, in order, exactly once");
+    }
+
+    /// The same rule on the write half: bytes already written to the
+    /// inner stream while the permit pends must be reported once — the
+    /// caller retries that buffer until they are, and a passthrough poll
+    /// in between wrote them a second time.
+    #[tokio::test]
+    async fn lifting_the_limit_mid_gate_reports_the_in_flight_write_once() {
+        const PAYLOAD: &[u8] = b"hello-world";
+        let (client, mut server) = tokio::io::duplex(READ_CHUNK);
+        // 1 B/s upload from a cold bucket: the first write parks for a while.
+        let limits = Arc::new(LimiterSet {
+            global: LimiterPair::new(0, 0),
+            per_torrent: LimiterPair::new(0, 1),
+        });
+        let sink = tokio::spawn(async move {
+            let mut got = Vec::new();
+            server
+                .read_to_end(&mut got)
+                .await
+                .unwrap_or_else(|e| panic!("sink read: {e}"));
+            got
+        });
+        let writer = {
+            let limits = Arc::clone(&limits);
+            tokio::spawn(async move {
+                let mut throttled = Throttled::new(client, limits);
+                throttled
+                    .write_all(PAYLOAD)
+                    .await
+                    .unwrap_or_else(|e| panic!("write: {e}"));
+                throttled
+                    .shutdown()
+                    .await
+                    .unwrap_or_else(|e| panic!("shutdown: {e}"));
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await; // parked at the gate
+
+        limits.per_torrent.up.set_rate(0); // the limit is lifted
+
+        tokio::time::timeout(Duration::from_secs(5), writer)
+            .await
+            .unwrap_or_else(|e| panic!("the parked write must complete: {e}"))
+            .unwrap_or_else(|e| panic!("writer join: {e}"));
+        let got = sink.await.unwrap_or_else(|e| panic!("sink join: {e}"));
+        assert_eq!(got, PAYLOAD, "the in-flight bytes reach the peer once");
     }
 }

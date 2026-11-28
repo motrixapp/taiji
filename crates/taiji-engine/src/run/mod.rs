@@ -288,19 +288,18 @@ pub(super) async fn bind_listen_with_fallback(
 ///
 /// Lifecycle (the µTP shape): the task lives with the listeners under
 /// the token; channel closure (the main loop gone) exits it. Error
-/// face: a v4 main-stack accept error does not end the task — back off
-/// [`TCP_ACCEPT_ERROR_BACKOFF`] and retry (otherwise an Err is ready
-/// immediately -> a hot spin); the best-effort v6 face drops its arm at
-/// the first accept error (the socket stays held by the task until
-/// engine teardown, the port occupancy unchanged) and the v4-only stack
-/// keeps serving.
+/// face: an accept error on either stack does not end the task — back
+/// off [`TCP_ACCEPT_ERROR_BACKOFF`] and retry (otherwise an Err is ready
+/// immediately -> a hot spin). The errors are per-connection and
+/// transient (fd exhaustion hits both stacks alike): retiring a stack
+/// on the first one would leave it silent for the rest of the engine's
+/// life while its listener still holds the port.
 pub(super) fn spawn_tcp_accept_merge(
     dual: DualStackListener,
     token: CancellationToken,
     ingress: crate::listen::IngressVerify,
 ) -> mpsc::Receiver<(tokio::net::TcpStream, SocketAddr)> {
     let DualStackListener { v4, v6 } = dual;
-    let mut v6_active = v6.is_some();
     let (tx, rx) = mpsc::channel(TCP_ACCEPT_MERGE_CAPACITY);
     tokio::spawn(async move {
         loop {
@@ -327,7 +326,7 @@ pub(super) fn spawn_tcp_accept_merge(
                         Some(l) => l.accept().await,
                         None => std::future::pending().await,
                     }
-                }, if v6_active => match accepted {
+                } => match accepted {
                     Ok(pair) => {
                         if !accept_verified(&ingress, &pair.0) {
                             continue;
@@ -337,9 +336,9 @@ pub(super) fn spawn_tcp_accept_merge(
                         }
                     }
                     Err(e) => {
-                        info!(target: "taiji::core::engine", %e,
-                            "tcp v6 accept failed; v6 inbound disabled");
-                        v6_active = false;
+                        warn!(target: "taiji::core::engine", %e,
+                            "tcp v6 accept error; backing off");
+                        tokio::time::sleep(TCP_ACCEPT_ERROR_BACKOFF).await;
                     }
                 },
             }
@@ -367,12 +366,11 @@ fn accept_verified(ingress: &crate::listen::IngressVerify, stream: &tokio::net::
 /// a rejected face still accepts (drains the backlog) and drops each
 /// connection at the door, counting `taiji_peer_blocked_ingress_total`
 /// (the upstream invalid_local_interface shape, counter-observed).
-/// Lifecycle/error face identical to the v4 arm of
+/// Lifecycle/error face identical to the accept arms of
 /// [`spawn_tcp_accept_merge`]: an accept error backs off and retries
 /// (never a hot spin); the token or the merge channel closing ends the
 /// task (the cloned listener held here keeps the face's port occupied
-/// until teardown, mirroring the best-effort v6 arm's socket-hold
-/// semantics).
+/// until teardown).
 pub(super) fn spawn_face_accept_task(
     listener: tokio::net::TcpListener,
     endpoint: crate::listen::ListenEndpoint,

@@ -539,6 +539,48 @@ async fn autosave_and_shutdown_emit_persist_events() {
     );
 }
 
+/// A maintenance timer that comes due while the engine is disabled keeps
+/// its cadence: the work is skipped, the timer is not. Before the fix
+/// the due slot was harvested and dropped, so after a disable window long
+/// enough to cross a due point that maintenance kind never fired again —
+/// re-announce, token rotation, bucket refresh and autosave silently dead
+/// for the rest of the engine's life.
+#[tokio::test]
+async fn maintenance_due_while_disabled_resumes_after_reenable() {
+    let mut cfg = fast_cfg();
+    cfg.autosave_interval = Duration::from_millis(40);
+    let (handle, mut events, _out, _in_tx, join) =
+        spawn_channel_engine(DhtFamily::V4, 6881, cfg, None);
+
+    call("disable", handle.set_enabled(false)).await;
+    // The engine task is sequential: once the reply is back, everything
+    // it emitted before the disable is already in the channel.
+    while events.try_recv().is_ok() {}
+    // Long enough for several autosave due points to cross while disabled.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        events.try_recv().is_err(),
+        "no maintenance runs while the engine is disabled"
+    );
+
+    call("enable", handle.set_enabled(true)).await;
+    // Re-enabled: the autosave cadence is intact.
+    let ev = chan(
+        timeout(Duration::from_secs(5), events.recv()).await,
+        "autosave event after re-enable",
+    );
+    assert!(matches!(ev, DhtEvent::Persist { .. }), "got {ev:?}");
+
+    call("shutdown", handle.shutdown()).await;
+    t(
+        t(
+            timeout(Duration::from_secs(2), join).await,
+            "actor exit timeout",
+        ),
+        "actor join",
+    );
+}
+
 // ===== dht_state row restore + forced refresh =====
 
 #[tokio::test]

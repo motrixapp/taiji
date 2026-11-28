@@ -46,12 +46,19 @@ impl DhtEngine {
             "dht engine up"
         );
         loop {
-            // 1) Due maintenance (table-driven).
+            // 1) Due maintenance (table-driven). While disabled the work
+            // is skipped but the timer keeps its cadence: a due slot that
+            // is dropped instead of re-armed never fires again, leaving
+            // that maintenance kind dead for the rest of the engine's
+            // life once the engine is re-enabled.
             let now = Instant::now();
             let fired = self.timers.fire_due(now);
-            if self.enabled {
-                for kind in fired {
+            for kind in fired {
+                if self.enabled {
                     self.run_maintenance(kind, now).await;
+                } else {
+                    self.timers
+                        .schedule_after(kind, self.cfg.interval_of(kind), now);
                 }
             }
             // 2) Transaction timeout sweep.

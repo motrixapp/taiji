@@ -171,9 +171,12 @@ impl BanLedger {
 
     /// Protocol violation -> immediate ban. Returns whether this is a new
     /// ban (repeat violations keep the first until — idempotent, so a
-    /// persistent violator cannot extend indefinitely).
+    /// persistent violator cannot extend indefinitely). Idempotence is
+    /// judged by the active window, not by table presence: a record whose
+    /// window has lapsed but which the 1h sweep has not reclaimed yet does
+    /// not block a fresh ban (the stale record is replaced whole).
     pub fn record_violation(&mut self, ip: IpAddr, reason: &str, now: i64) -> bool {
-        if self.bans.contains_key(&ip) {
+        if self.is_banned(ip, now).is_some() {
             return false;
         }
         let until = ban_until(now, &mut self.duration);
@@ -553,6 +556,56 @@ mod tests {
         assert!(
             ledger.is_banned(a, now).is_none(),
             "expired entry not restored"
+        );
+    }
+
+    /// An expired ban record lingers in the table until the 1h sweep
+    /// (`sweep_gated_by_one_hour_interval`), and every reader judges it
+    /// expired meanwhile — the IP may reconnect. A violation inside that
+    /// window must ban again; the stale record's presence must not
+    /// swallow it.
+    #[test]
+    fn violation_after_expiry_bans_again_before_sweep() {
+        let mut ledger = BanLedger::new(fixed(300));
+        let a = ip([192, 0, 2, 12]);
+        let now = 1_000_000;
+        assert!(
+            ledger.record_violation(a, "first", now),
+            "ban until = now+300"
+        );
+        // Expired, not yet swept (well inside the 1h cadence): the query
+        // side admits the IP again.
+        assert!(
+            ledger.is_banned(a, now + 300).is_none(),
+            "expired ban does not block"
+        );
+        assert!(
+            ledger.active_bans(now + 300).is_empty(),
+            "expired ban is outside the active snapshot"
+        );
+        // One hash failure lands in the gap (a failure queue now exists).
+        assert_eq!(
+            ledger.record_hash_failure(a, now + 310),
+            HashFailureDecision::Counted { failures: 1 }
+        );
+        // The same IP violates again before the sweep: a fresh ban with
+        // the new reason and until, not a silently dropped repeat.
+        assert!(
+            ledger.record_violation(a, "second", now + 320),
+            "an expired-but-unswept record must not swallow a new violation"
+        );
+        let rec = ledger
+            .is_banned(a, now + 320)
+            .unwrap_or_else(|| panic!("re-banned"));
+        assert_eq!(rec.reason, "second", "the stale record is replaced whole");
+        assert_eq!(
+            rec.until,
+            now + 320 + 300,
+            "until restarts from the new ban"
+        );
+        assert!(
+            !ledger.failures.contains_key(&a),
+            "the gap failure queue is dropped with the new ban"
         );
     }
 

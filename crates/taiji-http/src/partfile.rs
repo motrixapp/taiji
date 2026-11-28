@@ -370,16 +370,19 @@ impl HandlesClosed {
     }
 
     /// Transfer to pending bookkeeping (renamePending): the `.part`
-    /// claim stays held by the renamePending polling bookkeeping
-    /// (released through the finalize close-out on success); Drop no
-    /// longer releases it. The registry entry stays in place (release
-    /// is an explicit action, not a Drop side effect).
-    pub fn hold_for_pending(self) {
-        // Consume the credential: `part_claim` is discarded in place
-        // (the registry is untouched) — the claim stays in the
-        // `part_claims` table, released by the polling close-out
-        // (`retry_pending`'s complete face) or the task-removal path.
-        let _ = self.part_claim;
+    /// claim stays held by the renamePending polling bookkeeping; Drop no
+    /// longer releases it. The registry entry stays in place (release is
+    /// an explicit action, not a Drop side effect) until one of its
+    /// owners lets go: the finalize close-out on success, the exits that
+    /// leave the publication unresolved (cancel and failure — the
+    /// session's publication owner releases the record's claims), or
+    /// task removal.
+    pub fn hold_for_pending(mut self) {
+        // Disarm the Drop backstop: with `part_claim` taken out of the
+        // credential, the drop at the end of this call cannot release the
+        // registry entry. The entry stays in `part_claims` for the
+        // explicit release points listed in the doc comment.
+        self.part_claim = None;
     }
 }
 
@@ -1434,6 +1437,68 @@ mod tests {
         .unwrap_or_else(|e| panic!("reopen after drain: {e}"));
         drop(reopened.close());
         io_gate::remove(&part_path);
+        wipe(&dir);
+    }
+
+    /// `hold_for_pending` hands the `.part` claim to the renamePending
+    /// bookkeeping: the registry entry must outlive the credential (the
+    /// close->rename window admits no new task on the path) until the
+    /// close-out's explicit release. Before the fix the credential's Drop
+    /// ran anyway and released the claim at the hold call itself.
+    #[tokio::test]
+    async fn hold_for_pending_keeps_the_part_claim_held() {
+        let dir = tempdir("hold-pending");
+        let part_path = dir.join("hp.bin.part");
+
+        let part = PartFile::open(
+            part_path.clone(),
+            Some(8),
+            PartOpenPolicy::Restart,
+            FileAllocation::None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("open: {e}"));
+        let closed = part.close();
+        assert!(
+            part_claim_held(&part_path),
+            "close transfers the claim to the credential"
+        );
+        closed.hold_for_pending();
+        assert!(
+            part_claim_held(&part_path),
+            "the claim must stay held for the renamePending bookkeeping \
+             (the explicit close-out release owns it, not the hold)"
+        );
+
+        // The window the hold exists to close: a second task on the same
+        // path is refused for as long as the claim is held.
+        let second = PartFile::open(
+            part_path.clone(),
+            Some(8),
+            PartOpenPolicy::Restart,
+            FileAllocation::None,
+        )
+        .await;
+        assert!(
+            matches!(second, Err(HttpError::PathConflict)),
+            "a second task must not enter the held .part: {second:?}"
+        );
+
+        // The close-out's explicit release is the exit.
+        release_part_claim(&part_path);
+        assert!(
+            !part_claim_held(&part_path),
+            "the explicit release clears the claim"
+        );
+        let reopened = PartFile::open(
+            part_path.clone(),
+            Some(8),
+            PartOpenPolicy::Restart,
+            FileAllocation::None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("reopen after release: {e}"));
+        drop(reopened.close());
         wipe(&dir);
     }
 

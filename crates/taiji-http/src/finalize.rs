@@ -383,7 +383,9 @@ impl Finalizer {
     /// part+final claims (the credential's Drop release is idempotent);
     /// RenamePending → the credential moves to the polling bookkeeping
     /// via [`HandlesClosed::hold_for_pending`] (claims persist until a
-    /// later close-out / task removal); `Err` (journal write failure)
+    /// later close-out, an exit that leaves the publication unresolved
+    /// — cancel or failure — or task removal); `Err` (journal write
+    /// failure)
     /// → the credential's Drop releases the `.part` claim (the task
     /// must not enter its terminal state; the final-path claim is
     /// handled by the caller's lease).
@@ -403,7 +405,8 @@ impl Finalizer {
         if matches!(outcome, FinalizeOutcome::RenamePending { .. }) {
             // Claim handover: during renamePending both the part+final
             // claims stay registered (released by the polling
-            // close-out's complete face).
+            // close-out's complete face, an unresolved exit, or task
+            // removal).
             closed.hold_for_pending();
         }
         Ok(outcome)

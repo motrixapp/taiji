@@ -706,7 +706,11 @@ impl QueueMan {
 
     /// Pause request (active face; failure = already in the pause /
     /// remove flow — the decision source for "GID#%s cannot be paused
-    /// now", RpcMethodImpl.cc).
+    /// now", RpcMethodImpl.cc). A refused request mutates nothing: the
+    /// internal stops that borrow the pause flow (forceRecheck,
+    /// moveStorage, renameFile, option restarts) rely on it — a pause an
+    /// unpauseAll revoked stays revoked. The user-pause entries go
+    /// through [`Self::request_user_pause`].
     pub(crate) fn request_pause(&mut self, gid: Gid) -> bool {
         match self.active.get_mut(&gid) {
             Some(rec) if !rec.pause_requested && !rec.remove_requested => {
@@ -716,6 +720,28 @@ impl QueueMan {
             }
             _ => false,
         }
+    }
+
+    /// The pause / pauseAll entry's form of [`Self::request_pause`].
+    /// Differs in one case only: a pending pause intent that an
+    /// unpauseAll already revoked (`pause_epoch` behind the current
+    /// [`QueueMan::pause_intent_epoch`]) is not a running pause — its
+    /// landing would requeue unpaused. The user's new pause clears it
+    /// and the plain request decides again, so `pause → unpauseAll →
+    /// pause` inside one teardown window lands paused (the user's last
+    /// command) instead of unpaused. Before, the repeat was refused as
+    /// "already pausing" and the revoked intent stayed on the record:
+    /// pauseAll swallows refusals, and the task landed unpaused.
+    pub(crate) fn request_user_pause(&mut self, gid: Gid) -> bool {
+        if let Some(rec) = self.active.get_mut(&gid)
+            && rec.pause_requested
+            && !rec.remove_requested
+            && !rec.restart_requested
+            && rec.pause_epoch < self.pause_intent_epoch
+        {
+            rec.pause_requested = false;
+        }
+        self.request_pause(gid)
     }
 
     // ---- finalization ----
@@ -1050,7 +1076,9 @@ impl QueueMan {
     }
 
     /// Pause request (the seeding-residence face of `request_pause`:
-    /// failure = already in the pause/remove flow).
+    /// failure = already in the pause/remove flow). A refused request
+    /// mutates nothing, the same as [`Self::request_pause`]; the
+    /// user-pause entry goes through [`Self::request_user_seed_pause`].
     pub(crate) fn request_seed_pause(&mut self, gid: Gid) -> bool {
         match self.seeding.get_mut(&gid) {
             Some(rec) if !rec.pause_requested && !rec.remove_requested => {
@@ -1060,6 +1088,21 @@ impl QueueMan {
             }
             _ => false,
         }
+    }
+
+    /// The pause entry's form of [`Self::request_seed_pause`] — the
+    /// seeding face of [`Self::request_user_pause`] (same single
+    /// difference: a pause intent an unpauseAll already revoked is not a
+    /// running pause).
+    pub(crate) fn request_user_seed_pause(&mut self, gid: Gid) -> bool {
+        if let Some(rec) = self.seeding.get_mut(&gid)
+            && rec.pause_requested
+            && !rec.remove_requested
+            && rec.pause_epoch < self.pause_intent_epoch
+        {
+            rec.pause_requested = false;
+        }
+        self.request_seed_pause(gid)
     }
 
     /// Remove request (halt semantics: clears pause — the same override
@@ -1601,6 +1644,100 @@ mod tests {
         assert_eq!(
             q.retire_active(g(3), done(g(3))),
             RetireOutcome::Requeued { paused: false }
+        );
+    }
+
+    /// The user's pause (pause / pauseAll), re-issued while the first is
+    /// still tearing down, renews the intent: the repeat carries the
+    /// current epoch, so an unpauseAll between the two no longer
+    /// supersedes it. Before the fix the repeat was refused without
+    /// touching the record, and `pauseAll → unpauseAll → pauseAll` — all
+    /// three inside the teardown window — landed unpaused, the opposite
+    /// of the user's last command. Both faces (active and seeding) share
+    /// the rule; a live pause flow is still refused; a pending remove
+    /// still wins.
+    #[test]
+    fn reissued_user_pause_renews_the_intent_epoch() {
+        let mut q = QueueMan::new();
+        for i in 1..=3u64 {
+            q.insert_reserved(entry(g(i), false), None);
+        }
+        assert_eq!(q.fillup(3), (1..=3u64).map(g).collect::<Vec<_>>());
+        assert!(q.begin_seeding(g(3)));
+
+        // Active face.
+        assert!(q.request_user_pause(g(1)), "the first pause request");
+        assert!(
+            !q.request_user_pause(g(1)),
+            "a live pause flow is still refused (the teardown already runs)"
+        );
+        q.bump_pause_epoch(); // unpauseAll lands while the teardown is in flight
+        assert!(
+            q.request_user_pause(g(1)),
+            "the user's pause over a revoked intent is a started flow"
+        );
+        assert_eq!(
+            q.retire_active(g(1), done(g(1))),
+            RetireOutcome::Requeued { paused: true },
+            "the re-issued pause must survive the unpauseAll in between"
+        );
+
+        // Seeding face: the same renewal.
+        assert!(q.request_user_seed_pause(g(3)), "the first pause request");
+        q.bump_pause_epoch();
+        assert!(q.request_user_seed_pause(g(3)));
+        assert_eq!(
+            q.retire_seeding(g(3), done(g(3))),
+            RetireOutcome::Requeued { paused: true },
+            "the re-issued seed pause must survive the unpauseAll in between"
+        );
+
+        // A remove in between still wins: the renewal never revives a
+        // pause under a pending remove.
+        assert!(q.request_user_pause(g(2)));
+        assert!(q.request_remove(g(2)));
+        q.bump_pause_epoch();
+        assert!(
+            !q.request_user_pause(g(2)),
+            "remove wins over a later pause"
+        );
+        assert_eq!(q.retire_active(g(2), done(g(2))), RetireOutcome::Result);
+    }
+
+    /// The internal stops that borrow the pause flow (forceRecheck,
+    /// moveStorage, renameFile, option restarts) must not revive a pause
+    /// the user revoked: their refused request mutates nothing, so a
+    /// teardown still in flight lands unpaused after an unpauseAll.
+    /// [`QueueMan::request_pause`] is the entry they call — only the
+    /// user-pause entries renew ([`QueueMan::request_user_pause`]).
+    #[test]
+    fn refused_internal_pause_request_leaves_a_revoked_intent_revoked() {
+        let mut q = QueueMan::new();
+        for i in 1..=2u64 {
+            q.insert_reserved(entry(g(i), false), None);
+        }
+        assert_eq!(q.fillup(2), (1..=2u64).map(g).collect::<Vec<_>>());
+        assert!(q.begin_seeding(g(2)));
+
+        assert!(q.request_user_pause(g(1)), "the user's pause");
+        q.bump_pause_epoch(); // unpauseAll while the teardown is in flight
+        assert!(
+            !q.request_pause(g(1)),
+            "forceRecheck on a task still tearing down: refused"
+        );
+        assert_eq!(
+            q.retire_active(g(1), done(g(1))),
+            RetireOutcome::RequeuedUnpauseSuperseded,
+            "the refused request must not renew the revoked pause"
+        );
+
+        assert!(q.request_user_seed_pause(g(2)), "the user's pause");
+        q.bump_pause_epoch();
+        assert!(!q.request_seed_pause(g(2)));
+        assert_eq!(
+            q.retire_seeding(g(2), done(g(2))),
+            RetireOutcome::RequeuedUnpauseSuperseded,
+            "the seed face: the same"
         );
     }
 

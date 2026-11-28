@@ -196,27 +196,22 @@ impl HttpRangeTransport {
         }
     }
 
-    /// Data-plane start URL and request context (when `request_uri`
-    /// and `uri` differ in origin, challenge credentials are stripped
-    /// — the manual redirect loop's keep_credentials cross-endpoint
-    /// stripping semantics: a 302 across hosts carries no
-    /// Authorization anyway, and the start hop follows the same rule;
-    /// same-origin keeps ctx as-is, 401 challenge-response unchanged).
-    fn start_ctx(&self, ctx: &RequestCtx) -> (String, Option<RequestCtx>) {
+    /// Data-plane start URL and whether it lies outside the entry
+    /// URI's credential scope. A cross-origin start is requested
+    /// uncredentialed ([`HttpClient::get_range_uncredentialed`]) — the
+    /// manual redirect loop's keep_credentials cross-endpoint stripping
+    /// semantics: a 302 across hosts carries no Authorization anyway,
+    /// and the start hop follows the same rule for every credential
+    /// class (preset auth, credential headers, explicit cookie pairs),
+    /// not only the preset auth. Same-origin keeps the full scope (401
+    /// challenge-response unchanged).
+    fn start_url(&self) -> (String, bool) {
         let Some(lock) = &self.request_uri else {
-            return (self.uri.clone(), None);
+            return (self.uri.clone(), false);
         };
         let cur = crate::lock(lock).clone();
-        if same_origin(&cur, &self.uri) {
-            return (cur, None);
-        }
-        (
-            cur,
-            Some(RequestCtx {
-                auth: None,
-                ..ctx.clone()
-            }),
-        )
+        let cross_origin = !same_origin(&cur, &self.uri);
+        (cur, cross_origin)
     }
 
     /// Start-URL self-heal: after a successful fallback through the
@@ -242,20 +237,24 @@ impl HttpRangeTransport {
     ) -> Result<()> {
         let end_incl = seg.end().saturating_sub(1);
         // Start URL (see the `request_uri` field doc): dial the
-        // probe-converged final URL directly; strip challenge
-        // credentials across origins. On a start-hop transport error
+        // probe-converged final URL directly; a cross-origin start is
+        // requested uncredentialed. On a start-hop transport error
         // with start != source-entry URI, fall back and re-walk the
         // original chain once (the redirect chain is the only
         // authoritative mirror-discovery face — mirror
         // invalidation/rotation re-resolves here; success self-heals
         // the start via [`Self::note_final`]).
-        let (start_url, stripped) = self.start_ctx(ctx);
-        let ctx_ref: &RequestCtx = stripped.as_ref().unwrap_or(ctx);
-        let followed = match self
-            .client
-            .get_range(&start_url, ctx_ref, seg.start, end_incl)
-            .await
-        {
+        let (start_url, cross_origin) = self.start_url();
+        let started = if cross_origin {
+            self.client
+                .get_range_uncredentialed(&start_url, ctx, seg.start, end_incl)
+                .await
+        } else {
+            self.client
+                .get_range(&start_url, ctx, seg.start, end_incl)
+                .await
+        };
+        let followed = match started {
             Ok(f) => f,
             Err(e) if start_url != self.uri => {
                 warn!(target: "taiji::http::transport", source = self.source,

@@ -854,9 +854,12 @@ differences all fall under the following entries:
   chain** (saving one origin round trip per block + sparing each worker one origin
   keep-alive/TLS connection; the "2 sockets per data connection" shape is thereby
   eliminated). A transport error at jump-off falls back to re-resolving the
-  original chain (mirror rotation / invalidation self-healing); challenge
-  credentials are stripped across endpoints (Basic/Digest are scoped to the
-  original endpoint and are not carried across hosts on a 302 anyway). Multi-source
+  original chain (mirror rotation / invalidation self-healing); at a
+  jump-off whose origin differs from the source entry every credential class is
+  stripped — credential headers, preset Basic, explicit cookie pairs and the 401
+  challenge answer, the same cross-host rule as the manual redirect loop (a 302
+  across hosts carries no Authorization or Cookie anyway; jar and task-store
+  cookies stay domain-matched). Multi-source
   (mirror) tasks conservatively keep re-walking the chain.
 - **The small-task parallel Range fast path** (a taiji core addition; absent on the
   fork): tasks with ≤2 blocks, no resume progress, and connection intent ≥2

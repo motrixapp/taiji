@@ -64,6 +64,20 @@ fn read_config_json(db: &std::path::Path, gid: &Gid) -> String {
     )
 }
 
+/// The `torrent.state` column of one row (`query_row` errors when the
+/// row is gone — callers poll for a state they know will be written).
+fn read_row_state(db: &std::path::Path, gid_hex: &str) -> String {
+    let conn = ok(rusqlite::Connection::open(db), "open db");
+    ok(
+        conn.query_row(
+            "SELECT state FROM torrent WHERE gid = ?1",
+            params![gid_hex],
+            |r| r.get(0),
+        ),
+        "state",
+    )
+}
+
 fn count_rows(db: &std::path::Path) -> i64 {
     let conn = ok(rusqlite::Connection::open(db), "open db");
     ok(

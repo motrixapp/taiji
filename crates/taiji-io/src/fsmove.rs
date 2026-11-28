@@ -62,8 +62,23 @@ pub enum MoveOutcome {
     Copied { bytes: u64 },
     /// A prior commit already landed; the leftover source was removed.
     CommitFinished,
-    /// Source absent and destination present (fully committed earlier).
+    /// Source absent (`NotFound` from the source stat): committed
+    /// earlier, or nothing to move. The destination is not consulted
+    /// here, and the callers commit on any `Ok(_)` — so `NotFound` is
+    /// read as "already moved". Two shapes still fold in: an unmounted
+    /// source volume, and on Windows a non-directory path component
+    /// (`ERROR_PATH_NOT_FOUND` maps to `NotFound` there too; Unix
+    /// answers `ENOTDIR`, which [`move_path`] reports as an error).
     SrcAbsent,
+}
+
+/// Whether a failed source stat means "not there" — the redo's
+/// already-committed / nothing-to-move branch. Every other stat failure
+/// (on Unix a non-directory path component, EACCES, a network mount's
+/// ESTALE or EIO) is a real error: read as absence, it would let the
+/// caller's close-out commit a move that never happened.
+fn is_absent(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound
 }
 
 /// Occupied-directory rename failure detection (the fall-through arm
@@ -151,11 +166,12 @@ fn move_one_file(
 ) -> io::Result<MoveOutcome> {
     let src_meta = match fs::symlink_metadata(winpath::to_fs_path(src)) {
         Ok(m) => m,
-        Err(_) => {
+        Err(error) if is_absent(&error) => {
             // Absent source: committed earlier (destination present) or
             // nothing to move. The caller's journal close-out decides.
             return Ok(MoveOutcome::SrcAbsent);
         }
+        Err(error) => return Err(error),
     };
     if !src_meta.is_file() {
         return Err(io::Error::new(
@@ -266,7 +282,8 @@ pub fn move_path(src: &Path, dst: &Path, tag: &str, mode: MoveMode) -> io::Resul
     }
     let src_meta = match fs::symlink_metadata(winpath::to_fs_path(src)) {
         Ok(m) => m,
-        Err(_) => return Ok(MoveOutcome::SrcAbsent),
+        Err(error) if is_absent(&error) => return Ok(MoveOutcome::SrcAbsent),
+        Err(error) => return Err(error),
     };
     if src_meta.is_file() {
         return move_one_file(src, dst, tag, mode, false);
@@ -468,6 +485,31 @@ mod tests {
         );
         assert_eq!(out, MoveOutcome::SrcAbsent);
         assert_eq!(ok(fs::read(&dst), "fs op"), b"committed");
+    }
+
+    /// Only a genuinely absent source folds into `SrcAbsent`. Any other
+    /// failure to stat the source — here ENOTDIR (a path component that
+    /// is a regular file); in the field EACCES / ESTALE / EIO on a
+    /// network mount — must surface as an error: the caller's close-out
+    /// commits on `Ok(SrcAbsent)`, clearing the journal and switching
+    /// the directory while the payload is still at the old path. Before
+    /// the fix every stat error read as "committed earlier".
+    #[cfg(unix)]
+    #[test]
+    fn source_stat_error_is_not_absence() {
+        let root = tmp_root("stat-error");
+        let blocker = root.join("blocker");
+        write(&blocker, b"a regular file where a directory is expected");
+        let dst = root.join("moved.bin");
+        let err = err_of(
+            move_path(&blocker.join("payload.bin"), &dst, "g13", MoveMode::Auto),
+            "stat error on the source",
+        );
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{err}");
+        assert!(
+            !dst.exists(),
+            "nothing is moved or created on a source stat error"
+        );
     }
 
     #[test]

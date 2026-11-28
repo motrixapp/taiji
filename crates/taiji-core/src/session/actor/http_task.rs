@@ -981,7 +981,7 @@ pub(super) struct HttpLive {
 }
 
 impl HttpLive {
-    fn new(uris: &[String]) -> Self {
+    pub(in crate::session) fn new(uris: &[String]) -> Self {
         HttpLive {
             total_len: AtomicU64::new(0),
             done_bytes: AtomicU64::new(0),
@@ -4199,7 +4199,7 @@ async fn drive_small(
                 match done {
                     Some(Ok((_, Ok(())))) => {}
                     Some(Ok((idx, Err(e)))) => {
-                        first_error.get_or_insert(e);
+                        keep_highest_rank(&mut first_error, e);
                         debug!(target: "taiji::core::http", gid = %gid_hex,
                             range = idx, "small-path range exhausted retries");
                     }
@@ -4207,8 +4207,10 @@ async fn drive_small(
                         // A Range task panic = a task-level fault (the grid
                         // path's worker panic check semantics).
                         run.metrics.note_panic();
-                        first_error
-                            .get_or_insert_with(|| HttpError::Transport(format!("range task: {e}")));
+                        keep_highest_rank(
+                            &mut first_error,
+                            HttpError::Transport(format!("range task: {e}")),
+                        );
                     }
                     None => {}
                 }
@@ -4330,6 +4332,31 @@ async fn drive_small(
         },
     )
     .await
+}
+
+/// Consumption rank of a small-path range failure — the grid path's
+/// order ([`taiji_http::worker::Fatal::rank`]: protocol contradiction
+/// above content restart above everything else), so the task's verdict
+/// is the same whichever path carried the ranges.
+fn small_path_rank(e: &HttpError) -> u8 {
+    match e {
+        HttpError::RangeIgnored | HttpError::BadRange => 2,
+        HttpError::PreconditionFailed => 1,
+        _ => 0,
+    }
+}
+
+/// Settles the failure that decides the task when ranges fail
+/// concurrently: the small path has no coordinator to arbitrate, so the
+/// ranges are joined in completion order and the verdict must not
+/// depend on it. A higher rank replaces the held failure; an equal or
+/// lower rank keeps the first (its detail is as good).
+fn keep_highest_rank(slot: &mut Option<HttpError>, e: HttpError) {
+    match slot {
+        Some(held) if small_path_rank(held) >= small_path_rank(&e) => {}
+        Some(held) => *held = e,
+        None => *slot = Some(e),
+    }
 }
 
 /// Gate acquisition (the worker loop's first step, shared by both arms):
@@ -5707,6 +5734,49 @@ fn redact_uri(uri: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::keep_highest_rank;
+    use taiji_http::error::HttpError;
+
+    /// Concurrent range failures settle by rank, not join order. A 412
+    /// joined after a transient failure must still decide the task (the
+    /// lost restart — a plain "first error wins" — was the bug); a
+    /// protocol contradiction outranks both, as on the grid path; equal
+    /// ranks keep the first failure.
+    #[test]
+    fn small_path_failures_settle_by_rank_not_join_order() {
+        let mut slot = None;
+        keep_highest_rank(&mut slot, HttpError::Transport("reset".into()));
+        keep_highest_rank(&mut slot, HttpError::PreconditionFailed);
+        assert!(
+            matches!(slot, Some(HttpError::PreconditionFailed)),
+            "a 412 joined second must still win the restart: {slot:?}"
+        );
+
+        let mut slot = None;
+        keep_highest_rank(&mut slot, HttpError::PreconditionFailed);
+        keep_highest_rank(&mut slot, HttpError::RangeIgnored);
+        assert!(
+            matches!(slot, Some(HttpError::RangeIgnored)),
+            "a protocol contradiction outranks the 412: {slot:?}"
+        );
+
+        let mut slot = None;
+        keep_highest_rank(&mut slot, HttpError::PreconditionFailed);
+        keep_highest_rank(&mut slot, HttpError::Transport("reset".into()));
+        assert!(
+            matches!(slot, Some(HttpError::PreconditionFailed)),
+            "a lower rank joined later must not displace the verdict: {slot:?}"
+        );
+
+        let mut slot = None;
+        keep_highest_rank(&mut slot, HttpError::Transport("first".into()));
+        keep_highest_rank(&mut slot, HttpError::Transport("second".into()));
+        assert!(
+            matches!(&slot, Some(HttpError::Transport(m)) if m == "first"),
+            "equal ranks keep the first failure: {slot:?}"
+        );
+    }
+
     /// The egress-bind session stamp (`--interface` ->
     /// GlobalOptions.interface): with_session_interface sets the runtime
     /// opts slot and to_client_config projects it onto

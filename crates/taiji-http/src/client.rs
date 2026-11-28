@@ -716,6 +716,33 @@ impl HttpClient {
         .await
     }
 
+    /// Range GET whose first hop already lies outside the caller's
+    /// credential scope — for a caller that lands on `url` without
+    /// walking the redirect chain (the start-URL fast path) and owes
+    /// `url` the cross-endpoint rule from its very first request.
+    /// Every hop is built stripped, exactly as a cross-host 302 would
+    /// have left it: no credential headers, no preset Basic, no
+    /// explicit cookie pairs, no 401 challenge answer. The cookie jar
+    /// and the task cookie store still apply — both are domain-matched
+    /// against the request URL, not against the caller's entry URI.
+    pub async fn get_range_uncredentialed(
+        &self,
+        url: &str,
+        ctx: &RequestCtx,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Followed, HttpError> {
+        self.execute_scoped(
+            self.data_transport(),
+            url,
+            ctx,
+            Some((start, end_inclusive)),
+            self.cfg.identity_encoding,
+            false,
+        )
+        .await
+    }
+
     /// Probe-plane GET (raw headers preserved): the same
     /// redirect/credential/identity policy as [`HttpClient::get_range`],
     /// but through the transport instance with auto-decompression off —
@@ -741,7 +768,8 @@ impl HttpClient {
 
     /// Manual redirect loop. `transport` is chosen by the caller
     /// (data-plane/probe-plane instance; the only difference is
-    /// auto-decompression).
+    /// auto-decompression). The first hop carries the full credential
+    /// scope.
     async fn execute(
         &self,
         transport: &Client,
@@ -749,6 +777,22 @@ impl HttpClient {
         ctx: &RequestCtx,
         range: Option<(u64, u64)>,
         identity_encoding: bool,
+    ) -> Result<Followed, HttpError> {
+        self.execute_scoped(transport, url, ctx, range, identity_encoding, true)
+            .await
+    }
+
+    /// [`HttpClient::execute`] with the first hop's credential scope
+    /// given by the caller: `keep_credentials == false` starts the loop
+    /// already stripped.
+    async fn execute_scoped(
+        &self,
+        transport: &Client,
+        url: &str,
+        ctx: &RequestCtx,
+        range: Option<(u64, u64)>,
+        identity_encoding: bool,
+        keep_credentials: bool,
     ) -> Result<Followed, HttpError> {
         let first =
             Url::parse(url).map_err(|e| HttpError::Transport(format!("invalid url: {e}")))?;
@@ -776,12 +820,13 @@ impl HttpClient {
         // (RedirectLoop), never burning the hop budget into a
         // RedirectLimit misreport.
         let mut visited: HashSet<(String, String, u16, String)> = HashSet::new();
-        // Credential scope: the first hop always carries credentials;
-        // any (scheme, host, port) change strips them, and stripping is
-        // monotonic and irreversible — once stripped, all later hops
-        // (including same-host self-hops and hops back into the
-        // first-hop scope) stay stripped.
-        let mut keep_credentials = true;
+        // Credential scope: the first hop carries credentials unless the
+        // caller starts the loop stripped; any (scheme, host, port)
+        // change strips them, and stripping is monotonic and
+        // irreversible — once stripped, all later hops (including
+        // same-host self-hops and hops back into the first-hop scope)
+        // stay stripped.
+        let mut keep_credentials = keep_credentials;
         let mut hops: u32 = 0;
         // 401 challenge surface: `pending_auth` = the Authorization
         // value to resend (consumed exactly once); `answered` = URLs

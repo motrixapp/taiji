@@ -1061,9 +1061,8 @@ async fn restored_selection_replays_set_file_selection_on_activation() {
     // engine -> the task enters the result table (Error). The assertion
     // face is the tellStopped result table (rejection during activation
     // = the task retires into a DownloadResult — aria2 task-error
-    // semantics; the row state column staying untouched is the existing
-    // shape of this path; this test anchors "the replay really happened
-    // and was rejected by the engine").
+    // semantics); this test anchors "the replay really happened and was
+    // rejected by the engine".
     let (writer2, wjoin2) = ok(PersistWriter::spawn(db.clone()).await, "spawn writer 2");
     let (handle, join) =
         SessionActor::spawn_with_persist(SessionOptions::default(), Some(writer2.clone()));
@@ -1098,11 +1097,140 @@ async fn restored_selection_replays_set_file_selection_on_activation() {
         errored,
         "the task must retire into the result table (Error) — see the log above"
     );
+    // The terminal state must reach the row too (the Ended path's
+    // persist face): left `queued`, the task would revive and fail again
+    // on every restart.
+    let db_for_row = db.clone();
+    wait_until(async || read_row_state(&db_for_row, "80000000000000c1") == "error").await;
+    // The engine spawned ahead of the rejected policy push is stopped:
+    // its Ended forwarder is spawned only after the push, so nothing
+    // else would ever stop it (an orphan announcing, connecting and
+    // writing for the rest of the session, unreachable from the RPC).
+    assert!(
+        super::tasks::activation_rejection_observations()
+            .iter()
+            .any(|entry| entry == "80000000000000c1:cancelled"),
+        "the rejected activation must stop the engine it spawned"
+    );
     handle.shutdown().await;
     let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
     drop(writer2);
     let _ = tokio::time::timeout(Duration::from_secs(2), wjoin2).await;
     let _ = std::fs::remove_file(&db);
+}
+
+/// The slot a failed activation frees is backfilled in the same tick.
+/// `max-concurrent-downloads=1`, a rejected task ahead of a valid one:
+/// the valid task must start with no further command. Before the fix the
+/// failure retired its task and simply returned — nothing pumps an idle
+/// session, so the valid task sat in the queue until an unrelated
+/// command or engine notice happened to arrive.
+#[tokio::test]
+async fn failed_activation_frees_the_slot_for_the_next_task() {
+    let db = tmp_db("p100-backfill");
+    let (writer, wjoin) = ok(PersistWriter::spawn(db.clone()).await, "spawn writer");
+    let dir = temp_dir("p100-backfill");
+    let rejected = build_v2_torrent(&vec![0xDu8; 128 * 1024], &dead_tracker());
+    let valid = build_v2_torrent_named(&vec![0xEu8; 128 * 1024], &dead_tracker(), "v2-valid.bin");
+    let row =
+        |gid: &str, name: &str, pos: i64, cfg_json: String, metadata: Vec<u8>| StoreTorrentRow {
+            gid: gid.into(),
+            name: name.into(),
+            state: "queued".into(),
+            queue_pos: pos,
+            dir: dir.display().to_string(),
+            config_json: cfg_json,
+            kind: "v2".into(),
+            v1_infohash: None,
+            v2_infohash: None,
+            is_private: false,
+            metadata: Some(metadata),
+            error_code: None,
+            error_msg: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+    let rejected_cfg = format!(
+        "{{\"dir\":{:?},\"selected_files\":[99]}}",
+        dir.display().to_string()
+    );
+    let valid_cfg = format!("{{\"dir\":{:?}}}", dir.display().to_string());
+    for r in [
+        row(
+            "80000000000000d1",
+            "p100-backfill-rejected",
+            1,
+            rejected_cfg,
+            rejected,
+        ),
+        row(
+            "80000000000000d2",
+            "p100-backfill-valid",
+            2,
+            valid_cfg,
+            valid,
+        ),
+    ] {
+        assert_eq!(
+            ok(writer.upsert_torrent(r, Vec::new()).await, "row"),
+            taiji_store::persist::PersistOutcome::Written
+        );
+    }
+    drop(writer);
+    let _ = tokio::time::timeout(Duration::from_secs(2), wjoin).await;
+    // Restart: bootstrap queues both; the head is activated first and
+    // rejected (out-of-range selection face).
+    let (writer2, wjoin2) = ok(PersistWriter::spawn(db.clone()).await, "spawn writer 2");
+    let global = GlobalOptions {
+        max_concurrent_downloads: 1,
+        ..Default::default()
+    };
+    let (handle, join) =
+        SessionActor::spawn_with_persist(SessionOptions { global }, Some(writer2.clone()));
+    wait_until(async || {
+        status_list(&call(&handle, SessionCommand::TellActive { keys: vec![] }).await)
+            .iter()
+            .any(|v| v.gid.to_string() == "80000000000000d2")
+    })
+    .await;
+    assert_eq!(
+        status_list(&call(&handle, SessionCommand::TellActive { keys: vec![] }).await).len(),
+        1,
+        "max-concurrent-downloads=1"
+    );
+    // The rejected task is the terminal the other replay test pins
+    // (Error, with the failure note), not a leftover of the active face.
+    let stopped = status_list(
+        &call(
+            &handle,
+            SessionCommand::TellStopped {
+                offset: 0,
+                num: u32::MAX,
+                keys: vec![],
+            },
+        )
+        .await,
+    );
+    let rejected = stopped
+        .iter()
+        .find(|v| v.gid.to_string() == "80000000000000d1")
+        .unwrap_or_else(|| panic!("the rejected task must be in tellStopped: {stopped:?}"));
+    assert_eq!(rejected.status, StatusKind::Error);
+    assert!(
+        rejected
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("file policy rejected")),
+        "the failure note rides with the terminal: {:?}",
+        rejected.error_message
+    );
+    handle.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), join).await;
+    drop(writer2);
+    let _ = tokio::time::timeout(Duration::from_secs(2), wjoin2).await;
+    let _ = std::fs::remove_file(&db);
+    // The valid task's engine wrote its payload under the task dir.
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// e2e: taiji.setFilePriority gating + the -1 <=> selected interlock +

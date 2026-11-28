@@ -438,9 +438,9 @@ fn apply_entry(
             cli.bt_tracker_file = Some(PathBuf::from(value));
         }
         "bt-tracker-apply-existing" => {
-            if let Ok(b) = value.parse::<bool>() {
-                cli.bt_tracker_apply_existing = b;
-            }
+            cli_wins!("bt_tracker_apply_existing");
+            cli.bt_tracker_apply_existing =
+                conf_bool(value).ok_or_else(|| invalid("true|false"))?;
         }
         "peer-id-prefix" => {
             cli_wins!("peer_id_prefix");
@@ -2031,6 +2031,68 @@ mod tests {
             let err = apply_conf_overrides(&m, &mut cli, Path::new("/tmp/t.conf"), &entries);
             assert!(err.is_err(), "{bad} must be rejected");
         }
+    }
+
+    /// Every bool-valued conf key yields to its explicitly given CLI
+    /// flag. The `defaults < conf < CLI` priority is a per-arm obligation
+    /// (`cli_wins!`), and an arm that forgets it silently lets the conf
+    /// override the command line — which is how the hot-apply gate shipped
+    /// (the surface test only pins that each key has an arm). The whole
+    /// bool family is pinned here: a differing conf value must leave the
+    /// parsed CLI untouched.
+    #[test]
+    fn conf_bool_keys_yield_to_explicit_cli_flags() {
+        for key in CONF_KEYS {
+            let dummy = conf_dummy_value(key);
+            if dummy != "true" && dummy != "false" {
+                continue;
+            }
+            let opposite = if dummy == "true" { "false" } else { "true" };
+            let explicit = format!("--{key}={opposite}");
+            let parsed = Cli::command().try_get_matches_from(["taiji", explicit.as_str()]);
+            // The conf entry must carry a value that differs from what
+            // the command line set: the opposite for the explicit form,
+            // `false` for a bare-only flag (true when present).
+            let (m, conf_value) = match parsed {
+                Ok(m) => (m, dummy),
+                Err(_) => (
+                    Cli::command()
+                        .try_get_matches_from(["taiji", &format!("--{key}")])
+                        .unwrap_or_else(|e| panic!("{key} must parse: {e}")),
+                    "false",
+                ),
+            };
+            let mut cli = Cli::from_arg_matches(&m).unwrap_or_else(|e| panic!("{e}"));
+            let before = format!("{cli:?}");
+            let entries = vec![(1usize, (*key).to_string(), conf_value.to_string())];
+            apply_conf_overrides(&m, &mut cli, Path::new("/tmp/t.conf"), &entries)
+                .unwrap_or_else(|e| panic!("{key}: legal conf value rejected: {e}"));
+            assert_eq!(
+                format!("{cli:?}"),
+                before,
+                "conf `{key}` must yield to the explicit CLI flag"
+            );
+        }
+    }
+
+    /// The hot-apply gate's conf value domain is the bool two-state: a
+    /// non-bool literal is rejected like every other bool key (it used to
+    /// be swallowed silently, leaving the default in place).
+    #[test]
+    fn conf_bt_tracker_apply_existing_rejects_non_bool() {
+        let entries = parse_conf_entries("bt-tracker-apply-existing=yes\n");
+        let m = Cli::command()
+            .try_get_matches_from(["taiji"])
+            .unwrap_or_else(|e| panic!("must parse: {e}"));
+        let mut cli = Cli::from_arg_matches(&m).unwrap_or_else(|e| panic!("{e}"));
+        let err = match apply_conf_overrides(&m, &mut cli, Path::new("/tmp/t.conf"), &entries) {
+            Err(e) => e,
+            Ok(()) => panic!("a non-bool value must be rejected"),
+        };
+        assert!(
+            err.contains("bt-tracker-apply-existing"),
+            "the rejection must name the key: {err}"
+        );
     }
 
     /// Domain C decision table: the conf-face writes of the misc

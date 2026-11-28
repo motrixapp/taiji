@@ -2999,18 +2999,30 @@ impl SessionActor {
                 }
             }
         }
-        let mut batch = self.queue.fillup_finalizing();
-        batch.extend(self.queue.fillup_metadata(4));
-        batch.extend(self.queue.fillup(max));
-        if !batch.is_empty() {
+        // The round repeats while it admits anything: an activation that
+        // fails retires its task inside the round and frees the slot it
+        // had just taken, and nothing pumps an idle session — without
+        // the repeat the next waiting task sat until an unrelated
+        // command or engine notice arrived. Each round admits entries
+        // out of the waiting queue (a task an activation requeues is
+        // re-admitted once more at most: its record is then fresh, so
+        // the next failure is terminal), so a round that admits nothing
+        // ends the loop.
+        loop {
+            let mut batch = self.queue.fillup_finalizing();
+            batch.extend(self.queue.fillup_metadata(4));
+            batch.extend(self.queue.fillup(max));
+            if batch.is_empty() {
+                break;
+            }
             debug!(
                 target: "taiji::core::session",
                 active = self.queue.active_len(), spawning = batch.len(),
                 "queue fillup (max-concurrent-downloads = {max})"
             );
-        }
-        for gid in batch {
-            self.activate(gid, None).await;
+            for gid in batch {
+                self.activate(gid, None).await;
+            }
         }
     }
 

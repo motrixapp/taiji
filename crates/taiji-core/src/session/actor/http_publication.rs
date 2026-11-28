@@ -294,21 +294,217 @@ async fn terminal_result(
                 completed_len: len,
             }
         }
-        Ok(None) => {
-            if let Some(record) = live.output.record() {
-                taiji_http::partfile::release_part_claim(&record.intent.part_path);
-                taiji_http::partfile::release_all_final_claims(&record.intent.gid);
+        // Cancel and failure both leave the publication unresolved: the
+        // claims of the record go first (one arm, so the two exits
+        // cannot drift apart).
+        unresolved @ (Ok(None) | Err(_)) => {
+            release_unresolved_claims(live.output.record());
+            match unresolved {
+                Ok(_) => super::http_task::cancelled_row(run, mirror, pause).await,
+                Err(error) => {
+                    super::http_task::fail(
+                        run.persist.as_ref(),
+                        mirror,
+                        crate::session::view::EngineFailure::of_http_error(&error),
+                        error.to_string(),
+                    )
+                    .await
+                }
             }
-            super::http_task::cancelled_row(run, mirror, pause).await
         }
-        Err(error) => {
-            super::http_task::fail(
-                run.persist.as_ref(),
-                mirror,
-                crate::session::view::EngineFailure::of_http_error(&error),
-                error.to_string(),
-            )
-            .await
-        }
+    }
+}
+
+/// The exits that leave a publication unresolved (cancel, failure) own
+/// the release: after the renamePending handover
+/// ([`HandlesClosed::hold_for_pending`]) no Drop is left to release the
+/// `.part` claim, and a finished driver owns no output path. Idempotent —
+/// an exit before the handover runs, the credential's own Drop releases
+/// the `.part` claim too.
+fn release_unresolved_claims(record: Option<PublicationRecord>) {
+    let Some(record) = record else {
+        return;
+    };
+    taiji_http::partfile::release_part_claim(&record.intent.part_path);
+    taiji_http::partfile::release_all_final_claims(&record.intent.gid);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::http_task::{ChainTrace, DriveStop, HttpTaskOpts};
+    use super::*;
+    use crate::session::metrics::SessionMetrics;
+    use std::sync::atomic::AtomicBool;
+    use taiji_domain::gid::Gid;
+    use taiji_http::partfile::{
+        FileAllocation, PartFile, PartOpenPolicy, claim_final_path, final_path_held_by_other,
+        part_claim_held,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    /// The renamePending claim shape under a fresh temp dir: the
+    /// credential handed the `.part` claim over, the final path is
+    /// claimed under the record's gid. Returns the dir and the record
+    /// (the paths to assert on ride with the record's intent).
+    async fn handover_claims(tag: &str) -> (PathBuf, PublicationRecord) {
+        let dir = std::env::temp_dir().join(format!("taiji-http-pub-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let part_path = dir.join("claims.bin.part");
+        let final_path = dir.join("claims.bin");
+        let gid = format!("pub-{tag}-{}", std::process::id());
+        let part = PartFile::open(
+            part_path.clone(),
+            Some(8),
+            PartOpenPolicy::Restart,
+            FileAllocation::None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("open: {e}"));
+        part.close().hold_for_pending();
+        claim_final_path(&final_path, &gid).unwrap_or_else(|e| panic!("claim final: {e}"));
+        assert!(
+            part_claim_held(&part_path),
+            "the handover keeps the .part claim"
+        );
+        assert!(
+            final_path_held_by_other(&final_path, "another-task"),
+            "the final path is claimed under the record's gid"
+        );
+        let record = PublicationRecord {
+            intent: RenameIntent::new(gid, part_path, final_path, 8),
+            phase: PublicationPhase::Publishing,
+            external: false,
+            error: None,
+        };
+        (dir, record)
+    }
+
+    /// Both claims of the record are gone (neither path is conflicted
+    /// for a later task).
+    fn claims_released(record: &PublicationRecord) -> bool {
+        !part_claim_held(&record.intent.part_path)
+            && !final_path_held_by_other(&record.intent.final_path, "another-task")
+    }
+
+    /// The smallest driver context the unresolved exits of
+    /// [`terminal_result`] read: no persistence, no notices.
+    fn toy_run() -> (
+        HttpTaskRun,
+        Arc<HttpLive>,
+        Arc<Mutex<HttpTaskRow>>,
+        Arc<AtomicBool>,
+    ) {
+        let run = HttpTaskRun {
+            notices: None,
+            gid: Gid::from_u64(0x8000_0000_0000_0001),
+            uris: Vec::new(),
+            dir: PathBuf::new(),
+            out: None,
+            restore: None,
+            row_mirror: None,
+            cookies: Vec::new(),
+            task_cookies: taiji_http::cookies::CookieStore::new(),
+            opts: HttpTaskOpts::default(),
+            per_host: taiji_http::perhost::HostCap::default(),
+            queue_pos: 0,
+            persist: None,
+            limiter: None,
+            token: CancellationToken::new(),
+            metrics: Arc::new(SessionMetrics::default()),
+            trace: ChainTrace::with_origin(std::time::Instant::now()),
+        };
+        let live = Arc::new(HttpLive::new(&[]));
+        let mirror = Arc::new(Mutex::new(HttpTaskRow {
+            gid: run.gid.to_string(),
+            url: String::new(),
+            final_url: String::new(),
+            mirrors_json: None,
+            state: TaskPhase::Finalizing.as_v1_str().to_string(),
+            queue_pos: 0,
+            dir: String::new(),
+            out: "claims.bin".into(),
+            config_json: "{}".into(),
+            probe_json: None,
+            validator_digest: None,
+            block_size: 0,
+            block_bitmap: None,
+            block_count: None,
+            total_done: 8,
+            error_code: None,
+            error_msg: None,
+            created_at: 0,
+            updated_at: 0,
+        }));
+        let pause = Arc::new(AtomicBool::new(false));
+        (run, live, mirror, pause)
+    }
+
+    /// The exits themselves (not only the release helper): the driver's
+    /// landing on a failure and on a cancel both release the handover
+    /// claims of the record. Before the fix the failure exit skipped it,
+    /// and once the handover keeps the `.part` claim (instead of the
+    /// credential's Drop dropping it) that left both paths conflicted
+    /// for every later task.
+    #[tokio::test]
+    async fn failure_and_cancel_exits_release_the_handover_claims() {
+        let (run, live, mirror, pause) = toy_run();
+
+        // Failure: the rename stayed refused past its retries.
+        let (dir, record) = handover_claims("landing-fail").await;
+        live.output.set(record.clone());
+        let stop = terminal_result(
+            &run,
+            &live,
+            &mirror,
+            &pause,
+            Err(HttpError::Disk("rename refused".into())),
+            8,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(stop, DriveStop::Failed { .. }),
+            "the failure exit lands the Failed stop"
+        );
+        assert_eq!(
+            crate::lock(&mirror).state,
+            TaskPhase::Error.as_v1_str(),
+            "the failure exit lands the error row state"
+        );
+        assert!(
+            claims_released(&record),
+            "the failure exit must release the .part and final-path claims"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Cancel: the token fired while the publication waited.
+        let (dir, record) = handover_claims("landing-cancel").await;
+        live.output.set(record.clone());
+        let stop = terminal_result(&run, &live, &mirror, &pause, Ok(None), 8, None).await;
+        assert!(matches!(stop, DriveStop::Cancelled));
+        assert!(
+            claims_released(&record),
+            "the cancel exit must release the .part and final-path claims"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The release helper on its own: a record releases both claims, and
+    /// is idempotent with the credential's own Drop (an exit before the
+    /// handover runs releases the `.part` claim there; no record means
+    /// nothing to release).
+    #[tokio::test]
+    async fn release_helper_follows_the_record() {
+        let (dir, record) = handover_claims("helper").await;
+
+        // No record (the exit preceded the first journal write): nothing
+        // to release — the credential's own Drop owns the claim then.
+        release_unresolved_claims(None);
+        assert!(!claims_released(&record), "no record = nothing to release");
+
+        release_unresolved_claims(Some(record.clone()));
+        assert!(claims_released(&record), "the record's claims go");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

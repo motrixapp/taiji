@@ -460,9 +460,11 @@ impl BanBook {
     }
 
     /// Protocol violation bookkeeping (immediate ban; repeated violations
-    /// are idempotent — the first until is kept; an already-banned IP's
-    /// online connections were disconnected at the first ban and new
-    /// connections are filtered by the snapshot).
+    /// are idempotent — the first until is kept). A refusal from the
+    /// ledger means the ban on the IP is in force right now (an expired
+    /// record does not refuse — it is replaced): the offender's
+    /// connection outlived the first enactment, so the IP's connections
+    /// are dropped again, without a new ban record.
     pub(super) async fn violation(
         &mut self,
         v: Violation,
@@ -477,6 +479,9 @@ impl BanBook {
                 .map(|r| r.until)
                 .unwrap_or_else(|| unreachable!("just banned"));
             self.enact(v.ip, &v.reason, until, faces, persist).await;
+        } else if disconnect_ip(faces, v.ip) > 0 {
+            debug!(target: "taiji::core::engine", ip = %v.ip,
+                "banned ip violated again -> disconnecting");
         }
     }
 }

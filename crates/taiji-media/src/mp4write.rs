@@ -203,46 +203,93 @@ fn hdlr_box(handler: &FourCC) -> Vec<u8> {
     box_bytes(b"hdlr", std::mem::take(&mut p.buf))
 }
 
+/// The `mdat` box header for a payload length: the 32-bit size form, or
+/// the 64-bit `largesize` escape (size field = 1, then a u64) once the
+/// box does not fit in 32 bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MdatHeader {
+    /// Bytes the header occupies ahead of the payload.
+    len: u64,
+    /// The box size the header declares (header + payload).
+    size: u64,
+}
+
+impl MdatHeader {
+    fn new(payload_len: u64) -> Self {
+        if payload_len + 8 > u32::MAX as u64 {
+            MdatHeader {
+                len: 16,
+                size: payload_len + 16,
+            }
+        } else {
+            MdatHeader {
+                len: 8,
+                size: payload_len + 8,
+            }
+        }
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        let mut hdr = Sink::default();
+        if self.len == 16 {
+            hdr.u32(1);
+            hdr.raw(b"mdat");
+            hdr.u64(self.size);
+        } else {
+            hdr.u32(self.size as u32);
+            hdr.raw(b"mdat");
+        }
+        out.extend_from_slice(&hdr.buf);
+    }
+}
+
+/// Everything ahead of the `mdat` payload: the faststart boxes and the
+/// header their chunk offsets were resolved against.
+struct MovieHead {
+    ftyp: Vec<u8>,
+    moov: Vec<u8>,
+    mdat: MdatHeader,
+}
+
+/// Two-pass layout for a declared payload length: the moov is measured
+/// with placeholder offsets, then re-serialized against the real mdat
+/// position (one more pass when the stco→co64 switch grows it; entry
+/// counts are fixed, so the size is stable).
+fn movie_head(tracks: &[TrackSpec], meta: &MovieMeta, payload_len: u64) -> MovieHead {
+    let ftyp = ftyp_box();
+    let mdat = MdatHeader::new(payload_len);
+    // Pass 1: measure (placeholder offsets, stco form). The header
+    // length feeds both the end-of-movie probe and the chunk offsets:
+    // above 4 GiB it is 16 bytes (largesize), not 8.
+    let moov_probe = serialize_moov(tracks, meta, 0, false);
+    let end_probe = ftyp.len() as u64 + moov_probe.len() as u64 + mdat.len + payload_len;
+    let use_co64 = end_probe > u32::MAX as u64;
+    // Pass 2: real offsets (re-measure once when co64 flipped the
+    // moov size).
+    let mut mdat_start = ftyp.len() as u64 + moov_probe.len() as u64 + mdat.len;
+    let mut moov = serialize_moov(tracks, meta, mdat_start, use_co64);
+    if use_co64 {
+        mdat_start = ftyp.len() as u64 + moov.len() as u64 + mdat.len;
+        moov = serialize_moov(tracks, meta, mdat_start, use_co64);
+    }
+    MovieHead { ftyp, moov, mdat }
+}
+
 /// Serialize the whole movie.
 ///
 /// Layout: `ftyp, moov, mdat` (faststart by construction). Chunk
 /// layout: one chunk per track, tracks in spec order. The moov's
 /// chunk offsets are movie-file-absolute, so the moov is serialized
 /// twice: once with placeholder offsets to measure its size, then
-/// with the real mdat position (entry counts are fixed, so the size
-/// is stable; the stco→co64 switch grows it by 4 bytes per chunk and
-/// is measured through one extra pass).
+/// with the real mdat position (the `movie_head` sizing pass, which
+/// also accounts for a `mdat` header that grew to 64-bit size).
 pub fn write_progressive(tracks: &[TrackSpec], meta: &MovieMeta, out: &mut Vec<u8>) {
     out.clear();
-    let ftyp = ftyp_box();
     let payload_len: u64 = tracks.iter().map(|t| t.media_data.len() as u64).sum();
-    // Pass 1: measure (placeholder offsets, stco form).
-    let moov_probe = serialize_moov(tracks, meta, 0, false);
-    let end_probe = ftyp.len() as u64 + moov_probe.len() as u64 + 8 + payload_len;
-    let use_co64 = end_probe > u32::MAX as u64;
-    // Pass 2: real offsets (re-measure once when co64 flipped the
-    // moov size).
-    let mut mdat_start = ftyp.len() as u64 + moov_probe.len() as u64 + 8;
-    let mut moov = serialize_moov(tracks, meta, mdat_start, use_co64);
-    if use_co64 {
-        mdat_start = ftyp.len() as u64 + moov.len() as u64 + 8;
-        moov = serialize_moov(tracks, meta, mdat_start, use_co64);
-    }
-    out.extend_from_slice(&ftyp);
-    out.extend_from_slice(&moov);
-    // mdat header: 32-bit size, largesize escape above 4 GiB.
-    if payload_len + 8 > u32::MAX as u64 {
-        let mut hdr = Sink::default();
-        hdr.u32(1);
-        hdr.raw(b"mdat");
-        hdr.u64(payload_len + 16);
-        out.extend_from_slice(&hdr.buf);
-    } else {
-        let mut hdr = Sink::default();
-        hdr.u32((payload_len + 8) as u32);
-        hdr.raw(b"mdat");
-        out.extend_from_slice(&hdr.buf);
-    }
+    let head = movie_head(tracks, meta, payload_len);
+    out.extend_from_slice(&head.ftyp);
+    out.extend_from_slice(&head.moov);
+    head.mdat.write(out);
     for t in tracks {
         out.extend_from_slice(&t.media_data);
     }
@@ -885,5 +932,101 @@ mod tests {
         assert_eq!(scale_units(45_000, 90_000, 1000), 500);
         assert_eq!(scale_units(45_045, 90_000, 1000), 501);
         assert_eq!(scale_units(10, 0, 1000), 0, "zero timescale guards");
+    }
+
+    /// A one-track movie head for a declared payload length. The real
+    /// writer derives the length from the media data; taking it as an
+    /// argument is what makes the >4 GiB arm reachable from a small
+    /// in-memory test.
+    fn one_track_head(payload_len: u64) -> MovieHead {
+        let track = TrackSpec {
+            handler: HANDLER_VIDEO,
+            timescale: 1000,
+            stsd_entry: box_bytes(b"avc1", vec![0; 40]),
+            media_header: bmff::synth_media_header(&HANDLER_VIDEO),
+            dinf: None,
+            tkhd_width_height: Some((320 << 16, 240 << 16)),
+            tkhd_volume: 0,
+            samples: vec![SampleOut {
+                duration: 1000,
+                cts: 0,
+                sync: true,
+            }],
+            sample_sizes: vec![4],
+            media_data: b"AAAA".to_vec(),
+        };
+        movie_head(&[track], &MovieMeta::default(), payload_len)
+    }
+
+    /// The first trak's single chunk offset (`stco` or `co64` entry).
+    fn first_chunk_offset(moov: &[u8]) -> u64 {
+        fn child<'a>(boxes: &[bmff::RawBox<'a>], typ: &[u8; 4]) -> bmff::RawBox<'a> {
+            boxes
+                .iter()
+                .find(|b| b.typ == *typ)
+                .copied()
+                .unwrap_or_else(|| panic!("missing {typ:?}"))
+        }
+        fn be(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+        }
+        let moov_box = &t(moov)[0]; // the whole moov box; descend into its payload
+        let trak = child(&t(moov_box.payload), b"trak");
+        let mdia = child(&t(trak.payload), b"mdia");
+        let minf = child(&t(mdia.payload), b"minf");
+        let stbl = child(&t(minf.payload), b"stbl");
+        let stbl_boxes = t(stbl.payload);
+        if let Some(co64) = stbl_boxes.iter().find(|b| b.typ == *b"co64") {
+            // version/flags + entry_count, then the first u64 entry.
+            return be(&co64.payload[8..16]);
+        }
+        let stco = child(&stbl_boxes, b"stco");
+        be(&stco.payload[8..12])
+    }
+
+    fn t(buf: &[u8]) -> Vec<bmff::RawBox<'_>> {
+        bmff::iter_boxes(buf).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The 32-bit size form holds up to a box size of `u32::MAX`; one
+    /// byte more switches to the 16-byte largesize header.
+    #[test]
+    fn mdat_header_switches_to_largesize_past_32_bits() {
+        let last_32 = u64::from(u32::MAX) - 8;
+        assert_eq!(MdatHeader::new(0), MdatHeader { len: 8, size: 8 });
+        assert_eq!(
+            MdatHeader::new(last_32),
+            MdatHeader {
+                len: 8,
+                size: u64::from(u32::MAX)
+            }
+        );
+        assert_eq!(
+            MdatHeader::new(last_32 + 1),
+            MdatHeader {
+                len: 16,
+                size: last_32 + 1 + 16
+            }
+        );
+    }
+
+    /// Above 4 GiB the mdat header is 16 bytes, and every chunk offset
+    /// must be resolved against that longer header. Before the fix the
+    /// offsets were computed for the 8-byte header, landing 8 bytes ahead
+    /// of the payload — the native probe then rejected the product.
+    #[test]
+    fn largesize_mdat_offsets_against_the_longer_header() {
+        let small = one_track_head(1 << 20);
+        let big = one_track_head(1 << 32);
+        assert_eq!(small.mdat.len, 8, "1 MiB keeps the 32-bit size form");
+        assert_eq!(big.mdat.len, 16, "4 GiB takes the largesize escape");
+        for (what, head) in [("small", &small), ("largesize", &big)] {
+            let payload_start = (head.ftyp.len() + head.moov.len()) as u64 + head.mdat.len;
+            assert_eq!(
+                first_chunk_offset(&head.moov),
+                payload_start,
+                "{what}: the chunk offset must be the real mdat payload start"
+            );
+        }
     }
 }
